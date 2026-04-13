@@ -119,7 +119,8 @@ class TranscriptionService {
                 fileURL.path,
                 "--model", "mlx-community/whisper-large-v3-mlx",
                 "--output-format", "txt",
-                "--output-dir", outputDir.path
+                "--output-dir", outputDir.path,
+                "--condition-on-previous-text", "False"
             ]
             if let langCode = transcriptionLanguage.whisperArgument {
                 arguments += ["--language", langCode]
