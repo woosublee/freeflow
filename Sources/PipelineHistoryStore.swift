@@ -194,6 +194,11 @@ final class PipelineHistoryStore {
                 entity.debugStatus = item.debugStatus
                 entity.customVocabulary = item.customVocabulary
                 entity.audioFileName = item.audioFileName
+                entity.usedLocalTranscription = item.usedLocalTranscription
+                entity.usedContextCapture = item.usedContextCapture
+                entity.usedPostProcessing = item.usedPostProcessing
+                entity.transcriptionLanguageCode = item.transcriptionLanguageCode
+                entity.transcriptFileName = item.transcriptFileName
                 try saveContext()
             } catch {
                 thrownError = error
@@ -263,7 +268,12 @@ final class PipelineHistoryStore {
             postProcessingStatus: entity.postProcessingStatus ?? "",
             debugStatus: entity.debugStatus ?? "",
             customVocabulary: entity.customVocabulary ?? "",
-            audioFileName: entity.audioFileName
+            audioFileName: entity.audioFileName,
+            usedLocalTranscription: entity.usedLocalTranscription,
+            usedContextCapture: entity.usedContextCapture,
+            usedPostProcessing: entity.usedPostProcessing,
+            transcriptionLanguageCode: entity.transcriptionLanguageCode ?? "auto",
+            transcriptFileName: entity.transcriptFileName
         )
     }
 
@@ -287,7 +297,12 @@ final class PipelineHistoryStore {
             makeAttribute(name: "postProcessingStatus", type: .stringAttributeType, isOptional: false),
             makeAttribute(name: "debugStatus", type: .stringAttributeType, isOptional: false),
             makeAttribute(name: "customVocabulary", type: .stringAttributeType, isOptional: false),
-            makeAttribute(name: "audioFileName", type: .stringAttributeType, isOptional: true)
+            makeAttribute(name: "audioFileName", type: .stringAttributeType, isOptional: true),
+            makeAttribute(name: "usedLocalTranscription", type: .booleanAttributeType, isOptional: false),
+            makeAttribute(name: "usedContextCapture", type: .booleanAttributeType, isOptional: false),
+            makeAttribute(name: "usedPostProcessing", type: .booleanAttributeType, isOptional: false),
+            makeAttribute(name: "transcriptionLanguageCode", type: .stringAttributeType, isOptional: true),
+            makeAttribute(name: "transcriptFileName", type: .stringAttributeType, isOptional: true),
         ]
 
         model.entities = [entity]
@@ -318,4 +333,9 @@ final class PipelineHistoryEntry: NSManagedObject {
     @NSManaged var debugStatus: String?
     @NSManaged var customVocabulary: String?
     @NSManaged var audioFileName: String?
+    @NSManaged var usedLocalTranscription: Bool
+    @NSManaged var usedContextCapture: Bool
+    @NSManaged var usedPostProcessing: Bool
+    @NSManaged var transcriptionLanguageCode: String?
+    @NSManaged var transcriptFileName: String?
 }

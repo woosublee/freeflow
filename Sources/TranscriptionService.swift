@@ -11,7 +11,8 @@ class TranscriptionService {
     private let useLocalTranscription: Bool
     private let localWhisperPath: String?
     private let transcriptionLanguage: TranscriptionLanguage
-    private let transcriptionModel = "whisper-large-v3"
+    private let transcriptionModel: TranscriptionModel
+    private let groqTranscriptionModel = "whisper-large-v3"
     private let transcriptionTimeoutSeconds: TimeInterval = 20
     private let localTranscriptionTimeoutSeconds: TimeInterval = 3600
     private let uploadSampleRate = 16_000.0
@@ -23,7 +24,8 @@ class TranscriptionService {
         forceHTTP2: Bool = false,
         useLocalTranscription: Bool = false,
         localWhisperPath: String? = nil,
-        transcriptionLanguage: TranscriptionLanguage = .auto
+        transcriptionLanguage: TranscriptionLanguage = .auto,
+        transcriptionModel: TranscriptionModel = .default
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
@@ -31,6 +33,7 @@ class TranscriptionService {
         self.useLocalTranscription = useLocalTranscription
         self.localWhisperPath = localWhisperPath
         self.transcriptionLanguage = transcriptionLanguage
+        self.transcriptionModel = transcriptionModel
     }
 
     // Validate API key by hitting a lightweight endpoint
@@ -97,7 +100,7 @@ class TranscriptionService {
 
     // Run mlx_whisper locally and return transcript text
     private func transcribeAudioLocally(fileURL: URL) async throws -> String {
-        try await Task.detached(priority: .userInitiated) { [localWhisperPath, transcriptionLanguage] in
+        try await Task.detached(priority: .userInitiated) { [localWhisperPath, transcriptionLanguage, transcriptionModel] in
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             let whisperBin = (localWhisperPath?.isEmpty == false)
                 ? localWhisperPath!
@@ -117,7 +120,7 @@ class TranscriptionService {
 
             var arguments = [
                 fileURL.path,
-                "--model", "mlx-community/whisper-large-v3-mlx",
+                "--model", transcriptionModel.id,
                 "--output-format", "txt",
                 "--output-dir", outputDir.path,
                 "--condition-on-previous-text", "False"
@@ -191,7 +194,7 @@ class TranscriptionService {
         let body = makeMultipartBody(
             audioData: audioData,
             fileName: fileURL.lastPathComponent,
-            model: transcriptionModel,
+            model: groqTranscriptionModel,
             boundary: boundary
         )
 
@@ -237,7 +240,7 @@ class TranscriptionService {
     }
 
     private func transcribeAudioWithCurl(fileURL: URL) async throws -> String {
-        try await Task.detached(priority: .userInitiated) { [apiKey, transcriptionModel] in
+        try await Task.detached(priority: .userInitiated) { [apiKey, groqTranscriptionModel] in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
             process.arguments = [
@@ -248,7 +251,7 @@ class TranscriptionService {
                 "--max-time", String(Int(self.transcriptionTimeoutSeconds)),
                 "\(self.baseURL)/audio/transcriptions",
                 "-H", "Authorization: Bearer \(apiKey)",
-                "-F", "model=\(transcriptionModel)",
+                "-F", "model=\(groqTranscriptionModel)",
                 "-F", "file=@\(fileURL.path);type=\(self.audioContentType(for: fileURL.lastPathComponent))"
             ]
 

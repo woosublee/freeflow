@@ -60,6 +60,7 @@ struct SettingsView: View {
                                           ? Color.accentColor.opacity(0.15)
                                           : Color.clear)
                             )
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
@@ -502,6 +503,24 @@ struct GeneralSettingsView: View {
             }
 
             if appState.useLocalTranscription {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Transcription Model")
+                        .font(.caption.weight(.semibold))
+                    ForEach(TranscriptionModel.all) { model in
+                        ModelRowView(
+                            model: model,
+                            isSelected: appState.transcriptionModel == model,
+                            whisperBin: appState.localWhisperPath.isEmpty
+                                ? "\(FileManager.default.homeDirectoryForCurrentUser.path)/.local/bin/mlx_whisper"
+                                : appState.localWhisperPath
+                        ) {
+                            appState.transcriptionModel = model
+                        }
+                    }
+                }
+            }
+
+            if appState.useLocalTranscription {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Transcription Language")
                         .font(.caption.weight(.semibold))
@@ -927,7 +946,6 @@ struct PromptsSettingsView: View {
                     Text(PostProcessingService.defaultSystemPrompt)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
                 }
                 .padding(10)
                 .background(Color(nsColor: .controlBackgroundColor))
@@ -1031,7 +1049,6 @@ struct PromptsSettingsView: View {
                             .font(.caption.weight(.semibold))
                         Text(output.isEmpty ? "(empty — no output)" : output)
                             .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
                             .padding(8)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(Color.green.opacity(0.08))
@@ -1043,7 +1060,6 @@ struct PromptsSettingsView: View {
                     DisclosureGroup("Full prompt sent") {
                         Text(prompt)
                             .font(.system(.caption2, design: .monospaced))
-                            .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .font(.caption)
@@ -1148,7 +1164,6 @@ struct PromptsSettingsView: View {
                     Text(AppContextService.defaultContextPrompt)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
                 }
                 .padding(10)
                 .background(Color(nsColor: .controlBackgroundColor))
@@ -1244,7 +1259,6 @@ struct PromptsSettingsView: View {
                             .font(.caption.weight(.semibold))
                         Text(output.isEmpty ? "(empty — no output)" : output)
                             .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
                             .padding(8)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(Color.green.opacity(0.08))
@@ -1256,7 +1270,6 @@ struct PromptsSettingsView: View {
                     DisclosureGroup("Full prompt sent") {
                         Text(prompt)
                             .font(.system(.caption2, design: .monospaced))
-                            .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .font(.caption)
@@ -1332,7 +1345,7 @@ struct RunLogView: View {
                 .frame(maxWidth: .infinity)
             } else {
                 ScrollView {
-                    VStack(spacing: 12) {
+                    LazyVStack(spacing: 12) {
                         ForEach(appState.pipelineHistory) { item in
                             RunLogEntryView(item: item)
                         }
@@ -1353,6 +1366,7 @@ struct RunLogEntryView: View {
     @State private var isRetrying = false
     @State private var showContextPrompt = false
     @State private var showPostProcessingPrompt = false
+    @State private var loadedTranscript: String? = nil
 
     private var isError: Bool {
         item.postProcessingStatus.hasPrefix("Error:")
@@ -1366,6 +1380,19 @@ struct RunLogEntryView: View {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         isExpanded.toggle()
                     }
+                    if isExpanded && loadedTranscript == nil {
+                        Task.detached(priority: .userInitiated) {
+                            let text: String
+                            if let fileName = item.transcriptFileName {
+                                text = AppState.loadTranscript(from: fileName) ?? ""
+                            } else {
+                                // 구 항목: rawTranscript 또는 postProcessedTranscript에서 읽기
+                                let t = item.rawTranscript.isEmpty ? item.postProcessedTranscript : item.rawTranscript
+                                text = t
+                            }
+                            await MainActor.run { loadedTranscript = text }
+                        }
+                    }
                 } label: {
                     HStack {
                         if isError {
@@ -1376,6 +1403,44 @@ struct RunLogEntryView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(item.timestamp.formatted(date: .numeric, time: .standard))
                                 .font(.subheadline.weight(.semibold))
+                            HStack(spacing: 4) {
+                                if item.usedLocalTranscription {
+                                    Text("Local")
+                                        .font(.caption2)
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 2)
+                                        .background(Color.blue.opacity(0.15))
+                                        .foregroundStyle(.blue)
+                                        .cornerRadius(4)
+                                }
+                                if !item.usedContextCapture {
+                                    Text("No Context")
+                                        .font(.caption2)
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 2)
+                                        .background(Color.orange.opacity(0.15))
+                                        .foregroundStyle(.orange)
+                                        .cornerRadius(4)
+                                }
+                                if !item.usedPostProcessing {
+                                    Text("No LLM")
+                                        .font(.caption2)
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 2)
+                                        .background(Color.purple.opacity(0.15))
+                                        .foregroundStyle(.purple)
+                                        .cornerRadius(4)
+                                }
+                                if item.transcriptionLanguageCode != "auto" {
+                                    Text(item.transcriptionLanguageCode)
+                                        .font(.caption2)
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 2)
+                                        .background(Color.green.opacity(0.15))
+                                        .foregroundStyle(.green)
+                                        .cornerRadius(4)
+                                }
+                            }
                             Text(item.postProcessedTranscript.isEmpty ? "(no transcript)" : item.postProcessedTranscript)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -1392,10 +1457,19 @@ struct RunLogEntryView: View {
                 }
                 .buttonStyle(.plain)
 
-                if !item.postProcessedTranscript.isEmpty {
+                if !item.postProcessedTranscript.isEmpty || item.transcriptFileName != nil {
                     Button {
+                        let text: String
+                        if let already = loadedTranscript, !already.isEmpty {
+                            text = already
+                        } else if let fileName = item.transcriptFileName,
+                                  let loaded = AppState.loadTranscript(from: fileName) {
+                            text = loaded
+                        } else {
+                            text = item.postProcessedTranscript.isEmpty ? item.rawTranscript : item.postProcessedTranscript
+                        }
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(item.postProcessedTranscript, forType: .string)
+                        NSPasteboard.general.setString(text, forType: .string)
                     } label: {
                         Image(systemName: "doc.on.doc")
                             .font(.caption)
@@ -1487,78 +1561,80 @@ struct RunLogEntryView: View {
                         Text("Pipeline")
                             .font(.caption.weight(.semibold))
 
-                        // Step 1: Context Capture
-                        PipelineStepView(
-                            number: 1,
-                            title: "Capture Context",
-                            content: {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    if let dataURL = item.contextScreenshotDataURL,
-                                       let image = imageFromDataURL(dataURL) {
-                                        Image(nsImage: image)
-                                            .resizable()
-                                            .aspectRatio(contentMode: .fit)
-                                            .frame(maxHeight: 120)
-                                            .cornerRadius(4)
-                                    }
-
-                                    if let prompt = item.contextPrompt, !prompt.isEmpty {
-                                        Button {
-                                            showContextPrompt.toggle()
-                                        } label: {
-                                            HStack(spacing: 4) {
-                                                Text(showContextPrompt ? "Hide Prompt" : "Show Prompt")
-                                                    .font(.caption)
-                                                Image(systemName: showContextPrompt ? "chevron.up" : "chevron.down")
-                                                    .font(.caption2)
-                                            }
-                                        }
-                                        .buttonStyle(.plain)
-                                        .foregroundStyle(Color.accentColor)
-
-                                        if showContextPrompt {
-                                            Text(prompt)
-                                                .font(.system(.caption2, design: .monospaced))
-                                                .textSelection(.enabled)
-                                                .padding(8)
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .background(Color(nsColor: .controlBackgroundColor))
+                        // Step 1: Context Capture (비활성화된 경우 숨김)
+                        if item.usedContextCapture {
+                            PipelineStepView(
+                                number: 1,
+                                title: "Capture Context",
+                                content: {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        if let dataURL = item.contextScreenshotDataURL,
+                                           let image = imageFromDataURL(dataURL) {
+                                            Image(nsImage: image)
+                                                .resizable()
+                                                .aspectRatio(contentMode: .fit)
+                                                .frame(maxHeight: 120)
                                                 .cornerRadius(4)
                                         }
-                                    }
 
-                                    if !item.contextSummary.isEmpty {
-                                        Text(item.contextSummary)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .textSelection(.enabled)
-                                    } else {
-                                        Text("No context captured")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
+                                        if let prompt = item.contextPrompt, !prompt.isEmpty {
+                                            Button {
+                                                showContextPrompt.toggle()
+                                            } label: {
+                                                HStack(spacing: 4) {
+                                                    Text(showContextPrompt ? "Hide Prompt" : "Show Prompt")
+                                                        .font(.caption)
+                                                    Image(systemName: showContextPrompt ? "chevron.up" : "chevron.down")
+                                                        .font(.caption2)
+                                                }
+                                            }
+                                            .buttonStyle(.plain)
+                                            .foregroundStyle(Color.accentColor)
+
+                                            if showContextPrompt {
+                                                Text(prompt)
+                                                    .font(.system(.caption2, design: .monospaced))
+                                                    .padding(8)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                                    .background(Color(nsColor: .controlBackgroundColor))
+                                                    .cornerRadius(4)
+                                            }
+                                        }
+
+                                        if !item.contextSummary.isEmpty {
+                                            Text(item.contextSummary)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Text("No context captured")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
                                     }
                                 }
-                            }
-                        )
+                            )
+                        }
 
                         // Step 2: Transcribe Audio
                         PipelineStepView(
-                            number: 2,
-                            title: "Transcribe Audio",
+                            number: item.usedContextCapture ? 2 : 1,
+                            title: item.usedLocalTranscription ? "Transcribe Audio (Local)" : "Transcribe Audio",
                             content: {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Sent audio to Groq whisper-large-v3")
+                                    Text(item.usedLocalTranscription
+                                         ? "mlx-whisper (\(item.transcriptionLanguageCode))"
+                                         : "Groq whisper-large-v3")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
-                                        .textSelection(.enabled)
-                                    if !item.rawTranscript.isEmpty {
-                                        Text(item.rawTranscript)
+                                    if let text = loadedTranscript, !text.isEmpty {
+                                        TextEditor(text: .constant(text))
                                             .font(.system(.caption, design: .monospaced))
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(Color(nsColor: .controlBackgroundColor))
+                                            .frame(maxHeight: 300)
                                             .cornerRadius(4)
+                                    } else if loadedTranscript == nil {
+                                        Text("Loading...")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
                                     } else {
                                         Text("(empty transcript)")
                                             .font(.caption)
@@ -1568,54 +1644,51 @@ struct RunLogEntryView: View {
                             }
                         )
 
-                        // Step 3: Post-Process
-                        PipelineStepView(
-                            number: 3,
-                            title: "Post-Process",
-                            content: {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text(item.postProcessingStatus)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .textSelection(.enabled)
+                        // Step 3: Post-Process (비활성화된 경우 숨김)
+                        if item.usedPostProcessing {
+                            PipelineStepView(
+                                number: item.usedContextCapture ? 3 : 2,
+                                title: "Post-Process",
+                                content: {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text(item.postProcessingStatus)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
 
-                                    if let prompt = item.postProcessingPrompt, !prompt.isEmpty {
-                                        Button {
-                                            showPostProcessingPrompt.toggle()
-                                        } label: {
-                                            HStack(spacing: 4) {
-                                                Text(showPostProcessingPrompt ? "Hide Prompt" : "Show Prompt")
-                                                    .font(.caption)
-                                                Image(systemName: showPostProcessingPrompt ? "chevron.up" : "chevron.down")
-                                                    .font(.caption2)
+                                        if let prompt = item.postProcessingPrompt, !prompt.isEmpty {
+                                            Button {
+                                                showPostProcessingPrompt.toggle()
+                                            } label: {
+                                                HStack(spacing: 4) {
+                                                    Text(showPostProcessingPrompt ? "Hide Prompt" : "Show Prompt")
+                                                        .font(.caption)
+                                                    Image(systemName: showPostProcessingPrompt ? "chevron.up" : "chevron.down")
+                                                        .font(.caption2)
+                                                }
+                                            }
+                                            .buttonStyle(.plain)
+                                            .foregroundStyle(Color.accentColor)
+
+                                            if showPostProcessingPrompt {
+                                                Text(prompt)
+                                                    .font(.system(.caption2, design: .monospaced))
+                                                    .padding(8)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                                    .background(Color(nsColor: .controlBackgroundColor))
+                                                    .cornerRadius(4)
                                             }
                                         }
-                                        .buttonStyle(.plain)
-                                        .foregroundStyle(Color.accentColor)
 
-                                        if showPostProcessingPrompt {
-                                            Text(prompt)
-                                                .font(.system(.caption2, design: .monospaced))
-                                                .textSelection(.enabled)
-                                                .padding(8)
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .background(Color(nsColor: .controlBackgroundColor))
+                                        if !item.postProcessedTranscript.isEmpty {
+                                            TextEditor(text: .constant(item.postProcessedTranscript))
+                                                .font(.system(.caption, design: .monospaced))
+                                                .frame(maxHeight: 300)
                                                 .cornerRadius(4)
                                         }
                                     }
-
-                                    if !item.postProcessedTranscript.isEmpty {
-                                        Text(item.postProcessedTranscript)
-                                            .font(.system(.caption, design: .monospaced))
-                                            .textSelection(.enabled)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(Color(nsColor: .controlBackgroundColor))
-                                            .cornerRadius(4)
-                                    }
                                 }
-                            }
-                        )
+                            )
+                        }
                     }
                 }
                 .padding(12)
@@ -1733,8 +1806,15 @@ struct AudioPlayerView: View {
 
     private func loadDuration() {
         guard FileManager.default.fileExists(atPath: audioURL.path) else { return }
-        if let p = try? AVAudioPlayer(contentsOf: audioURL) {
-            duration = p.duration
+        Task.detached(priority: .utility) {
+            let asset = AVURLAsset(url: audioURL)
+            let seconds: Double
+            if let cmDuration = try? await asset.load(.duration) {
+                seconds = CMTimeGetSeconds(cmDuration)
+            } else {
+                seconds = 0
+            }
+            await MainActor.run { duration = seconds }
         }
     }
 
@@ -1974,6 +2054,79 @@ struct VoiceMacroEditorView: View {
                 command = m.command
                 payload = m.payload
             }
+        }
+    }
+}
+
+// MARK: - Model Row View
+
+struct ModelRowView: View {
+    let model: TranscriptionModel
+    let isSelected: Bool
+    let whisperBin: String
+    let onSelect: () -> Void
+
+    @State private var isInstalled: Bool = false
+    @State private var isDownloading: Bool = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            // 선택 영역 (설치된 경우만 클릭 가능)
+            Button {
+                onSelect()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                        .foregroundStyle(isInstalled ? Color.accentColor : .secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.displayName)
+                            .font(.caption.weight(isSelected ? .semibold : .regular))
+                        Text(model.description)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!isInstalled)
+
+            // 상태 / 다운로드 버튼
+            if isDownloading {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("Downloading...")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            } else if isInstalled {
+                Label("Installed", systemImage: "checkmark.circle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+            } else {
+                Button("Download") {
+                    isDownloading = true
+                    model.download(whisperBin: whisperBin) { success in
+                        isDownloading = false
+                        isInstalled = success || model.isInstalled
+                    }
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(8)
+        .background(isSelected ? Color.accentColor.opacity(0.08) : Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isSelected ? Color.accentColor.opacity(0.3) : Color.clear, lineWidth: 1)
+        )
+        .onAppear {
+            isInstalled = model.isInstalled
         }
     }
 }

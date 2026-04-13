@@ -14,6 +14,11 @@ struct PipelineHistoryItem: Identifiable, Codable {
     let debugStatus: String
     let customVocabulary: String
     let audioFileName: String?
+    let usedLocalTranscription: Bool
+    let usedContextCapture: Bool
+    let usedPostProcessing: Bool
+    let transcriptionLanguageCode: String
+    let transcriptFileName: String?
 
     init(
         id: UUID = UUID(),
@@ -28,7 +33,12 @@ struct PipelineHistoryItem: Identifiable, Codable {
         postProcessingStatus: String,
         debugStatus: String,
         customVocabulary: String,
-        audioFileName: String? = nil
+        audioFileName: String? = nil,
+        usedLocalTranscription: Bool = false,
+        usedContextCapture: Bool = true,
+        usedPostProcessing: Bool = true,
+        transcriptionLanguageCode: String = "auto",
+        transcriptFileName: String? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -43,5 +53,10 @@ struct PipelineHistoryItem: Identifiable, Codable {
         self.debugStatus = debugStatus
         self.customVocabulary = customVocabulary
         self.audioFileName = audioFileName
+        self.usedLocalTranscription = usedLocalTranscription
+        self.usedContextCapture = usedContextCapture
+        self.usedPostProcessing = usedPostProcessing
+        self.transcriptionLanguageCode = transcriptionLanguageCode
+        self.transcriptFileName = transcriptFileName
     }
 }

@@ -135,6 +135,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let disableAutoPasteStorageKey = "disable_auto_paste"
     private let disablePostProcessingStorageKey = "disable_post_processing"
     private let transcriptionLanguageStorageKey = "transcription_language"
+    private let transcriptionModelStorageKey = "transcription_model"
     private let transcribingIndicatorDelay: TimeInterval = 1.0
     private let clipboardRestoreDelay: TimeInterval = 0.15
     let maxPipelineHistoryCount = 20
@@ -270,6 +271,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @Published var transcriptionModel: TranscriptionModel {
+        didSet {
+            UserDefaults.standard.set(transcriptionModel.id, forKey: transcriptionModelStorageKey)
+        }
+    }
+
     @Published var soundVolume: Float {
         didSet {
             UserDefaults.standard.set(soundVolume, forKey: soundVolumeStorageKey)
@@ -289,6 +296,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @Published var isRecording = false
     @Published var isTranscribing = false
+    @Published var pendingTranscriptionCount = 0
     @Published var retryingItemIDs: Set<UUID> = []
     @Published var lastTranscript: String = ""
     @Published var errorMessage: String?
@@ -328,6 +336,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var contextCaptureTask: Task<AppContext?, Never>?
     private var capturedContext: AppContext?
     private var hasShownScreenshotPermissionAlert = false
+
+    private struct TranscriptionJob {
+        let audioURL: URL
+        let audioFileName: String?
+        let contextTask: Task<AppContext?, Never>?
+        let capturedContext: AppContext?
+    }
+    private var transcriptionJobQueue: [TranscriptionJob] = []
+    private var isProcessingTranscriptionQueue = false
     private var audioDeviceListenerBlock: AudioObjectPropertyListenerBlock?
     private let pipelineHistoryStore = PipelineHistoryStore()
     private let shortcutSessionController = DictationShortcutSessionController()
@@ -366,6 +383,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let disablePostProcessing = UserDefaults.standard.bool(forKey: disablePostProcessingStorageKey)
         let transcriptionLanguage = TranscriptionLanguage.find(
             code: UserDefaults.standard.string(forKey: transcriptionLanguageStorageKey) ?? "ko"
+        )
+        let transcriptionModel = TranscriptionModel.find(
+            id: UserDefaults.standard.string(forKey: transcriptionModelStorageKey) ?? TranscriptionModel.default.id
         )
         let soundVolume: Float = UserDefaults.standard.object(forKey: soundVolumeStorageKey) != nil
             ? UserDefaults.standard.float(forKey: soundVolumeStorageKey) : 1.0
@@ -415,6 +435,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.disableAutoPaste = disableAutoPaste
         self.disablePostProcessing = disablePostProcessing
         self.transcriptionLanguage = transcriptionLanguage
+        self.transcriptionModel = transcriptionModel
         self.soundVolume = soundVolume
         self.voiceMacros = initialMacros
         self.pipelineHistory = savedHistory
@@ -550,6 +571,39 @@ final class AppState: ObservableObject, @unchecked Sendable {
         return audioDir
     }
 
+    static func transcriptStorageDirectory() -> URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "FreeFlow"
+        let dir = appSupport.appendingPathComponent("\(appName)/transcripts", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+
+    static func saveTranscriptFile(rawTranscript: String, postProcessedTranscript: String) -> String? {
+        let fileName = UUID().uuidString + ".txt"
+        let fileURL = transcriptStorageDirectory().appendingPathComponent(fileName)
+        // postProcessedTranscript가 있으면 그걸, 없으면 rawTranscript 저장
+        let content = postProcessedTranscript.isEmpty ? rawTranscript : postProcessedTranscript
+        do {
+            try content.write(to: fileURL, atomically: true, encoding: .utf8)
+            return fileName
+        } catch {
+            return nil
+        }
+    }
+
+    static func deleteTranscriptFile(_ fileName: String) {
+        let fileURL = transcriptStorageDirectory().appendingPathComponent(fileName)
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+
+    static func loadTranscript(from fileName: String) -> String? {
+        let fileURL = transcriptStorageDirectory().appendingPathComponent(fileName)
+        return try? String(contentsOf: fileURL, encoding: .utf8)
+    }
+
     static func saveAudioFile(from tempURL: URL) -> SavedAudioFile? {
         let fileName = UUID().uuidString + ".wav"
         let destURL = audioStorageDirectory().appendingPathComponent(fileName)
@@ -621,7 +675,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             forceHTTP2: forceHTTP2Transcription,
             useLocalTranscription: useLocalTranscription,
             localWhisperPath: localWhisperPath.isEmpty ? nil : localWhisperPath,
-            transcriptionLanguage: transcriptionLanguage
+            transcriptionLanguage: transcriptionLanguage,
+            transcriptionModel: transcriptionModel
         )
         let postProcessingService = PostProcessingService(apiKey: apiKey, baseURL: apiBaseURL)
         let capturedCustomVocabulary = customVocabulary
@@ -979,7 +1034,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func startRecording(triggerMode: RecordingTriggerMode) {
         let t0 = CFAbsoluteTimeGetCurrent()
         os_log(.info, log: recordingLog, "startRecording() entered")
-        guard !isRecording && !isTranscribing else { return }
+        guard !isRecording else { return }
         cancelPendingShortcutStart()
         activeRecordingTriggerMode = triggerMode
         overlayManager.setRecordingTriggerMode(triggerMode, animated: false)
@@ -1207,18 +1262,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         activeRecordingTriggerMode = nil
         audioLevelCancellable?.cancel()
         audioLevelCancellable = nil
-        debugStatusMessage = "Preparing audio"
+
         let sessionContext = capturedContext
         let inFlightContextTask = contextCaptureTask
         capturedContext = nil
         contextCaptureTask = nil
-        lastRawTranscript = ""
-        lastPostProcessedTranscript = ""
-        lastContextSummary = ""
-        lastPostProcessingStatus = ""
-        lastPostProcessingPrompt = ""
-        lastContextScreenshotDataURL = nil
-        lastContextScreenshotStatus = "No screenshot"
 
         guard let fileURL = audioRecorder.stopRecording() else {
             audioRecorder.cleanup()
@@ -1228,28 +1276,40 @@ final class AppState: ObservableObject, @unchecked Sendable {
             overlayManager.dismiss()
             return
         }
+
         let savedAudioFile = Self.saveAudioFile(from: fileURL)
         let transcriptionFileURL = savedAudioFile?.fileURL ?? fileURL
+
+        // 녹음 상태 즉시 해제 → 바로 다음 녹음 가능
         isRecording = false
-        isTranscribing = true
-        statusText = "Transcribing..."
-        debugStatusMessage = "Transcribing audio"
         errorMessage = nil
         let s = NSSound(named: "Pop"); s?.volume = soundVolume; s?.play()
         overlayManager.slideUpToNotch { }
 
-        transcribingIndicatorTask?.cancel()
-        let indicatorDelay = transcribingIndicatorDelay
-        transcribingIndicatorTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: UInt64(indicatorDelay * 1_000_000_000))
-                let shouldShowTranscribing = self?.isTranscribing ?? false
-                guard shouldShowTranscribing else { return }
-                await MainActor.run { [weak self] in
-                    self?.overlayManager.showTranscribing()
-                }
-            } catch {}
-        }
+        // 전사 큐에 추가
+        let job = TranscriptionJob(
+            audioURL: transcriptionFileURL,
+            audioFileName: savedAudioFile?.fileName,
+            contextTask: inFlightContextTask,
+            capturedContext: sessionContext
+        )
+        transcriptionJobQueue.append(job)
+        pendingTranscriptionCount = transcriptionJobQueue.count
+        statusText = pendingTranscriptionCount > 1 ? "Queued (\(pendingTranscriptionCount))" : "Ready"
+
+        processNextTranscriptionJob()
+    }
+
+    private func processNextTranscriptionJob() {
+        guard !isProcessingTranscriptionQueue, !transcriptionJobQueue.isEmpty else { return }
+        isProcessingTranscriptionQueue = true
+
+        let job = transcriptionJobQueue.removeFirst()
+        pendingTranscriptionCount = transcriptionJobQueue.count
+        isTranscribing = true
+        statusText = pendingTranscriptionCount > 0
+            ? "Transcribing... (\(pendingTranscriptionCount) queued)"
+            : "Transcribing..."
 
         let transcriptionService = TranscriptionService(
             apiKey: apiKey,
@@ -1257,121 +1317,91 @@ final class AppState: ObservableObject, @unchecked Sendable {
             forceHTTP2: forceHTTP2Transcription,
             useLocalTranscription: useLocalTranscription,
             localWhisperPath: localWhisperPath.isEmpty ? nil : localWhisperPath,
-            transcriptionLanguage: transcriptionLanguage
+            transcriptionLanguage: transcriptionLanguage,
+            transcriptionModel: transcriptionModel
         )
         let postProcessingService = PostProcessingService(apiKey: apiKey, baseURL: apiBaseURL)
+        let capturedCustomVocabulary = customVocabulary
+        let capturedCustomSystemPrompt = customSystemPrompt
 
         Task {
             do {
-                async let transcript = transcriptionService.transcribe(fileURL: transcriptionFileURL)
-                let rawTranscript = try await transcript
+                let rawTranscript = try await transcriptionService.transcribe(fileURL: job.audioURL)
                 let appContext: AppContext
-                if let sessionContext {
-                    appContext = sessionContext
-                } else if let inFlightContext = await inFlightContextTask?.value {
+                if let ctx = job.capturedContext {
+                    appContext = ctx
+                } else if let inFlightContext = await job.contextTask?.value {
                     appContext = inFlightContext
                 } else {
                     appContext = fallbackContextAtStop()
-                }
-                await MainActor.run { [weak self] in
-                    self?.debugStatusMessage = "Running post-processing"
                 }
                 let (finalTranscript, processingStatus, postProcessingPrompt) = await processTranscript(
                     rawTranscript,
                     context: appContext,
                     postProcessingService: postProcessingService,
-                    customVocabulary: customVocabulary,
-                    customSystemPrompt: customSystemPrompt
+                    customVocabulary: capturedCustomVocabulary,
+                    customSystemPrompt: capturedCustomSystemPrompt
                 )
 
                 await MainActor.run {
+                    let trimmedRaw = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trimmedFinal = finalTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.lastRawTranscript = trimmedRaw
+                    self.lastPostProcessedTranscript = trimmedFinal
+                    self.lastPostProcessingPrompt = postProcessingPrompt
+                    self.lastPostProcessingStatus = processingStatus
                     self.lastContextSummary = appContext.contextSummary
                     self.lastContextScreenshotDataURL = appContext.screenshotDataURL
                     self.lastContextScreenshotStatus = appContext.screenshotError
                         ?? "available (\(appContext.screenshotMimeType ?? "image"))"
-                    let trimmedRawTranscript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let trimmedFinalTranscript = finalTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self.lastPostProcessingPrompt = postProcessingPrompt
-                    self.lastRawTranscript = trimmedRawTranscript
-                    self.lastPostProcessedTranscript = trimmedFinalTranscript
-                    self.lastPostProcessingStatus = processingStatus
                     self.recordPipelineHistoryEntry(
-                        rawTranscript: trimmedRawTranscript,
-                        postProcessedTranscript: trimmedFinalTranscript,
+                        rawTranscript: trimmedRaw,
+                        postProcessedTranscript: trimmedFinal,
                         postProcessingPrompt: postProcessingPrompt,
                         context: appContext,
                         processingStatus: processingStatus,
-                        audioFileName: savedAudioFile?.fileName
+                        audioFileName: job.audioFileName
                     )
-                    self.transcribingIndicatorTask?.cancel()
-                    self.transcribingIndicatorTask = nil
-                    self.lastTranscript = trimmedFinalTranscript
+                    self.lastTranscript = trimmedFinal
                     self.isTranscribing = false
+                    self.isProcessingTranscriptionQueue = false
                     self.debugStatusMessage = "Done"
-                    let completionStatusText = self.disableAutoPaste ? "Copied to clipboard!" : (self.preserveClipboard ? "Pasted at cursor!" : "Copied to clipboard!")
 
-                    if trimmedFinalTranscript.isEmpty {
-                        self.statusText = "Nothing to transcribe"
-                        self.overlayManager.dismiss()
-                    } else {
-                        self.statusText = completionStatusText
-                        self.overlayManager.showDone()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-                            self.overlayManager.dismiss()
-                        }
-
-                        if self.disableAutoPaste {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(trimmedFinalTranscript, forType: .string)
-                        } else {
-                            let pendingClipboardRestore = self.writeTranscriptToPasteboard(trimmedFinalTranscript)
-                            self.pasteAtCursorWhenShortcutReleased {
-                                self.restoreClipboardIfNeeded(pendingClipboardRestore)
-                            }
+                    if !trimmedFinal.isEmpty && !self.disableAutoPaste {
+                        let pendingClipboardRestore = self.writeTranscriptToPasteboard(trimmedFinal)
+                        self.pasteAtCursorWhenShortcutReleased {
+                            self.restoreClipboardIfNeeded(pendingClipboardRestore)
                         }
                     }
 
                     self.audioRecorder.cleanup()
-
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                        if self.statusText == completionStatusText || self.statusText == "Nothing to transcribe" {
-                            self.statusText = "Ready"
-                        }
-                    }
+                    self.processNextTranscriptionJob()
                 }
             } catch {
                 let resolvedContext: AppContext
-                if let sessionContext {
-                    resolvedContext = sessionContext
-                } else if let inFlightContext = await inFlightContextTask?.value {
+                if let ctx = job.capturedContext {
+                    resolvedContext = ctx
+                } else if let inFlightContext = await job.contextTask?.value {
                     resolvedContext = inFlightContext
                 } else {
                     resolvedContext = fallbackContextAtStop()
                 }
                 await MainActor.run {
-                    self.transcribingIndicatorTask?.cancel()
-                    self.transcribingIndicatorTask = nil
                     self.errorMessage = error.localizedDescription
                     self.isTranscribing = false
+                    self.isProcessingTranscriptionQueue = false
                     self.statusText = "Error"
                     self.audioRecorder.cleanup()
                     self.overlayManager.dismiss()
-                    self.lastPostProcessedTranscript = ""
-                    self.lastRawTranscript = ""
-                    self.lastContextSummary = ""
-                    self.lastPostProcessingStatus = "Error: \(error.localizedDescription)"
-                    self.lastPostProcessingPrompt = ""
-                    self.lastContextScreenshotDataURL = resolvedContext.screenshotDataURL
-                    self.lastContextScreenshotStatus = resolvedContext.screenshotError
-                        ?? "available (\(resolvedContext.screenshotMimeType ?? "image"))"
                     self.recordPipelineHistoryEntry(
                         rawTranscript: "",
                         postProcessedTranscript: "",
                         postProcessingPrompt: "",
                         context: resolvedContext,
                         processingStatus: "Error: \(error.localizedDescription)",
-                        audioFileName: savedAudioFile?.fileName
+                        audioFileName: job.audioFileName
                     )
+                    self.processNextTranscriptionJob()
                 }
             }
         }
@@ -1385,9 +1415,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         processingStatus: String,
         audioFileName: String? = nil
     ) {
+        let transcriptFileName = Self.saveTranscriptFile(
+            rawTranscript: rawTranscript,
+            postProcessedTranscript: postProcessedTranscript
+        )
         let newEntry = PipelineHistoryItem(
             timestamp: Date(),
-            rawTranscript: rawTranscript,
+            rawTranscript: "",
             postProcessedTranscript: postProcessedTranscript,
             postProcessingPrompt: postProcessingPrompt,
             contextSummary: context.contextSummary,
@@ -1398,7 +1432,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
             postProcessingStatus: processingStatus,
             debugStatus: debugStatusMessage,
             customVocabulary: customVocabulary,
-            audioFileName: audioFileName
+            audioFileName: audioFileName,
+            usedLocalTranscription: useLocalTranscription,
+            usedContextCapture: !disableContextCapture,
+            usedPostProcessing: !disablePostProcessing,
+            transcriptionLanguageCode: transcriptionLanguage.code,
+            transcriptFileName: transcriptFileName
         )
         do {
             let removedAudioFileNames = try pipelineHistoryStore.append(newEntry, maxCount: maxPipelineHistoryCount)
