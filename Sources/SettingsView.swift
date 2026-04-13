@@ -482,6 +482,106 @@ struct GeneralSettingsView: View {
                     .toggleStyle(.checkbox)
                     .labelsHidden()
             }
+
+            Divider()
+
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Use Local Transcription (mlx-whisper)")
+                        .font(.caption.weight(.semibold))
+                    Text("Runs whisper-large-v3 locally on your Mac. No file size limit. Requires mlx-whisper installed via pipx.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                Toggle("", isOn: $appState.useLocalTranscription)
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+            }
+
+            if appState.useLocalTranscription {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Transcription Language")
+                        .font(.caption.weight(.semibold))
+                    Picker("", selection: $appState.transcriptionLanguage) {
+                        ForEach(TranscriptionLanguage.all) { lang in
+                            Text(lang.displayName).tag(lang)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 200, alignment: .leading)
+                }
+            }
+
+            if appState.useLocalTranscription {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("mlx_whisper Path (optional)")
+                        .font(.caption.weight(.semibold))
+                    Text("Leave empty to use the default path (~/.local/bin/mlx_whisper).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("~/.local/bin/mlx_whisper", text: $appState.localWhisperPath)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                }
+            }
+
+            Divider()
+
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Disable Post-Processing")
+                        .font(.caption.weight(.semibold))
+                    Text("Skip LLM cleanup. Raw transcript is used as-is. No API call is made for post-processing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                Toggle("", isOn: $appState.disablePostProcessing)
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+            }
+
+            Divider()
+
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Disable Auto Paste")
+                        .font(.caption.weight(.semibold))
+                    Text("Transcription will be copied to clipboard only. Paste manually when needed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                Toggle("", isOn: $appState.disableAutoPaste)
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+            }
+
+            Divider()
+
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Disable Context Capture")
+                        .font(.caption.weight(.semibold))
+                    Text("Skip screen recording and app context detection. Transcription will not adapt to the current app. Screen Recording permission is not required.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                Toggle("", isOn: $appState.disableContextCapture)
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+            }
         }
     }
 
@@ -1291,6 +1391,21 @@ struct RunLogEntryView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+
+                if !item.postProcessedTranscript.isEmpty {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(item.postProcessedTranscript, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy transcript")
+                }
 
                 if isError && item.audioFileName != nil {
                     Button {

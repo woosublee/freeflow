@@ -8,15 +8,29 @@ class TranscriptionService {
     private let apiKey: String
     private let baseURL: String
     private let forceHTTP2: Bool
+    private let useLocalTranscription: Bool
+    private let localWhisperPath: String?
+    private let transcriptionLanguage: TranscriptionLanguage
     private let transcriptionModel = "whisper-large-v3"
     private let transcriptionTimeoutSeconds: TimeInterval = 20
+    private let localTranscriptionTimeoutSeconds: TimeInterval = 3600
     private let uploadSampleRate = 16_000.0
     private let uploadChannelCount: AVAudioChannelCount = 1
 
-    init(apiKey: String, baseURL: String = "https://api.groq.com/openai/v1", forceHTTP2: Bool = false) {
+    init(
+        apiKey: String,
+        baseURL: String = "https://api.groq.com/openai/v1",
+        forceHTTP2: Bool = false,
+        useLocalTranscription: Bool = false,
+        localWhisperPath: String? = nil,
+        transcriptionLanguage: TranscriptionLanguage = .auto
+    ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.forceHTTP2 = forceHTTP2
+        self.useLocalTranscription = useLocalTranscription
+        self.localWhisperPath = localWhisperPath
+        self.transcriptionLanguage = transcriptionLanguage
     }
 
     // Validate API key by hitting a lightweight endpoint
@@ -38,6 +52,28 @@ class TranscriptionService {
 
     // Upload audio file, submit for transcription, poll until done, return text
     func transcribe(fileURL: URL) async throws -> String {
+        if useLocalTranscription {
+            return try await withThrowingTaskGroup(of: String.self) { group in
+                group.addTask { [weak self] in
+                    guard let self else {
+                        throw TranscriptionError.submissionFailed("Service deallocated")
+                    }
+                    return try await self.transcribeAudioLocally(fileURL: fileURL)
+                }
+
+                group.addTask {
+                    try await Task.sleep(nanoseconds: UInt64(self.localTranscriptionTimeoutSeconds * 1_000_000_000))
+                    throw TranscriptionError.transcriptionTimedOut(self.localTranscriptionTimeoutSeconds)
+                }
+
+                guard let result = try await group.next() else {
+                    throw TranscriptionError.submissionFailed("No transcription result")
+                }
+                group.cancelAll()
+                return result
+            }
+        }
+
         return try await withThrowingTaskGroup(of: String.self) { group in
             group.addTask { [weak self] in
                 guard let self else {
@@ -57,6 +93,78 @@ class TranscriptionService {
             group.cancelAll()
             return result
         }
+    }
+
+    // Run mlx_whisper locally and return transcript text
+    private func transcribeAudioLocally(fileURL: URL) async throws -> String {
+        try await Task.detached(priority: .userInitiated) { [localWhisperPath, transcriptionLanguage] in
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            let whisperBin = (localWhisperPath?.isEmpty == false)
+                ? localWhisperPath!
+                : "\(home)/.local/bin/mlx_whisper"
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: whisperBin)
+            process.environment = [
+                "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\(home)/.local/bin",
+                "HOME": home
+            ]
+
+            let outputDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: outputDir) }
+
+            var arguments = [
+                fileURL.path,
+                "--model", "mlx-community/whisper-large-v3-mlx",
+                "--output-format", "txt",
+                "--output-dir", outputDir.path
+            ]
+            if let langCode = transcriptionLanguage.whisperArgument {
+                arguments += ["--language", langCode]
+            }
+            process.arguments = arguments
+
+            let stdout = Pipe()
+            let stderr = Pipe()
+            process.standardOutput = stdout
+            process.standardError = stderr
+
+            do {
+                try process.run()
+            } catch {
+                throw TranscriptionError.submissionFailed("mlx_whisper not found at \(whisperBin). Install with: pipx install mlx-whisper")
+            }
+
+            process.waitUntilExit()
+
+            guard process.terminationStatus == 0 else {
+                let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+                let errorText = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                throw TranscriptionError.submissionFailed("mlx_whisper failed (exit \(process.terminationStatus)): \(errorText)")
+            }
+
+            // mlx_whisper outputs a .txt file with the same name as the input
+            let inputName = fileURL.deletingPathExtension().lastPathComponent
+            let outputFile = outputDir.appendingPathComponent(inputName).appendingPathExtension("txt")
+
+            guard let text = try? String(contentsOf: outputFile, encoding: .utf8) else {
+                // fallback: read stdout
+                let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+                let outputText = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !outputText.isEmpty else {
+                    throw TranscriptionError.pollFailed("mlx_whisper produced no output")
+                }
+                return outputText
+            }
+
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw TranscriptionError.pollFailed("mlx_whisper produced empty transcript")
+            }
+            return trimmed
+        }.value
     }
 
     // Send audio file for transcription and return text

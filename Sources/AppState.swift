@@ -129,6 +129,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let forceHTTP2TranscriptionStorageKey = "force_http2_transcription"
     private let soundVolumeStorageKey = "sound_volume"
     private let voiceMacrosStorageKey = "voice_macros"
+    private let useLocalTranscriptionStorageKey = "use_local_transcription"
+    private let localWhisperPathStorageKey = "local_whisper_path"
+    private let disableContextCaptureStorageKey = "disable_context_capture"
+    private let disableAutoPasteStorageKey = "disable_auto_paste"
+    private let disablePostProcessingStorageKey = "disable_post_processing"
+    private let transcriptionLanguageStorageKey = "transcription_language"
     private let transcribingIndicatorDelay: TimeInterval = 1.0
     private let clipboardRestoreDelay: TimeInterval = 0.15
     let maxPipelineHistoryCount = 20
@@ -228,6 +234,42 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @Published var useLocalTranscription: Bool {
+        didSet {
+            UserDefaults.standard.set(useLocalTranscription, forKey: useLocalTranscriptionStorageKey)
+        }
+    }
+
+    @Published var localWhisperPath: String {
+        didSet {
+            UserDefaults.standard.set(localWhisperPath, forKey: localWhisperPathStorageKey)
+        }
+    }
+
+    @Published var disableContextCapture: Bool {
+        didSet {
+            UserDefaults.standard.set(disableContextCapture, forKey: disableContextCaptureStorageKey)
+        }
+    }
+
+    @Published var disableAutoPaste: Bool {
+        didSet {
+            UserDefaults.standard.set(disableAutoPaste, forKey: disableAutoPasteStorageKey)
+        }
+    }
+
+    @Published var disablePostProcessing: Bool {
+        didSet {
+            UserDefaults.standard.set(disablePostProcessing, forKey: disablePostProcessingStorageKey)
+        }
+    }
+
+    @Published var transcriptionLanguage: TranscriptionLanguage {
+        didSet {
+            UserDefaults.standard.set(transcriptionLanguage.code, forKey: transcriptionLanguageStorageKey)
+        }
+    }
+
     @Published var soundVolume: Float {
         didSet {
             UserDefaults.standard.set(soundVolume, forKey: soundVolumeStorageKey)
@@ -317,6 +359,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
             ? true
             : UserDefaults.standard.bool(forKey: preserveClipboardStorageKey)
         let forceHTTP2Transcription = UserDefaults.standard.bool(forKey: forceHTTP2TranscriptionStorageKey)
+        let useLocalTranscription = UserDefaults.standard.bool(forKey: useLocalTranscriptionStorageKey)
+        let localWhisperPath = UserDefaults.standard.string(forKey: localWhisperPathStorageKey) ?? ""
+        let disableContextCapture = UserDefaults.standard.bool(forKey: disableContextCaptureStorageKey)
+        let disableAutoPaste = UserDefaults.standard.bool(forKey: disableAutoPasteStorageKey)
+        let disablePostProcessing = UserDefaults.standard.bool(forKey: disablePostProcessingStorageKey)
+        let transcriptionLanguage = TranscriptionLanguage.find(
+            code: UserDefaults.standard.string(forKey: transcriptionLanguageStorageKey) ?? "ko"
+        )
         let soundVolume: Float = UserDefaults.standard.object(forKey: soundVolumeStorageKey) != nil
             ? UserDefaults.standard.float(forKey: soundVolumeStorageKey) : 1.0
         
@@ -359,6 +409,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.shortcutStartDelay = shortcutStartDelay
         self.preserveClipboard = preserveClipboard
         self.forceHTTP2Transcription = forceHTTP2Transcription
+        self.useLocalTranscription = useLocalTranscription
+        self.localWhisperPath = localWhisperPath
+        self.disableContextCapture = disableContextCapture
+        self.disableAutoPaste = disableAutoPaste
+        self.disablePostProcessing = disablePostProcessing
+        self.transcriptionLanguage = transcriptionLanguage
         self.soundVolume = soundVolume
         self.voiceMacros = initialMacros
         self.pipelineHistory = savedHistory
@@ -562,7 +618,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let transcriptionService = TranscriptionService(
             apiKey: apiKey,
             baseURL: apiBaseURL,
-            forceHTTP2: forceHTTP2Transcription
+            forceHTTP2: forceHTTP2Transcription,
+            useLocalTranscription: useLocalTranscription,
+            localWhisperPath: localWhisperPath.isEmpty ? nil : localWhisperPath,
+            transcriptionLanguage: transcriptionLanguage
         )
         let postProcessingService = PostProcessingService(apiKey: apiKey, baseURL: apiBaseURL)
         let capturedCustomVocabulary = customVocabulary
@@ -575,20 +634,26 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 let finalTranscript: String
                 let processingStatus: String
                 let postProcessingPrompt: String
-                do {
-                    let postProcessingResult = try await postProcessingService.postProcess(
-                        transcript: rawTranscript,
-                        context: restoredContext,
-                        customVocabulary: capturedCustomVocabulary,
-                        customSystemPrompt: capturedCustomSystemPrompt
-                    )
-                    finalTranscript = postProcessingResult.transcript
-                    processingStatus = "Post-processing succeeded (retried)"
-                    postProcessingPrompt = postProcessingResult.prompt
-                } catch {
+                if disablePostProcessing {
                     finalTranscript = rawTranscript
-                    processingStatus = "Post-processing failed on retry, using raw transcript"
+                    processingStatus = "Post-processing disabled"
                     postProcessingPrompt = ""
+                } else {
+                    do {
+                        let postProcessingResult = try await postProcessingService.postProcess(
+                            transcript: rawTranscript,
+                            context: restoredContext,
+                            customVocabulary: capturedCustomVocabulary,
+                            customSystemPrompt: capturedCustomSystemPrompt
+                        )
+                        finalTranscript = postProcessingResult.transcript
+                        processingStatus = "Post-processing succeeded (retried)"
+                        postProcessingPrompt = postProcessingResult.prompt
+                    } catch {
+                        finalTranscript = rawTranscript
+                        processingStatus = "Post-processing failed on retry, using raw transcript"
+                        postProcessingPrompt = ""
+                    }
                 }
 
                 await MainActor.run {
@@ -1117,7 +1182,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
             os_log(.info, log: recordingLog, "Voice macro triggered: %{public}@", macro.command)
             return (macro.payload, "Voice macro used: \(macro.command)", "")
         }
-        
+
+        if disablePostProcessing {
+            return (rawTranscript, "Post-processing disabled", "")
+        }
+
         do {
             let result = try await postProcessingService.postProcess(
                 transcript: rawTranscript,
@@ -1185,7 +1254,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let transcriptionService = TranscriptionService(
             apiKey: apiKey,
             baseURL: apiBaseURL,
-            forceHTTP2: forceHTTP2Transcription
+            forceHTTP2: forceHTTP2Transcription,
+            useLocalTranscription: useLocalTranscription,
+            localWhisperPath: localWhisperPath.isEmpty ? nil : localWhisperPath,
+            transcriptionLanguage: transcriptionLanguage
         )
         let postProcessingService = PostProcessingService(apiKey: apiKey, baseURL: apiBaseURL)
 
@@ -1236,7 +1308,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     self.lastTranscript = trimmedFinalTranscript
                     self.isTranscribing = false
                     self.debugStatusMessage = "Done"
-                    let completionStatusText = self.preserveClipboard ? "Pasted at cursor!" : "Copied to clipboard!"
+                    let completionStatusText = self.disableAutoPaste ? "Copied to clipboard!" : (self.preserveClipboard ? "Pasted at cursor!" : "Copied to clipboard!")
 
                     if trimmedFinalTranscript.isEmpty {
                         self.statusText = "Nothing to transcribe"
@@ -1248,9 +1320,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             self.overlayManager.dismiss()
                         }
 
-                        let pendingClipboardRestore = self.writeTranscriptToPasteboard(trimmedFinalTranscript)
-                        self.pasteAtCursorWhenShortcutReleased {
-                            self.restoreClipboardIfNeeded(pendingClipboardRestore)
+                        if self.disableAutoPaste {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(trimmedFinalTranscript, forType: .string)
+                        } else {
+                            let pendingClipboardRestore = self.writeTranscriptToPasteboard(trimmedFinalTranscript)
+                            self.pasteAtCursorWhenShortcutReleased {
+                                self.restoreClipboardIfNeeded(pendingClipboardRestore)
+                            }
                         }
                     }
 
@@ -1337,6 +1414,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func startContextCapture() {
         contextCaptureTask?.cancel()
         capturedContext = nil
+
+        guard !disableContextCapture else {
+            lastContextSummary = "Context capture disabled"
+            lastPostProcessingStatus = "Context capture disabled"
+            lastContextScreenshotDataURL = nil
+            lastContextScreenshotStatus = "Disabled"
+            return
+        }
+
         lastContextSummary = "Collecting app context..."
         lastPostProcessingStatus = ""
         lastContextScreenshotDataURL = nil

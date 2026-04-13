@@ -475,6 +475,12 @@ struct SetupView: View {
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
 
+            Text("This permission is optional. You can skip and grant it later in Settings if needed.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.orange)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+
             HStack {
                 Image(systemName: "camera.viewfinder")
                     .frame(width: 24)
@@ -827,7 +833,7 @@ struct SetupView: View {
         case .accessibility:
             return accessibilityGranted
         case .screenRecording:
-            return appState.hasScreenRecordingPermission
+            return true
         case .testTranscription:
             return testPhase == .done && !testTranscript.isEmpty && testError == nil
         default:
