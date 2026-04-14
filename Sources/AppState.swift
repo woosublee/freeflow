@@ -127,6 +127,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let shortcutStartDelayStorageKey = "shortcut_start_delay"
     private let preserveClipboardStorageKey = "preserve_clipboard"
     private let forceHTTP2TranscriptionStorageKey = "force_http2_transcription"
+    private let alertSoundsEnabledStorageKey = "alert_sounds_enabled"
     private let soundVolumeStorageKey = "sound_volume"
     private let voiceMacrosStorageKey = "voice_macros"
     private let useLocalTranscriptionStorageKey = "use_local_transcription"
@@ -232,6 +233,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var forceHTTP2Transcription: Bool {
         didSet {
             UserDefaults.standard.set(forceHTTP2Transcription, forKey: forceHTTP2TranscriptionStorageKey)
+        }
+    }
+
+    @Published var alertSoundsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(alertSoundsEnabled, forKey: alertSoundsEnabledStorageKey)
         }
     }
 
@@ -389,6 +396,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
         let soundVolume: Float = UserDefaults.standard.object(forKey: soundVolumeStorageKey) != nil
             ? UserDefaults.standard.float(forKey: soundVolumeStorageKey) : 1.0
+        let alertSoundsEnabled = UserDefaults.standard.object(forKey: alertSoundsEnabledStorageKey) != nil
+            ? UserDefaults.standard.bool(forKey: alertSoundsEnabledStorageKey)
+            : soundVolume > 0
         
         let initialMacros: [VoiceMacro]
         if let data = UserDefaults.standard.data(forKey: "voice_macros"),
@@ -429,6 +439,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.shortcutStartDelay = shortcutStartDelay
         self.preserveClipboard = preserveClipboard
         self.forceHTTP2Transcription = forceHTTP2Transcription
+        self.alertSoundsEnabled = alertSoundsEnabled
         self.useLocalTranscription = useLocalTranscription
         self.localWhisperPath = localWhisperPath
         self.disableContextCapture = disableContextCapture
@@ -1118,7 +1129,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     self.overlayManager.showRecording(mode: self.activeRecordingTriggerMode ?? triggerMode)
                 }
                 overlayShown = true
-                let s = NSSound(named: "Tink"); s?.volume = self.soundVolume; s?.play()
+                self.playAlertSound(named: "Tink")
             }
         }
 
@@ -1217,6 +1228,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
         return strippedPunctuation.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    func playAlertSound(named name: String) {
+        guard alertSoundsEnabled else { return }
+
+        let sound = NSSound(named: name)
+        sound?.volume = soundVolume
+        sound?.play()
+    }
+
     private func findMatchingMacro(for transcript: String) -> VoiceMacro? {
         let normalizedTranscript = normalize(transcript)
         guard !normalizedTranscript.isEmpty else { return nil }
@@ -1283,7 +1302,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         // 녹음 상태 즉시 해제 → 바로 다음 녹음 가능
         isRecording = false
         errorMessage = nil
-        let s = NSSound(named: "Pop"); s?.volume = soundVolume; s?.play()
+        playAlertSound(named: "Pop")
         overlayManager.slideUpToNotch { }
 
         // 전사 큐에 추가
@@ -1567,7 +1586,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             statusText = "Screenshot Required"
             overlayManager.dismiss()
 
-            let s = NSSound(named: "Basso"); s?.volume = soundVolume; s?.play()
+            playAlertSound(named: "Basso")
             showScreenshotPermissionAlert(message: message)
         }
         // Non-permission errors (transient failures) — continue recording without context
