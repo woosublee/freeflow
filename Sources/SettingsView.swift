@@ -470,24 +470,6 @@ struct GeneralSettingsView: View {
 
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Force HTTP/2 for Transcription")
-                        .font(.caption.weight(.semibold))
-                    Text("Uses `curl --http2` for audio transcription uploads. Leave this off unless the default transport is failing.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 0)
-
-                Toggle("", isOn: $appState.forceHTTP2Transcription)
-                    .toggleStyle(.checkbox)
-                    .labelsHidden()
-            }
-
-            Divider()
-
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
                     Text("Use Local Transcription (mlx-whisper)")
                         .font(.caption.weight(.semibold))
                     Text("Runs whisper-large-v3 locally on your Mac. No file size limit. Requires mlx-whisper installed via pipx.")

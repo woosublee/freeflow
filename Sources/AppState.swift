@@ -126,7 +126,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let customContextPromptLastModifiedStorageKey = "custom_context_prompt_last_modified"
     private let shortcutStartDelayStorageKey = "shortcut_start_delay"
     private let preserveClipboardStorageKey = "preserve_clipboard"
-    private let forceHTTP2TranscriptionStorageKey = "force_http2_transcription"
     private let alertSoundsEnabledStorageKey = "alert_sounds_enabled"
     private let soundVolumeStorageKey = "sound_volume"
     private let voiceMacrosStorageKey = "voice_macros"
@@ -227,12 +226,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var preserveClipboard: Bool {
         didSet {
             UserDefaults.standard.set(preserveClipboard, forKey: preserveClipboardStorageKey)
-        }
-    }
-
-    @Published var forceHTTP2Transcription: Bool {
-        didSet {
-            UserDefaults.standard.set(forceHTTP2Transcription, forKey: forceHTTP2TranscriptionStorageKey)
         }
     }
 
@@ -362,6 +355,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var isCapturingShortcut = false
 
     init() {
+        UserDefaults.standard.removeObject(forKey: "force_http2_transcription")
         let hasCompletedSetup = UserDefaults.standard.bool(forKey: "hasCompletedSetup")
         let apiKey = Self.loadStoredAPIKey(account: apiKeyStorageKey)
         let apiBaseURL = Self.loadStoredAPIBaseURL(account: "api_base_url")
@@ -382,7 +376,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let preserveClipboard = UserDefaults.standard.object(forKey: preserveClipboardStorageKey) == nil
             ? true
             : UserDefaults.standard.bool(forKey: preserveClipboardStorageKey)
-        let forceHTTP2Transcription = UserDefaults.standard.bool(forKey: forceHTTP2TranscriptionStorageKey)
         let useLocalTranscription = UserDefaults.standard.bool(forKey: useLocalTranscriptionStorageKey)
         let localWhisperPath = UserDefaults.standard.string(forKey: localWhisperPathStorageKey) ?? ""
         let disableContextCapture = UserDefaults.standard.bool(forKey: disableContextCaptureStorageKey)
@@ -438,7 +431,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.customContextPromptLastModified = customContextPromptLastModified
         self.shortcutStartDelay = shortcutStartDelay
         self.preserveClipboard = preserveClipboard
-        self.forceHTTP2Transcription = forceHTTP2Transcription
         self.alertSoundsEnabled = alertSoundsEnabled
         self.useLocalTranscription = useLocalTranscription
         self.localWhisperPath = localWhisperPath
@@ -683,7 +675,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let transcriptionService = TranscriptionService(
             apiKey: apiKey,
             baseURL: apiBaseURL,
-            forceHTTP2: forceHTTP2Transcription,
             useLocalTranscription: useLocalTranscription,
             localWhisperPath: localWhisperPath.isEmpty ? nil : localWhisperPath,
             transcriptionLanguage: transcriptionLanguage,
@@ -1333,7 +1324,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let transcriptionService = TranscriptionService(
             apiKey: apiKey,
             baseURL: apiBaseURL,
-            forceHTTP2: forceHTTP2Transcription,
             useLocalTranscription: useLocalTranscription,
             localWhisperPath: localWhisperPath.isEmpty ? nil : localWhisperPath,
             transcriptionLanguage: transcriptionLanguage,
