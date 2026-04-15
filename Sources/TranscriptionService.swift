@@ -110,7 +110,7 @@ class TranscriptionService {
             var arguments = [
                 fileURL.path,
                 "--model", transcriptionModel.id,
-                "--output-format", "txt",
+                "--output-format", "json",
                 "--output-dir", outputDir.path,
                 "--condition-on-previous-text", "False"
             ]
@@ -138,18 +138,17 @@ class TranscriptionService {
                 throw TranscriptionError.submissionFailed("mlx_whisper failed (exit \(process.terminationStatus)): \(errorText)")
             }
 
-            // mlx_whisper outputs a .txt file with the same name as the input
             let inputName = fileURL.deletingPathExtension().lastPathComponent
-            let outputFile = outputDir.appendingPathComponent(inputName).appendingPathExtension("txt")
+            let outputFile = outputDir.appendingPathComponent(inputName).appendingPathExtension("json")
 
-            guard let text = try? String(contentsOf: outputFile, encoding: .utf8) else {
-                // fallback: read stdout
-                let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let outputText = String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                guard !outputText.isEmpty else {
-                    throw TranscriptionError.pollFailed("mlx_whisper produced no output")
-                }
-                return outputText
+            guard let jsonData = try? Data(contentsOf: outputFile),
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let text = json["text"] as? String else {
+                throw TranscriptionError.pollFailed("mlx_whisper produced no output")
+            }
+
+            if self.isHallucination(text: text, json: json) {
+                return ""
             }
 
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
