@@ -7,8 +7,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var noteBrowserWindow: NSWindow?
 
+    private func patchSettingsMenuItem() {
+        guard let appMenu = NSApp.mainMenu?.items.first?.submenu else { return }
+        if let item = appMenu.items.first(where: {
+            $0.title.contains("Settings") || $0.title.contains("Preferences")
+        }) {
+            item.keyEquivalent = ","
+            item.keyEquivalentModifierMask = .command
+            item.target = self
+            item.action = #selector(handleShowSettings)
+        } else {
+            let item = NSMenuItem(
+                title: "Settings...",
+                action: #selector(handleShowSettings),
+                keyEquivalent: ","
+            )
+            item.keyEquivalentModifierMask = .command
+            item.target = self
+            let insertIndex = min(2, appMenu.items.count)
+            appMenu.insertItem(NSMenuItem.separator(), at: insertIndex)
+            appMenu.insertItem(item, at: insertIndex + 1)
+        }
+    }
+
+    func updateActivationPolicy() {
+        let hasVisibleWindow = setupWindow != nil || settingsWindow != nil || noteBrowserWindow != nil
+        if hasVisibleWindow || appState.noteBrowserEnabled {
+            NSApp.setActivationPolicy(.regular)
+        } else {
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         ObsidianExportManager.shared.requestNotificationPermission()
+
+        // SwiftUI 메뉴 초기화 이후 Settings 단축키 강제 설정
+        DispatchQueue.main.async {
+            self.patchSettingsMenuItem()
+        }
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleShowSetup),
@@ -22,9 +59,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
+        // noteBrowserEnabled 변경 시 독 아이콘 상태 갱신
+        NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateActivationPolicy()
+        }
+
         if !appState.hasCompletedSetup {
             showSetupWindow()
         } else {
+            updateActivationPolicy()
+            // 노트 브라우저 활성화 시 앱 시작과 함께 자동 오픈
+            if appState.noteBrowserEnabled {
+                showNoteBrowserWindow()
+            }
             appState.startHotkeyMonitoring()
             appState.startAccessibilityPolling()
             Task { @MainActor in
@@ -40,12 +91,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         guard appState.hasCompletedSetup else { return true }
-        if !flag {
-            if appState.noteBrowserEnabled {
-                showNoteBrowserWindow()
-            } else {
-                showSettingsWindow()
-            }
+        if appState.noteBrowserEnabled {
+            // 노트 브라우저 활성화 시 독 클릭 = 항상 노트 브라우저 앞으로
+            showNoteBrowserWindow()
+        } else if !flag {
+            // 일반 모드: 창이 없을 때만 설정 오픈
+            showSettingsWindow()
         }
         return true
     }
@@ -61,7 +112,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         showSettingsWindow()
     }
 
-    private func showNoteBrowserWindow() {
+private func showNoteBrowserWindow() {
         NSApp.setActivationPolicy(.regular)
 
         if let noteBrowserWindow, noteBrowserWindow.isVisible {
@@ -104,10 +155,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: window,
             queue: .main
         ) { [weak self] _ in
-            if self?.setupWindow == nil && self?.settingsWindow == nil {
-                NSApp.setActivationPolicy(.accessory)
-            }
             self?.noteBrowserWindow = nil
+            self?.updateActivationPolicy()
         }
     }
 
@@ -153,10 +202,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: window,
             queue: .main
         ) { [weak self] _ in
-            if self?.setupWindow == nil {
-                NSApp.setActivationPolicy(.accessory)
-            }
             self?.settingsWindow = nil
+            self?.updateActivationPolicy()
         }
     }
 
@@ -191,7 +238,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         appState.hasCompletedSetup = true
         setupWindow?.close()
         setupWindow = nil
-        NSApp.setActivationPolicy(.accessory)
+        updateActivationPolicy()
         appState.startHotkeyMonitoring()
         appState.startAccessibilityPolling()
         Task { @MainActor in

@@ -13,6 +13,14 @@ struct FreeFlowApp: App {
             MenuBarLabel()
                 .environmentObject(appDelegate.appState)
         }
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings...") {
+                    NotificationCenter.default.post(name: .showSettings, object: nil)
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
+        }
     }
 }
 

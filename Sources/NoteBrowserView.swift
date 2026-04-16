@@ -1,6 +1,84 @@
 import SwiftUI
 import UserNotifications
 
+// MARK: - Cursor + Glass helpers
+
+private class CursorNSView: NSView {
+    var cursor: NSCursor
+
+    init(cursor: NSCursor) {
+        self.cursor = cursor
+        super.init(frame: .zero)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        updateTrackingAreas()
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: cursor)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        guard !bounds.isEmpty else { return }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.activeInKeyWindow, .cursorUpdate, .mouseEnteredAndExited],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        cursor.set()
+    }
+}
+
+private struct CursorView: NSViewRepresentable {
+    var cursor: NSCursor = .arrow
+    func makeNSView(context: Context) -> CursorNSView { CursorNSView(cursor: cursor) }
+    func updateNSView(_ nsView: CursorNSView, context: Context) { nsView.cursor = cursor }
+}
+
+// 진짜 NSVisualEffectView 기반 블러
+private class GlassNSView: NSView {
+    private let effectView = NSVisualEffectView()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        effectView.material = .hudWindow
+        effectView.blendingMode = .withinWindow
+        effectView.state = .active
+        effectView.wantsLayer = true
+        effectView.layer?.cornerRadius = frame.height / 2
+        effectView.layer?.masksToBounds = true
+        addSubview(effectView)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        effectView.frame = bounds
+        effectView.layer?.cornerRadius = bounds.height / 2
+    }
+}
+
+private struct GlassView: NSViewRepresentable {
+    func makeNSView(context: Context) -> GlassNSView { GlassNSView() }
+    func updateNSView(_ nsView: GlassNSView, context: Context) {}
+}
+
+extension View {
+    func overrideCursor(_ cursor: NSCursor) -> some View {
+        self.background(CursorView(cursor: cursor))
+    }
+}
+
 // MARK: - Obsidian Export Manager
 
 final class ObsidianExportManager: ObservableObject {
@@ -234,18 +312,23 @@ struct NoteBrowserView: View {
         VStack(spacing: 0) {
             searchBar
                 .padding(.horizontal, 12)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
+                .padding(.top, 14)
+                .padding(.bottom, 10)
 
             if filteredHistory.isEmpty {
                 Spacer()
-                Text(appState.pipelineHistory.isEmpty ? "노트가 없습니다" : "검색 결과 없음")
-                    .font(.callout)
-                    .foregroundStyle(.tertiary)
+                VStack(spacing: 6) {
+                    Image(systemName: appState.pipelineHistory.isEmpty ? "note.text" : "magnifyingglass")
+                        .font(.system(size: 24, weight: .ultraLight))
+                        .foregroundStyle(.tertiary)
+                    Text(appState.pipelineHistory.isEmpty ? "노트가 없습니다" : "검색 결과 없음")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                }
                 Spacer()
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(spacing: 4) {
                         ForEach(filteredHistory) { item in
                             NoteListRow(
                                 item: item,
@@ -256,37 +339,40 @@ struct NoteBrowserView: View {
                         }
                     }
                     .padding(.horizontal, 8)
-                    .padding(.bottom, 8)
+                    .padding(.vertical, 6)
                 }
             }
         }
-        .frame(width: 250)
-        .background(.ultraThinMaterial)
+        .frame(width: 260)
+        .background(Color(nsColor: .windowBackgroundColor))
         .overlay(alignment: .trailing) {
-            Divider()
+            Rectangle()
+                .fill(Color.primary.opacity(0.07))
+                .frame(width: 1)
         }
     }
 
     private var searchBar: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.tertiary)
             TextField("검색", text: $searchText)
                 .textFieldStyle(.plain)
-                .font(.callout)
+                .font(.system(size: 13))
             if !searchText.isEmpty {
                 Button { searchText = "" } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
+                        .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
+
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.06), in: Capsule())
     }
 
     // MARK: - Detail
@@ -300,18 +386,18 @@ struct NoteBrowserView: View {
             }
             .id(id)
         } else {
-            VStack {
+            VStack(spacing: 8) {
                 Spacer()
                 Image(systemName: "note.text")
-                    .font(.system(size: 36, weight: .ultraLight))
+                    .font(.system(size: 40, weight: .ultraLight))
                     .foregroundStyle(.tertiary)
-                    .padding(.bottom, 8)
                 Text("노트를 선택하세요")
-                    .font(.callout)
+                    .font(.system(size: 13))
                     .foregroundStyle(.tertiary)
                 Spacer()
             }
             .frame(maxWidth: .infinity)
+            .background(Color(nsColor: .textBackgroundColor))
         }
     }
 }
@@ -324,68 +410,67 @@ private struct NoteListRow: View {
     var customTitle: String? = nil
 
     @EnvironmentObject private var exportManager: ObsidianExportManager
+    @State private var isHovered = false
 
     private var isExporting: Bool {
         exportManager.processingIDs.contains(item.id)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 5) {
+        VStack(alignment: .leading, spacing: 3) {
+            // Date row (very small caps, tertiary)
+            HStack(spacing: 4) {
                 Text(rowDate)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(isSelected ? Color.primary.opacity(0.6) : Color.secondary.opacity(0.6))
+                    .font(.system(size: 9, weight: .semibold, design: .default))
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.65) : Color.secondary.opacity(0.7))
                     .textCase(.uppercase)
-                    .kerning(0.3)
+                    .kerning(0.5)
                 if isExporting {
-                    HStack(spacing: 3) {
+                    HStack(spacing: 2) {
                         ProgressView()
                             .controlSize(.mini)
-                            .scaleEffect(0.7)
+                            .scaleEffect(0.65)
                         Text("내보내는 중")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.orange)
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(isSelected ? Color.white.opacity(0.75) : Color.orange)
                     }
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
                 }
-            }
-
-            HStack(spacing: 4) {
+                Spacer()
                 if item.postProcessingStatus.hasPrefix("Error:") {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.red.opacity(0.7))
+                        .font(.system(size: 8))
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.8) : Color.red.opacity(0.7))
                 }
-                Text(displayTitle)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
             }
 
+            // Title (bold, 14pt)
+            Text(displayTitle)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
+                .lineLimit(1)
+
+            // Preview (12pt, secondary, 2 lines)
             if !notePreview.isEmpty {
                 Text(notePreview)
                     .font(.system(size: 12))
-                    .foregroundStyle(isSelected ? Color.primary.opacity(0.65) : Color.secondary)
+                    .foregroundStyle(isSelected ? Color.white.opacity(0.7) : Color.secondary)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background {
-            if isSelected {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.accentColor.opacity(0.18))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .strokeBorder(Color.accentColor.opacity(0.25), lineWidth: 0.5)
-                    )
-            }
+            RoundedRectangle(cornerRadius: 6)
+                .fill(
+                    isSelected
+                        ? Color.accentColor
+                        : (isHovered ? Color.primary.opacity(0.05) : Color.clear)
+                )
         }
         .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
     }
 
     private var rowDate: String {
@@ -455,6 +540,7 @@ private struct NoteDetailView: View {
             bottomToolbar
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
         .onAppear { loadContent() }
         .sheet(isPresented: $showExportSheet) {
             ObsidianExportSheet(
@@ -469,53 +555,47 @@ private struct NoteDetailView: View {
     // MARK: Header
 
     private var noteHeader: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            // 제목 영역
+        VStack(alignment: .leading, spacing: 8) {
+            // Title — click to edit inline
             if isEditingTitle {
                 HStack(spacing: 8) {
                     TextField("제목 입력", text: $titleDraft)
-                        .font(.system(size: 22, weight: .bold))
+                        .font(.system(size: 28, weight: .bold))
                         .textFieldStyle(.plain)
                         .onSubmit { commitTitle() }
                     Button { commitTitle() } label: {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
-                            .font(.system(size: 18))
+                            .font(.system(size: 20))
                     }
                     .buttonStyle(.plain)
+
                     Button { isEditingTitle = false } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.secondary)
-                            .font(.system(size: 18))
+                            .font(.system(size: 20))
                     }
                     .buttonStyle(.plain)
+
                 }
             } else {
-                HStack(spacing: 8) {
-                    Text(titleStore.title(for: item.id) ?? item.timestamp.formatted(date: .long, time: .shortened))
-                        .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(.primary)
-                    Button {
+                Text(titleStore.title(for: item.id) ?? item.timestamp.formatted(date: .long, time: .shortened))
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .onTapGesture {
                         titleDraft = titleStore.title(for: item.id) ?? ""
                         isEditingTitle = true
-                    } label: {
-                        Image(systemName: "pencil")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.tertiary)
                     }
-                    .buttonStyle(.plain)
-                    .help("제목 편집")
-                }
+                    .help("클릭하여 제목 편집")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .overrideCursor(.iBeam)
             }
 
-            // 날짜 + 배지
-            HStack(spacing: 6) {
-                if titleStore.title(for: item.id) != nil {
-                    Text(item.timestamp.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                    Text("·").foregroundStyle(.tertiary).font(.caption)
-                }
+            // Date + badges in one tertiary line
+            HStack(spacing: 5) {
+                Text(item.timestamp.formatted(date: .abbreviated, time: .shortened))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
                 statusBadges
                 if isError {
                     badge("전사 실패", color: .red)
@@ -523,17 +603,20 @@ private struct NoteDetailView: View {
                 if !item.contextSummary.isEmpty
                     && !item.contextSummary.hasPrefix("Could not")
                     && item.contextSummary != "Context capture disabled" {
-                    Text("·").foregroundStyle(.tertiary).font(.caption)
+                    Text("·")
+                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 11))
                     Text(item.contextSummary)
-                        .font(.caption)
+                        .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
+                Spacer()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 28)
-        .padding(.top, 24)
+        .padding(.horizontal, 40)
+        .padding(.top, 28)
         .padding(.bottom, 16)
     }
 
@@ -575,125 +658,122 @@ private struct NoteDetailView: View {
                 }
                 .frame(maxWidth: .infinity)
             } else if displayContent.isEmpty {
-                VStack(spacing: 12) {
+                VStack(spacing: 10) {
                     Spacer()
                     if isError {
                         Image(systemName: "exclamationmark.triangle")
-                            .font(.system(size: 28, weight: .ultraLight))
-                            .foregroundStyle(.red.opacity(0.6))
+                            .font(.system(size: 32, weight: .ultraLight))
+                            .foregroundStyle(.red.opacity(0.5))
                         Text("전사에 실패했습니다")
-                            .font(.callout.weight(.medium))
+                            .font(.system(size: 14, weight: .medium))
                             .foregroundStyle(.secondary)
                         Text(item.postProcessingStatus.replacingOccurrences(of: "Error: ", with: ""))
-                            .font(.caption)
+                            .font(.system(size: 12))
                             .foregroundStyle(.tertiary)
                             .multilineTextAlignment(.center)
-                            .padding(.horizontal, 40)
+                            .padding(.horizontal, 60)
                     } else {
-                        Text("(내용 없음)").foregroundStyle(.tertiary)
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 32, weight: .ultraLight))
+                            .foregroundStyle(.tertiary)
+                        Text("내용 없음")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.tertiary)
                     }
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
             } else {
-                NoteTextView(text: displayContent, bottomPadding: 64)
+                NoteTextView(text: displayContent, bottomPadding: 80)
             }
         }
     }
 
-    // MARK: Bottom Toolbar (floating)
+    // MARK: Bottom Toolbar (floating pill)
 
     private var bottomToolbar: some View {
-        HStack(spacing: 8) {
-            Button {
-                showExportSheet = true
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 12, weight: .medium))
-                    Text("Obsidian")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
-                )
-            }
-            .buttonStyle(.plain)
-            .disabled(displayContent.isEmpty)
-
-            Button {
-                copyContent()
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 12, weight: .medium))
-                    Text(isCopied ? "복사됨" : "복사")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
-                )
-            }
-            .buttonStyle(.plain)
-
-            if canRetry {
+        HStack {
+            Spacer()
+            HStack(spacing: 2) {
+                // Obsidian export
                 Button {
-                    retryTranscription()
+                    showExportSheet = true
                 } label: {
-                    HStack(spacing: 5) {
-                        if isRetrying {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        Text(isRetrying ? "재시도 중..." : "재시도")
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .strokeBorder(Color.orange.opacity(0.3), lineWidth: 0.5)
-                    )
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.plain)
-                .disabled(isRetrying)
-            }
 
+                .disabled(displayContent.isEmpty)
+                .help("Obsidian으로 내보내기")
+
+                // Copy
+                Button {
+                    copyContent()
+                } label: {
+                    Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(isCopied ? Color.accentColor : Color.primary)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+
+                .help("내용 복사")
+
+                // Retry (only if error)
+                if canRetry {
+                    Button {
+                        retryTranscription()
+                    } label: {
+                        Group {
+                            if isRetrying {
+                                ProgressView().controlSize(.mini).frame(width: 13, height: 13)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                        .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.plain)
+
+                    .disabled(isRetrying)
+                    .help("전사 재시도")
+                }
+
+                // Separator
+                Rectangle()
+                    .fill(Color.primary.opacity(0.12))
+                    .frame(width: 1, height: 18)
+                    .padding(.horizontal, 4)
+
+                // Delete
+                Button(role: .destructive) {
+                    onDelete()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.red.opacity(0.75))
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+
+                .help("노트 삭제")
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 48)
+            .background {
+                Capsule().fill(Color.clear)
+                    .overlay(GlassView().clipShape(Capsule()))
+                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.25), lineWidth: 0.5))
+            }
+            .shadow(color: .black.opacity(0.18), radius: 24, x: 0, y: 8)
+            .overrideCursor(.arrow)
             Spacer()
-
-            Button(role: .destructive) {
-                onDelete()
-            } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.red.opacity(0.8))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .strokeBorder(Color.red.opacity(0.15), lineWidth: 0.5)
-                    )
-            }
-            .buttonStyle(.plain)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .top) {
-            Divider().opacity(0.5)
-        }
+        .padding(.bottom, 20)
     }
 
     // MARK: Actions

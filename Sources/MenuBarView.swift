@@ -228,6 +228,7 @@ struct MenuBarView: View {
             Button("Settings") {
                 NotificationCenter.default.post(name: .showSettings, object: nil)
             }
+            .keyboardShortcut(",", modifiers: .command)
 
             Divider()
 
