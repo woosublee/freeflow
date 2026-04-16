@@ -273,6 +273,20 @@ struct GeneralSettingsView: View {
             Toggle("Launch FreeFlow at login", isOn: $appState.launchAtLogin)
             Toggle("Show menu bar icon", isOn: $showMenuBarIcon)
 
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Note Browser")
+                        .font(.caption.weight(.semibold))
+                    Text("독 아이콘을 클릭하면 노트 브라우저가 열립니다. 받아쓰기 기록을 노트 앱처럼 탐색할 수 있습니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Toggle("", isOn: $appState.noteBrowserEnabled)
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+            }
+
             if SMAppService.mainApp.status == .requiresApproval {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -1612,7 +1626,7 @@ struct RunLogEntryView: View {
                                     if let text = loadedTranscript, !text.isEmpty {
                                         TextEditor(text: .constant(text))
                                             .font(.system(.caption, design: .monospaced))
-                                            .frame(maxHeight: 300)
+                                            .frame(minHeight: 150, maxHeight: 300)
                                             .cornerRadius(4)
                                     } else if loadedTranscript == nil {
                                         Text("Loading...")
@@ -1665,7 +1679,7 @@ struct RunLogEntryView: View {
                                         if !item.postProcessedTranscript.isEmpty {
                                             TextEditor(text: .constant(item.postProcessedTranscript))
                                                 .font(.system(.caption, design: .monospaced))
-                                                .frame(maxHeight: 300)
+                                                .frame(minHeight: 150, maxHeight: 300)
                                                 .cornerRadius(4)
                                         }
                                     }

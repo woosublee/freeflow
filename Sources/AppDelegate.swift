@@ -1,11 +1,14 @@
 import SwiftUI
+import UserNotifications
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
     var setupWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    private var noteBrowserWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ObsidianExportManager.shared.requestNotificationPermission()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleShowSetup),
@@ -38,7 +41,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         guard appState.hasCompletedSetup else { return true }
         if !flag {
-            showSettingsWindow()
+            if appState.noteBrowserEnabled {
+                showNoteBrowserWindow()
+            } else {
+                showSettingsWindow()
+            }
         }
         return true
     }
@@ -52,6 +59,56 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func handleShowSettings() {
         showSettingsWindow()
+    }
+
+    private func showNoteBrowserWindow() {
+        NSApp.setActivationPolicy(.regular)
+
+        if let noteBrowserWindow, noteBrowserWindow.isVisible {
+            noteBrowserWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        if noteBrowserWindow == nil {
+            presentNoteBrowserWindow()
+        } else {
+            noteBrowserWindow?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    private func presentNoteBrowserWindow() {
+        let view = NoteBrowserView()
+            .environmentObject(appState)
+            .environmentObject(ObsidianExportManager.shared)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 580),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "노트 브라우저"
+        window.contentView = NSHostingView(rootView: view)
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 600, height: 400)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        noteBrowserWindow = window
+
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            if self?.setupWindow == nil && self?.settingsWindow == nil {
+                NSApp.setActivationPolicy(.accessory)
+            }
+            self?.noteBrowserWindow = nil
+        }
     }
 
     private func showSettingsWindow() {

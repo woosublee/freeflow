@@ -135,6 +135,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let disablePostProcessingStorageKey = "disable_post_processing"
     private let transcriptionLanguageStorageKey = "transcription_language"
     private let transcriptionModelStorageKey = "transcription_model"
+    private let noteBrowserEnabledStorageKey = "note_browser_enabled"
     private let transcribingIndicatorDelay: TimeInterval = 0.25
     private let clipboardRestoreDelay: TimeInterval = 0.15
     let maxPipelineHistoryCount = 20
@@ -264,6 +265,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @Published var noteBrowserEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(noteBrowserEnabled, forKey: noteBrowserEnabledStorageKey)
+        }
+    }
+
     @Published var transcriptionLanguage: TranscriptionLanguage {
         didSet {
             UserDefaults.standard.set(transcriptionLanguage.code, forKey: transcriptionLanguageStorageKey)
@@ -374,6 +381,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let disableContextCapture = UserDefaults.standard.bool(forKey: disableContextCaptureStorageKey)
         let disableAutoPaste = UserDefaults.standard.bool(forKey: disableAutoPasteStorageKey)
         let disablePostProcessing = UserDefaults.standard.bool(forKey: disablePostProcessingStorageKey)
+        let noteBrowserEnabled = UserDefaults.standard.bool(forKey: noteBrowserEnabledStorageKey)
         let transcriptionLanguage = TranscriptionLanguage.find(
             code: UserDefaults.standard.string(forKey: transcriptionLanguageStorageKey) ?? "ko"
         )
@@ -430,6 +438,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.disableContextCapture = disableContextCapture
         self.disableAutoPaste = disableAutoPaste
         self.disablePostProcessing = disablePostProcessing
+        self.noteBrowserEnabled = noteBrowserEnabled
         self.transcriptionLanguage = transcriptionLanguage
         self.transcriptionModel = transcriptionModel
         self.soundVolume = soundVolume
