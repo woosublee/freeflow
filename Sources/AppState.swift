@@ -340,6 +340,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var transcribingIndicatorTask: Task<Void, Never>?
     private var transcriptionTask: Task<Void, Never>?
     private var transcribingAudioFileName: String?
+    private var overlayTranscriptionID: UUID = UUID()
     private var contextService: AppContextService
     private var contextCaptureTask: Task<AppContext?, Never>?
     private var capturedContext: AppContext?
@@ -1115,6 +1116,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let t0 = CFAbsoluteTimeGetCurrent()
         os_log(.info, log: recordingLog, "startRecording() entered")
         guard !isRecording else { return }
+
+        // 전사 중이면 오버레이 소유권만 넘기고 전사는 백그라운드에서 계속 실행
+        if isTranscribing {
+            overlayTranscriptionID = UUID()  // 이전 전사의 오버레이 소유권 무효화
+            isTranscribing = false
+        }
+
         cancelPendingShortcutStart()
         activeRecordingTriggerMode = triggerMode
         overlayManager.setRecordingTriggerMode(triggerMode, animated: false)
@@ -1430,6 +1438,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         lastPostProcessingPrompt = ""
         lastContextScreenshotDataURL = nil
         lastContextScreenshotStatus = "No screenshot"
+        let myOverlayID = UUID()
+        overlayTranscriptionID = myOverlayID
         isRecording = false
         isTranscribing = true
         statusText = "Preparing audio..."
@@ -1439,32 +1449,39 @@ final class AppState: ObservableObject, @unchecked Sendable {
         audioRecorder.stopRecording { [weak self] fileURL in
             guard let self else { return }
             guard let fileURL else {
-                self.isTranscribing = false
+                // 오버레이 소유권이 있을 때만 오버레이 처리
+                if self.overlayTranscriptionID == myOverlayID {
+                    self.isTranscribing = false
+                    self.errorMessage = "No audio recorded"
+                    self.statusText = "Error"
+                    self.overlayManager.dismiss()
+                }
                 self.audioRecorder.cleanup()
-                self.errorMessage = "No audio recorded"
-                self.statusText = "Error"
-                self.overlayManager.dismiss()
                 self.refreshAvailableMicrophonesIfNeeded()
                 return
             }
 
             let savedAudioFile = Self.saveAudioFile(from: fileURL)
             let transcriptionFileURL = savedAudioFile?.fileURL ?? fileURL
-            self.transcribingAudioFileName = savedAudioFile?.fileName
-            self.statusText = "Transcribing..."
-            self.debugStatusMessage = "Transcribing audio"
 
-            self.transcribingIndicatorTask?.cancel()
-            let indicatorDelay = self.transcribingIndicatorDelay
-            self.transcribingIndicatorTask = Task { [weak self] in
-                do {
-                    try await Task.sleep(nanoseconds: UInt64(indicatorDelay * 1_000_000_000))
-                    let shouldShowTranscribing = self?.isTranscribing ?? false
-                    guard shouldShowTranscribing else { return }
-                    await MainActor.run { [weak self] in
-                        self?.overlayManager.showTranscribing()
-                    }
-                } catch {}
+            // 오버레이 소유권이 있을 때만 UI 업데이트
+            if self.overlayTranscriptionID == myOverlayID {
+                self.transcribingAudioFileName = savedAudioFile?.fileName
+                self.statusText = "Transcribing..."
+                self.debugStatusMessage = "Transcribing audio"
+
+                self.transcribingIndicatorTask?.cancel()
+                let indicatorDelay = self.transcribingIndicatorDelay
+                self.transcribingIndicatorTask = Task { [weak self] in
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(indicatorDelay * 1_000_000_000))
+                        guard self?.overlayTranscriptionID == myOverlayID else { return }
+                        await MainActor.run { [weak self] in
+                            guard self?.overlayTranscriptionID == myOverlayID else { return }
+                            self?.overlayManager.showTranscribing()
+                        }
+                    } catch {}
+                }
             }
 
         let transcriptionService = TranscriptionService(
@@ -1477,7 +1494,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
         let postProcessingService = PostProcessingService(apiKey: apiKey, baseURL: apiBaseURL)
 
-            self.transcriptionTask?.cancel()
+            // 이전 전사 태스크는 취소하지 않고 백그라운드에서 계속 실행
             self.transcriptionTask = Task {
                 do {
                     async let transcript = transcriptionService.transcribe(fileURL: transcriptionFileURL)
@@ -1505,18 +1522,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     try Task.checkCancellation()
 
                     await MainActor.run {
-                        guard self.isTranscribing else { return }
-                        self.lastContextSummary = appContext.contextSummary
-                        self.lastContextScreenshotDataURL = appContext.screenshotDataURL
-                        self.lastContextScreenshotStatus = appContext.screenshotError
-                            ?? "available (\(appContext.screenshotMimeType ?? "image"))"
                         let trimmedRawTranscript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
                         let trimmedFinalTranscript = result.finalTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
                         let processingStatus = result.outcome.statusMessage()
-                        self.lastPostProcessingPrompt = result.prompt
-                        self.lastRawTranscript = trimmedRawTranscript
-                        self.lastPostProcessedTranscript = trimmedFinalTranscript
-                        self.lastPostProcessingStatus = processingStatus
+
+                        // 데이터 저장은 항상 실행
                         self.recordPipelineHistoryEntry(
                             rawTranscript: trimmedRawTranscript,
                             postProcessedTranscript: trimmedFinalTranscript,
@@ -1525,6 +1535,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             processingStatus: processingStatus,
                             audioFileName: savedAudioFile?.fileName
                         )
+                        self.audioRecorder.cleanup()
+                        self.refreshAvailableMicrophonesIfNeeded()
+
+                        // 오버레이/UI 업데이트는 오버레이 소유권이 있을 때만
+                        guard self.overlayTranscriptionID == myOverlayID else { return }
+
+                        self.lastContextSummary = appContext.contextSummary
+                        self.lastContextScreenshotDataURL = appContext.screenshotDataURL
+                        self.lastContextScreenshotStatus = appContext.screenshotError
+                            ?? "available (\(appContext.screenshotMimeType ?? "image"))"
+                        self.lastPostProcessingPrompt = result.prompt
+                        self.lastRawTranscript = trimmedRawTranscript
+                        self.lastPostProcessedTranscript = trimmedFinalTranscript
+                        self.lastPostProcessingStatus = processingStatus
                         self.transcriptionTask = nil
                         self.transcribingIndicatorTask?.cancel()
                         self.transcribingIndicatorTask = nil
@@ -1543,15 +1567,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
                                 self.overlayManager.dismiss()
                             }
-
-                            let pendingClipboardRestore = self.writeTranscriptToPasteboard(trimmedFinalTranscript)
-                            self.pasteAtCursorWhenShortcutReleased {
-                                self.restoreClipboardIfNeeded(pendingClipboardRestore)
+                            if !self.disableAutoPaste {
+                                let pendingClipboardRestore = self.writeTranscriptToPasteboard(trimmedFinalTranscript)
+                                self.pasteAtCursorWhenShortcutReleased {
+                                    self.restoreClipboardIfNeeded(pendingClipboardRestore)
+                                }
                             }
                         }
-
-                        self.audioRecorder.cleanup()
-                        self.refreshAvailableMicrophonesIfNeeded()
 
                         self.scheduleReadyStatusReset(after: 3, matching: [completionStatusText, "Nothing to transcribe"])
                     }
@@ -1569,7 +1591,21 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         resolvedContext = self.fallbackContextAtStop()
                     }
                     await MainActor.run {
-                        guard self.isTranscribing else { return }
+                        // 데이터 저장은 항상 실행
+                        self.recordPipelineHistoryEntry(
+                            rawTranscript: "",
+                            postProcessedTranscript: "",
+                            postProcessingPrompt: "",
+                            context: resolvedContext,
+                            processingStatus: "Error: \(error.localizedDescription)",
+                            audioFileName: savedAudioFile?.fileName
+                        )
+                        self.audioRecorder.cleanup()
+                        self.refreshAvailableMicrophonesIfNeeded()
+
+                        // 오버레이/UI 업데이트는 오버레이 소유권이 있을 때만
+                        guard self.overlayTranscriptionID == myOverlayID else { return }
+
                         self.transcriptionTask = nil
                         self.transcribingIndicatorTask?.cancel()
                         self.transcribingIndicatorTask = nil
@@ -1586,16 +1622,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         self.lastContextScreenshotDataURL = resolvedContext.screenshotDataURL
                         self.lastContextScreenshotStatus = resolvedContext.screenshotError
                             ?? "available (\(resolvedContext.screenshotMimeType ?? "image"))"
-                        self.recordPipelineHistoryEntry(
-                            rawTranscript: "",
-                            postProcessedTranscript: "",
-                            postProcessingPrompt: "",
-                            context: resolvedContext,
-                            processingStatus: "Error: \(error.localizedDescription)",
-                            audioFileName: savedAudioFile?.fileName
-                        )
-                        self.audioRecorder.cleanup()
-                        self.refreshAvailableMicrophonesIfNeeded()
                     }
                 }
             }

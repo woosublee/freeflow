@@ -12,7 +12,7 @@ final class DictationShortcutSessionController {
 
     func handle(event: ShortcutEvent, isTranscribing: Bool) -> DictationShortcutAction? {
         if activeMode == nil {
-            guard !isTranscribing else { return nil }
+            // 전사 중에도 새 녹음 허용
             switch event {
             case .toggleActivated:
                 activeMode = .toggle

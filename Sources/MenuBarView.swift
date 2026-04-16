@@ -78,7 +78,7 @@ struct MenuBarView: View {
             Button(appState.isRecording ? "Stop Recording" : "Start Dictating") {
                 appState.toggleRecording()
             }
-            .disabled(appState.isTranscribing)
+            .disabled(false)
 
             if let error = appState.errorMessage {
                 Divider()

@@ -352,10 +352,17 @@ private struct NoteListRow: View {
                 }
             }
 
-            Text(displayTitle)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
+            HStack(spacing: 4) {
+                if item.postProcessingStatus.hasPrefix("Error:") {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.red.opacity(0.7))
+                }
+                Text(displayTitle)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
 
             if !notePreview.isEmpty {
                 Text(notePreview)
@@ -427,6 +434,15 @@ private struct NoteDetailView: View {
     @State private var showExportSheet = false
     @State private var isEditingTitle = false
     @State private var titleDraft = ""
+    @State private var isRetrying = false
+
+    private var isError: Bool {
+        item.postProcessingStatus.hasPrefix("Error:")
+    }
+
+    private var canRetry: Bool {
+        isError && item.audioFileName != nil
+    }
 
     private var displayContent: String { loadedContent ?? item.postProcessedTranscript }
 
@@ -501,6 +517,9 @@ private struct NoteDetailView: View {
                     Text("·").foregroundStyle(.tertiary).font(.caption)
                 }
                 statusBadges
+                if isError {
+                    badge("전사 실패", color: .red)
+                }
                 if !item.contextSummary.isEmpty
                     && !item.contextSummary.hasPrefix("Could not")
                     && item.contextSummary != "Context capture disabled" {
@@ -556,9 +575,23 @@ private struct NoteDetailView: View {
                 }
                 .frame(maxWidth: .infinity)
             } else if displayContent.isEmpty {
-                VStack {
+                VStack(spacing: 12) {
                     Spacer()
-                    Text("(내용 없음)").foregroundStyle(.tertiary)
+                    if isError {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 28, weight: .ultraLight))
+                            .foregroundStyle(.red.opacity(0.6))
+                        Text("전사에 실패했습니다")
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        Text(item.postProcessingStatus.replacingOccurrences(of: "Error: ", with: ""))
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 40)
+                    } else {
+                        Text("(내용 없음)").foregroundStyle(.tertiary)
+                    }
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
@@ -611,6 +644,32 @@ private struct NoteDetailView: View {
             }
             .buttonStyle(.plain)
 
+            if canRetry {
+                Button {
+                    retryTranscription()
+                } label: {
+                    HStack(spacing: 5) {
+                        if isRetrying {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        Text(isRetrying ? "재시도 중..." : "재시도")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(Color.orange.opacity(0.3), lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(isRetrying)
+            }
+
             Spacer()
 
             Button(role: .destructive) {
@@ -653,6 +712,18 @@ private struct NoteDetailView: View {
                 text = raw
             }
             await MainActor.run { loadedContent = text }
+        }
+    }
+
+    private func retryTranscription() {
+        isRetrying = true
+        appState.retryTranscription(item: item)
+        // retryingItemIDs 변화 감지해서 완료 시 isRetrying 해제
+        Task {
+            while appState.retryingItemIDs.contains(item.id) {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+            await MainActor.run { isRetrying = false }
         }
     }
 
