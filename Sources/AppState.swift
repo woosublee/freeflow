@@ -193,7 +193,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let commandModeManualModifierStorageKey = "command_mode_manual_modifier"
     private let transcribingIndicatorDelay: TimeInterval = 0.25
     private let clipboardRestoreDelay: TimeInterval = 0.15
-    let maxPipelineHistoryCount = 20
+    let maxPipelineHistoryCount = Int.max
 
     @Published var hasCompletedSetup: Bool {
         didSet {
