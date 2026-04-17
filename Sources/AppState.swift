@@ -110,6 +110,58 @@ private struct PendingClipboardRestore {
     let expectedChangeCount: Int
 }
 
+private enum CommandInvocation: String {
+    case automatic
+    case manual
+}
+
+private enum SessionIntent {
+    case dictation
+    case command(invocation: CommandInvocation, selectedText: String)
+
+    var isCommandMode: Bool {
+        switch self {
+        case .dictation:
+            return false
+        case .command:
+            return true
+        }
+    }
+
+    var persistedIntent: PipelineHistoryItemIntent {
+        switch self {
+        case .dictation:
+            return .dictation
+        case .command(let invocation, _):
+            switch invocation {
+            case .automatic:
+                return .commandAutomatic
+            case .manual:
+                return .commandManual
+            }
+        }
+    }
+
+    var persistedSelectedText: String? {
+        switch self {
+        case .dictation:
+            return nil
+        case .command(_, let selectedText):
+            return selectedText
+        }
+    }
+
+    static func fromPersisted(intent: PipelineHistoryItemIntent, selectedText: String?) -> SessionIntent {
+        if intent == .commandAutomatic, let selectedText {
+            return .command(invocation: .automatic, selectedText: selectedText)
+        }
+        if intent == .commandManual, let selectedText {
+            return .command(invocation: .manual, selectedText: selectedText)
+        }
+        return .dictation
+    }
+}
+
 final class AppState: ObservableObject, @unchecked Sendable {
     private let apiKeyStorageKey = "groq_api_key"
     private let apiBaseURLStorageKey = "api_base_url"
@@ -136,6 +188,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let transcriptionLanguageStorageKey = "transcription_language"
     private let transcriptionModelStorageKey = "transcription_model"
     private let noteBrowserEnabledStorageKey = "note_browser_enabled"
+    private let commandModeEnabledStorageKey = "command_mode_enabled"
+    private let commandModeStyleStorageKey = "command_mode_style"
+    private let commandModeManualModifierStorageKey = "command_mode_manual_modifier"
     private let transcribingIndicatorDelay: TimeInterval = 0.25
     private let clipboardRestoreDelay: TimeInterval = 0.15
     let maxPipelineHistoryCount = 20
@@ -183,6 +238,24 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published private(set) var savedToggleCustomShortcut: ShortcutBinding? {
         didSet {
             persistOptionalShortcut(savedToggleCustomShortcut, key: savedToggleCustomShortcutStorageKey)
+        }
+    }
+
+    @Published var isCommandModeEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isCommandModeEnabled, forKey: commandModeEnabledStorageKey)
+        }
+    }
+
+    @Published var commandModeStyle: CommandModeStyle {
+        didSet {
+            UserDefaults.standard.set(commandModeStyle.rawValue, forKey: commandModeStyleStorageKey)
+        }
+    }
+
+    @Published private(set) var commandModeManualModifier: CommandModeManualModifier {
+        didSet {
+            UserDefaults.standard.set(commandModeManualModifier.rawValue, forKey: commandModeManualModifierStorageKey)
         }
     }
 
@@ -355,8 +428,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let pipelineHistoryStore = PipelineHistoryStore()
     private let shortcutSessionController = DictationShortcutSessionController()
     private var activeRecordingTriggerMode: RecordingTriggerMode?
+    private var currentSessionIntent: SessionIntent = .dictation
+    private var pendingSelectionSnapshot: AppSelectionSnapshot?
+    private var pendingManualCommandInvocation = false
     private var pendingShortcutStartTask: Task<Void, Never>?
     private var pendingShortcutStartMode: RecordingTriggerMode?
+    private var pendingOverlayDismissToken: UUID?
     private var shouldMonitorHotkeys = false
     private var isCapturingShortcut = false
 
@@ -379,6 +456,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let customSystemPromptLastModified = UserDefaults.standard.string(forKey: customSystemPromptLastModifiedStorageKey) ?? ""
         let customContextPromptLastModified = UserDefaults.standard.string(forKey: customContextPromptLastModifiedStorageKey) ?? ""
         let shortcutStartDelay = max(0, UserDefaults.standard.double(forKey: shortcutStartDelayStorageKey))
+        let isCommandModeEnabled = UserDefaults.standard.object(forKey: commandModeEnabledStorageKey) == nil
+            ? false
+            : UserDefaults.standard.bool(forKey: commandModeEnabledStorageKey)
+        let commandModeStyle = CommandModeStyle(
+            rawValue: UserDefaults.standard.string(forKey: commandModeStyleStorageKey) ?? ""
+        ) ?? .automatic
+        let commandModeManualModifier = CommandModeManualModifier(
+            rawValue: UserDefaults.standard.string(forKey: commandModeManualModifierStorageKey) ?? ""
+        ) ?? .option
         let preserveClipboard = UserDefaults.standard.object(forKey: preserveClipboardStorageKey) == nil
             ? true
             : UserDefaults.standard.bool(forKey: preserveClipboardStorageKey)
@@ -431,6 +517,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.toggleShortcut = shortcuts.toggle
         self.savedHoldCustomShortcut = savedHoldCustomShortcut
         self.savedToggleCustomShortcut = savedToggleCustomShortcut
+        self.isCommandModeEnabled = isCommandModeEnabled
+        self.commandModeStyle = commandModeStyle
+        self.commandModeManualModifier = commandModeManualModifier
         self.customVocabulary = customVocabulary
         self.customSystemPrompt = customSystemPrompt
         self.customContextPrompt = customContextPrompt
@@ -691,8 +780,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 let finalTranscript: String
                 let processingStatus: String
                 let postProcessingPrompt: String
+                let restoredIntent = SessionIntent.fromPersisted(
+                    intent: item.intent,
+                    selectedText: item.selectedText
+                )
                 let result = await self.processTranscript(
                     rawTranscript,
+                    intent: restoredIntent,
                     context: restoredContext,
                     postProcessingService: postProcessingService,
                     customVocabulary: capturedCustomVocabulary,
@@ -704,6 +798,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
                 await MainActor.run {
                     let updatedItem = PipelineHistoryItem(
+                        intent: item.intent,
+                        selectedText: item.selectedText,
                         id: item.id,
                         timestamp: item.timestamp,
                         rawTranscript: rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -729,6 +825,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             } catch {
                 await MainActor.run {
                     let updatedItem = PipelineHistoryItem(
+                        intent: item.intent,
+                        selectedText: item.selectedText,
                         id: item.id,
                         timestamp: item.timestamp,
                         rawTranscript: item.rawTranscript,
@@ -905,14 +1003,60 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    var commandModeManualModifierValidationMessage: String? {
+        guard isCommandModeEnabled, commandModeStyle == .manual else { return nil }
+        return commandModeManualModifierCollisionMessage(for: commandModeManualModifier)
+    }
+
+    @discardableResult
+    func setCommandModeEnabled(_ enabled: Bool) -> String? {
+        isCommandModeEnabled = enabled
+        if enabled, commandModeStyle == .manual {
+            return commandModeManualModifierCollisionMessage(for: commandModeManualModifier)
+        }
+        return nil
+    }
+
+    @discardableResult
+    func setCommandModeStyle(_ style: CommandModeStyle) -> String? {
+        commandModeStyle = style
+        if isCommandModeEnabled, style == .manual {
+            return commandModeManualModifierCollisionMessage(for: commandModeManualModifier)
+        }
+        return nil
+    }
+
+    @discardableResult
+    func setCommandModeManualModifier(_ modifier: CommandModeManualModifier) -> String? {
+        if isCommandModeEnabled,
+           commandModeStyle == .manual,
+           let message = commandModeManualModifierCollisionMessage(for: modifier) {
+            return message
+        }
+
+        commandModeManualModifier = modifier
+        return nil
+    }
+
     @discardableResult
     func setShortcut(_ binding: ShortcutBinding, for role: ShortcutRole) -> String? {
+        let nextHoldShortcut = role == .hold ? binding : holdShortcut
+        let nextToggleShortcut = role == .toggle ? binding : toggleShortcut
         let otherBinding = role == .hold ? toggleShortcut : holdShortcut
         if binding.isDisabled && otherBinding.isDisabled {
             return "At least one shortcut must remain enabled."
         }
         guard binding != otherBinding else {
             return "Hold and tap shortcuts must be different."
+        }
+        if isCommandModeEnabled,
+           commandModeStyle == .manual,
+           let message = commandModeManualModifierCollisionMessage(
+            for: commandModeManualModifier,
+            holdBinding: nextHoldShortcut,
+            toggleBinding: nextToggleShortcut
+           ) {
+            return message
         }
 
         switch role {
@@ -926,6 +1070,35 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 savedToggleCustomShortcut = binding
             }
             toggleShortcut = binding
+        }
+
+        return nil
+    }
+
+    private func commandModeManualModifierCollisionMessage(
+        for modifier: CommandModeManualModifier,
+        holdBinding: ShortcutBinding? = nil,
+        toggleBinding: ShortcutBinding? = nil
+    ) -> String? {
+        let holdBinding = holdBinding ?? holdShortcut
+        let toggleBinding = toggleBinding ?? toggleShortcut
+        let manualModifier = modifier.shortcutModifier
+
+        if !holdBinding.isDisabled && holdBinding.modifiers.contains(manualModifier) {
+            return "That modifier is already part of the hold shortcut."
+        }
+        if !toggleBinding.isDisabled && toggleBinding.modifiers.contains(manualModifier) {
+            return "That modifier is already part of the tap shortcut."
+        }
+
+        let derivedHold = holdBinding.withAddedModifiers(manualModifier)
+        if !holdBinding.isDisabled && derivedHold == toggleBinding {
+            return "That modifier would make the command hold shortcut overlap an existing dictation shortcut."
+        }
+
+        let derivedToggle = toggleBinding.withAddedModifiers(manualModifier)
+        if !toggleBinding.isDisabled && derivedToggle == holdBinding {
+            return "That modifier would make the command tap shortcut overlap an existing dictation shortcut."
         }
 
         return nil
@@ -1054,6 +1227,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         contextCaptureTask?.cancel()
         contextCaptureTask = nil
         capturedContext = nil
+        currentSessionIntent = .dictation
         isRecording = false
         errorMessage = nil
         debugStatusMessage = "Cancelled"
@@ -1078,6 +1252,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         capturedContext = nil
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
+        currentSessionIntent = .dictation
         isRecording = false
         isTranscribing = false
         errorMessage = nil
@@ -1097,6 +1272,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private func scheduleShortcutStart(mode: RecordingTriggerMode) {
         cancelPendingShortcutStart(resetMode: false)
+        pendingSelectionSnapshot = contextService.collectSelectionSnapshot()
+        pendingManualCommandInvocation = hotkeyManager.currentPressedModifiers.contains(
+            commandModeManualModifier.shortcutModifier
+        )
         pendingShortcutStartMode = mode
         let delay = shortcutStartDelay
 
@@ -1125,9 +1304,77 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func cancelPendingShortcutStart(resetMode: Bool = true) {
         pendingShortcutStartTask?.cancel()
         pendingShortcutStartTask = nil
+        pendingSelectionSnapshot = nil
+        pendingManualCommandInvocation = false
         if resetMode {
             pendingShortcutStartMode = nil
         }
+    }
+
+    private func resolveSessionIntent(
+        triggerMode: RecordingTriggerMode,
+        selectionSnapshot: AppSelectionSnapshot,
+        manualCommandRequested: Bool
+    ) -> SessionIntent? {
+        guard isCommandModeEnabled else {
+            return .dictation
+        }
+
+        let rawSelectedText = selectionSnapshot.selectedText ?? ""
+        let trimmedSelectedText = rawSelectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch commandModeStyle {
+        case .automatic:
+            if !trimmedSelectedText.isEmpty {
+                return .command(invocation: .automatic, selectedText: rawSelectedText)
+            }
+            return .dictation
+        case .manual:
+            if let message = commandModeManualModifierCollisionMessage(for: commandModeManualModifier) {
+                rejectInvalidCommandModeModifier(triggerMode: triggerMode, message: message)
+                return nil
+            }
+            guard manualCommandRequested else {
+                return .dictation
+            }
+            guard !trimmedSelectedText.isEmpty else {
+                rejectCommandModeSelectionRequirement(triggerMode: triggerMode)
+                return nil
+            }
+            return .command(invocation: .manual, selectedText: rawSelectedText)
+        }
+    }
+
+    private func rejectCommandModeSelectionRequirement(triggerMode: RecordingTriggerMode) {
+        currentSessionIntent = .dictation
+        activeRecordingTriggerMode = nil
+        pendingSelectionSnapshot = nil
+        pendingManualCommandInvocation = false
+        errorMessage = "Select text to transform first."
+        statusText = "Select text to transform first"
+        debugStatusMessage = "Edit mode requires selected text"
+        shortcutSessionController.reset()
+        if triggerMode == .toggle {
+            cancelPendingShortcutStart()
+        }
+        playAlertSound(named: "Basso")
+        scheduleReadyStatusReset(after: 2, matching: ["Select text to transform first"])
+    }
+
+    private func rejectInvalidCommandModeModifier(triggerMode: RecordingTriggerMode, message: String) {
+        currentSessionIntent = .dictation
+        activeRecordingTriggerMode = nil
+        pendingSelectionSnapshot = nil
+        pendingManualCommandInvocation = false
+        errorMessage = message
+        statusText = "Fix Edit Mode modifier"
+        debugStatusMessage = "Edit mode modifier conflicts with dictation shortcuts"
+        shortcutSessionController.reset()
+        if triggerMode == .toggle {
+            cancelPendingShortcutStart()
+        }
+        playAlertSound(named: "Basso")
+        scheduleReadyStatusReset(after: 2, matching: ["Fix Edit Mode modifier"])
     }
 
     private func startRecording(triggerMode: RecordingTriggerMode) {
@@ -1141,18 +1388,31 @@ final class AppState: ObservableObject, @unchecked Sendable {
             isTranscribing = false
         }
 
+        let scheduledSelectionSnapshot = pendingSelectionSnapshot
+        let scheduledManualCommandInvocation = pendingManualCommandInvocation
         cancelPendingShortcutStart()
         activeRecordingTriggerMode = triggerMode
-        overlayManager.setRecordingTriggerMode(triggerMode, animated: false)
         guard hasAccessibility else {
             errorMessage = "Accessibility permission required. Grant access in System Settings > Privacy & Security > Accessibility."
             statusText = "No Accessibility"
             activeRecordingTriggerMode = nil
+            currentSessionIntent = .dictation
             shortcutSessionController.reset()
             showAccessibilityAlert()
             return
         }
         os_log(.info, log: recordingLog, "accessibility check passed: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
+        let selectionSnapshot = scheduledSelectionSnapshot ?? contextService.collectSelectionSnapshot()
+        let manualCommandRequested = scheduledSelectionSnapshot == nil
+            ? hotkeyManager.currentPressedModifiers.contains(commandModeManualModifier.shortcutModifier)
+            : scheduledManualCommandInvocation
+        guard let resolvedIntent = resolveSessionIntent(
+            triggerMode: triggerMode,
+            selectionSnapshot: selectionSnapshot,
+            manualCommandRequested: manualCommandRequested
+        ) else { return }
+        currentSessionIntent = resolvedIntent
+        overlayManager.setRecordingTriggerMode(triggerMode, animated: false)
         guard ensureMicrophoneAccess() else { return }
         os_log(.info, log: recordingLog, "mic access check passed: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
         beginRecording(triggerMode: triggerMode)
@@ -1174,6 +1434,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         self?.errorMessage = "Microphone permission denied. Grant access in System Settings > Privacy & Security > Microphone."
                         self?.statusText = "No Microphone"
                         self?.activeRecordingTriggerMode = nil
+                        self?.currentSessionIntent = .dictation
                         self?.shortcutSessionController.reset()
                         self?.showMicrophonePermissionAlert()
                     }
@@ -1184,6 +1445,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             errorMessage = "Microphone permission denied. Grant access in System Settings > Privacy & Security > Microphone."
             statusText = "No Microphone"
             activeRecordingTriggerMode = nil
+            currentSessionIntent = .dictation
             shortcutSessionController.reset()
             showMicrophonePermissionAlert()
             return false
@@ -1192,6 +1454,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private func beginRecording(triggerMode: RecordingTriggerMode) {
         os_log(.info, log: recordingLog, "beginRecording() entered")
+        clearPendingOverlayDismissToken()
         errorMessage = nil
 
         isRecording = true
@@ -1208,7 +1471,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
             guard let self, !overlayShown else { return }
             overlayShown = true
             os_log(.info, log: recordingLog, "engine slow — showing initializing overlay")
-            self.overlayManager.showInitializing(mode: self.activeRecordingTriggerMode ?? triggerMode)
+            self.clearPendingOverlayDismissToken()
+            self.overlayManager.showInitializing(
+                mode: self.activeRecordingTriggerMode ?? triggerMode,
+                isCommandMode: self.currentSessionIntent.isCommandMode
+            )
         }
         initTimer.resume()
 
@@ -1220,10 +1487,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 self.cancelRecordingInitializationTimer()
                 os_log(.info, log: recordingLog, "first real audio — transitioning to waveform")
                 self.statusText = "Recording..."
+                self.clearPendingOverlayDismissToken()
                 if overlayShown {
-                    self.overlayManager.transitionToRecording(mode: self.activeRecordingTriggerMode ?? triggerMode)
+                    self.overlayManager.transitionToRecording(
+                        mode: self.activeRecordingTriggerMode ?? triggerMode,
+                        isCommandMode: self.currentSessionIntent.isCommandMode
+                    )
                 } else {
-                    self.overlayManager.showRecording(mode: self.activeRecordingTriggerMode ?? triggerMode)
+                    self.overlayManager.showRecording(
+                        mode: self.activeRecordingTriggerMode ?? triggerMode,
+                        isCommandMode: self.currentSessionIntent.isCommandMode
+                    )
                 }
                 overlayShown = true
                 self.playAlertSound(named: "Tink")
@@ -1284,6 +1558,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             self.transcribingAudioFileName = nil
         }
         activeRecordingTriggerMode = nil
+        currentSessionIntent = .dictation
         shortcutSessionController.reset()
         errorMessage = formattedRecordingStartError(error)
         statusText = "Error"
@@ -1380,6 +1655,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case postProcessingDisabled
         case postProcessingSucceeded
         case postProcessingFailedFallback
+        case commandModeSucceeded(invocation: CommandInvocation)
+        case commandModeFailedFallback(invocation: CommandInvocation)
 
         func statusMessage(isRetry: Bool = false) -> String {
             switch self {
@@ -1395,12 +1672,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 return isRetry
                     ? "Post-processing failed on retry, using raw transcript"
                     : "Post-processing failed, using raw transcript"
+            case .commandModeSucceeded(let invocation):
+                return "Edit mode succeeded (\(invocation.rawValue))"
+            case .commandModeFailedFallback(let invocation):
+                return "Edit mode failed, using selected text (\(invocation.rawValue))"
             }
         }
     }
 
     private func processTranscript(
         _ rawTranscript: String,
+        intent: SessionIntent,
         context: AppContext,
         postProcessingService: PostProcessingService,
         customVocabulary: String,
@@ -1410,6 +1692,21 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         guard !trimmedRawTranscript.isEmpty else {
             return ("", .skippedEmptyRawTranscript, "")
+        }
+
+        if case .command(let invocation, let selectedText) = intent {
+            do {
+                let result = try await postProcessingService.commandTransform(
+                    selectedText: selectedText,
+                    voiceCommand: rawTranscript,
+                    context: context,
+                    customVocabulary: customVocabulary
+                )
+                return (result.transcript, .commandModeSucceeded(invocation: invocation), result.prompt)
+            } catch {
+                os_log(.error, log: recordingLog, "Edit mode failed: %{public}@", error.localizedDescription)
+                return (selectedText, .commandModeFailedFallback(invocation: invocation), "")
+            }
         }
 
         if let macro = findMatchingMacro(for: trimmedRawTranscript) {
@@ -1440,6 +1737,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         cancelRecordingInitializationTimer()
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
+        let sessionIntent = currentSessionIntent
+        currentSessionIntent = .dictation
         audioRecorder.onRecordingReady = nil
         audioRecorder.onRecordingFailure = nil
         audioLevelCancellable?.cancel()
@@ -1533,6 +1832,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     }
                     let result = await self.processTranscript(
                         rawTranscript,
+                        intent: sessionIntent,
                         context: appContext,
                         postProcessingService: postProcessingService,
                         customVocabulary: self.customVocabulary,
@@ -1552,6 +1852,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             postProcessingPrompt: result.prompt,
                             context: appContext,
                             processingStatus: processingStatus,
+                            intent: sessionIntent,
                             audioFileName: savedAudioFile?.fileName
                         )
                         self.audioRecorder.cleanup()
@@ -1577,14 +1878,25 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         self.debugStatusMessage = "Done"
                         let completionStatusText = self.preserveClipboard ? "Pasted at cursor!" : "Copied to clipboard!"
 
+                        let shouldPersistRawDictationFallback: Bool
+                        switch result.outcome {
+                        case .postProcessingFailedFallback:
+                            shouldPersistRawDictationFallback = !trimmedFinalTranscript.isEmpty
+                        default:
+                            shouldPersistRawDictationFallback = false
+                        }
+
                         if trimmedFinalTranscript.isEmpty {
                             self.mcpLastRecordingFailed = true
                             self.statusText = "Nothing to transcribe"
+                            self.clearPendingOverlayDismissToken()
                             self.overlayManager.dismiss()
                         } else {
                             self.statusText = completionStatusText
-                            self.overlayManager.showDone()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                            if shouldPersistRawDictationFallback {
+                                self.scheduleOverlayDismissAfterFailureIndicator(after: 2.5)
+                            } else {
+                                self.clearPendingOverlayDismissToken()
                                 self.overlayManager.dismiss()
                             }
                             if !self.disableAutoPaste {
@@ -1618,6 +1930,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             postProcessingPrompt: "",
                             context: resolvedContext,
                             processingStatus: "Error: \(error.localizedDescription)",
+                            intent: self.currentSessionIntent,
                             audioFileName: savedAudioFile?.fileName
                         )
                         self.audioRecorder.cleanup()
@@ -1654,6 +1967,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         postProcessingPrompt: String,
         context: AppContext,
         processingStatus: String,
+        intent: SessionIntent,
         audioFileName: String? = nil
     ) {
         let transcriptFileName = Self.saveTranscriptFile(
@@ -1661,6 +1975,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             postProcessedTranscript: postProcessedTranscript
         )
         let newEntry = PipelineHistoryItem(
+            intent: intent.persistedIntent,
+            selectedText: intent.persistedSelectedText,
             timestamp: Date(),
             rawTranscript: "",
             postProcessedTranscript: postProcessedTranscript,
@@ -1860,6 +2176,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private func startDebugOverlay() {
         isDebugOverlayActive = true
+        clearPendingOverlayDismissToken()
         overlayManager.showRecording()
 
         // Simulate audio levels with a timer
@@ -1879,7 +2196,23 @@ final class AppState: ObservableObject, @unchecked Sendable {
         debugOverlayTimer?.invalidate()
         debugOverlayTimer = nil
         isDebugOverlayActive = false
+        clearPendingOverlayDismissToken()
         overlayManager.dismiss()
+    }
+
+    private func clearPendingOverlayDismissToken() {
+        pendingOverlayDismissToken = nil
+    }
+
+    private func scheduleOverlayDismissAfterFailureIndicator(after delay: TimeInterval) {
+        let dismissToken = UUID()
+        pendingOverlayDismissToken = dismissToken
+        overlayManager.showFailureIndicator()
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.pendingOverlayDismissToken == dismissToken else { return }
+            self.pendingOverlayDismissToken = nil
+            self.overlayManager.dismiss()
+        }
     }
 
     func toggleDebugPanel() {
