@@ -294,6 +294,7 @@ struct NoteBrowserView: View {
     @StateObject private var titleStore = NoteTitleStore.shared
     @State private var selectedItemID: UUID?
     @State private var searchText = ""
+    @State private var knownHistoryIDs: Set<UUID> = []
 
     private var filteredHistory: [PipelineHistoryItem] {
         guard !searchText.isEmpty else { return appState.pipelineHistory }
@@ -312,6 +313,8 @@ struct NoteBrowserView: View {
         }
         .frame(minWidth: 800, minHeight: 520)
         .onAppear {
+            let ids = Set(appState.pipelineHistory.map(\.id))
+            knownHistoryIDs = ids
             if selectedItemID == nil {
                 selectedItemID = appState.pipelineHistory.first?.id
             }
@@ -321,12 +324,14 @@ struct NoteBrowserView: View {
             // 현재 선택이 사라진 경우 → 최신 항목 선택
             guard let current = selectedItemID, ids.contains(current) else {
                 selectedItemID = ids.first
+                knownHistoryIDs = Set(ids)
                 return
             }
-            // 새 항목이 맨 위에 추가된 경우 → 자동으로 최신 항목 선택
-            if let newest = ids.first, newest != current {
+            // 진짜 새 항목이 추가된 경우에만 자동 선택 (기존 항목 수정은 무시)
+            if let newest = ids.first, newest != current, !knownHistoryIDs.contains(newest) {
                 selectedItemID = newest
             }
+            knownHistoryIDs = Set(ids)
         }
     }
 
@@ -432,7 +437,7 @@ struct NoteBrowserView: View {
             }
         }
         .frame(width: 280)
-        .background(.thickMaterial)
+        .background(.ultraThinMaterial)
         .overlay(alignment: .trailing) {
             Rectangle()
                 .fill(Color.primary.opacity(0.07))
@@ -660,12 +665,11 @@ private struct NoteDetailView: View {
     @State private var loadedContent: String?
     @State private var isCopied = false
     @State private var showExportSheet = false
-    @State private var isEditingTitle = false
     @State private var titleDraft = ""
     @State private var isRetrying = false
 
     private var isError: Bool { item.postProcessingStatus.hasPrefix("Error:") }
-    private var canRetry: Bool { isError && item.audioFileName != nil }
+    private var canRetry: Bool { item.audioFileName != nil }
     private var displayContent: String { loadedContent ?? item.postProcessedTranscript }
 
     var body: some View {
@@ -679,6 +683,11 @@ private struct NoteDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
         .onAppear { loadContent() }
+        .onChange(of: item.postProcessedTranscript) { newValue in
+            if !newValue.isEmpty {
+                loadedContent = newValue
+            }
+        }
         .sheet(isPresented: $showExportSheet) {
             ObsidianExportSheet(
                 item: item,
@@ -721,38 +730,21 @@ private struct NoteDetailView: View {
                 Spacer()
             }
 
-            // Title
-            if isEditingTitle {
-                HStack(spacing: 8) {
-                    TextField("제목 입력", text: $titleDraft)
-                        .font(.system(size: 28, weight: .bold))
-                        .textFieldStyle(.plain)
-                        .onSubmit { commitTitle() }
-                    Button { commitTitle() } label: {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                            .font(.system(size: 20))
-                    }
-                    .buttonStyle(.plain)
-                    Button { isEditingTitle = false } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                            .font(.system(size: 20))
-                    }
-                    .buttonStyle(.plain)
-                }
-            } else {
-                Text(titleStore.title(for: item.id) ?? item.timestamp.formatted(date: .long, time: .shortened))
-                    .font(.system(size: 28, weight: .bold, design: .default))
-                    .foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .onTapGesture {
-                        titleDraft = titleStore.title(for: item.id) ?? ""
-                        isEditingTitle = true
-                    }
-                    .help("클릭하여 제목 편집")
-                    .overrideCursor(.iBeam)
+            // Title — auto-save on change
+            TextField(
+                item.timestamp.formatted(date: .long, time: .shortened),
+                text: $titleDraft
+            )
+            .font(.system(size: 28, weight: .bold))
+            .textFieldStyle(.plain)
+            .foregroundStyle(.primary)
+            .onChange(of: titleDraft) { newValue in
+                titleStore.setTitle(newValue, for: item.id)
             }
+            .onAppear {
+                titleDraft = titleStore.title(for: item.id) ?? ""
+            }
+            .overrideCursor(.iBeam)
 
             // Audio player (오디오 파일이 있을 때만 표시)
             if let audioFileName = item.audioFileName {
@@ -770,11 +762,6 @@ private struct NoteDetailView: View {
         .overlay(alignment: .bottom) {
             Divider().opacity(0.4)
         }
-    }
-
-    private func commitTitle() {
-        titleStore.setTitle(titleDraft, for: item.id)
-        isEditingTitle = false
     }
 
     @ViewBuilder
@@ -840,7 +827,10 @@ private struct NoteDetailView: View {
             } else if displayContent.isEmpty {
                 emptyContentState
             } else {
-                NoteTextView(text: displayContent, bottomPadding: 80)
+                NoteTextView(text: displayContent, bottomPadding: 36) { edited in
+                    loadedContent = edited
+                    appState.updateTranscript(id: item.id, text: edited)
+                }
             }
         }
     }
@@ -888,7 +878,6 @@ private struct NoteDetailView: View {
 
     private var floatingToolbar: some View {
         HStack(spacing: 2) {
-            // Retry (error일 때만)
             if canRetry {
                 toolbarButton(
                     action: { retryTranscription() },
@@ -1043,8 +1032,8 @@ struct NoteAudioPlayerView: View {
     }
 
     var body: some View {
-        HStack(spacing: 16) {
-            // Play / Stop button
+        HStack(spacing: 14) {
+            // Play / Stop button — var(--ink) bg, var(--bg) icon
             Button { togglePlayback() } label: {
                 ZStack {
                     Circle()
@@ -1053,12 +1042,12 @@ struct NoteAudioPlayerView: View {
                     Image(systemName: isPlaying ? "stop.fill" : "play.fill")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Color(nsColor: .windowBackgroundColor))
-                        .offset(x: isPlaying ? 0 : 1)
+                        .offset(x: isPlaying ? 0 : 1.5)
                 }
             }
             .buttonStyle(.plain)
 
-            // Waveform bars
+            // Waveform — border-radius:1px, opacity:0.45 unplayed, accent played
             GeometryReader { geo in
                 let barCount = barHeights.count
                 let gap: CGFloat = 2
@@ -1068,37 +1057,42 @@ struct NoteAudioPlayerView: View {
 
                 HStack(alignment: .center, spacing: gap) {
                     ForEach(0..<barCount, id: \.self) { i in
-                        Capsule()
-                            .fill(i < playedCount ? Color.accentColor : Color.primary.opacity(0.2))
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(i < playedCount
+                                  ? Color.accentColor
+                                  : Color.primary.opacity(0.45))
                             .frame(width: barWidth, height: geo.size.height * barHeights[i])
                     }
                 }
                 .frame(maxHeight: .infinity, alignment: .center)
             }
-            .frame(height: 36)
+            .frame(height: 44)
 
-            // Time
+            // Time — monospaced, tabular, var(--ink-2) ≈ secondary, min-width 80
             Text("\(formatDuration(elapsed)) / \(formatDuration(duration))")
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
-                .fixedSize()
+                .monospacedDigit()
+                .frame(minWidth: 80, alignment: .center)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .background {
-            RoundedRectangle(cornerRadius: 14)
+            RoundedRectangle(cornerRadius: 12)
                 .fill(
                     LinearGradient(
-                        colors: [Color.accentColor.opacity(0.08), Color.accentColor.opacity(0.02)],
+                        colors: [Color.accentColor.opacity(0.06), Color.clear],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
                 )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
                         .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
-                )
+                }
         }
+        .shadow(color: .black.opacity(0.08), radius: 12, x: 0, y: 4)
+        .shadow(color: .black.opacity(0.04), radius: 3, x: 0, y: 1)
         .onAppear {
             loadDuration()
             loadWaveform()
@@ -1417,6 +1411,9 @@ private struct ObsidianExportSheet: View {
 private struct NoteTextView: NSViewRepresentable {
     let text: String
     var bottomPadding: CGFloat = 0
+    var onCommit: ((String) -> Void)? = nil
+
+    func makeCoordinator() -> Coordinator { Coordinator(onCommit: onCommit) }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
@@ -1427,7 +1424,7 @@ private struct NoteTextView: NSViewRepresentable {
         scrollView.borderType = .noBorder
 
         let textView = NSTextView()
-        textView.isEditable = false
+        textView.isEditable = true
         textView.isSelectable = true
         textView.drawsBackground = false
         textView.backgroundColor = .clear
@@ -1437,6 +1434,7 @@ private struct NoteTextView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.heightTracksTextView = false
         textView.textContainerInset = NSSize(width: 40, height: 20)
+        textView.delegate = context.coordinator
 
         scrollView.documentView = textView
         applyText(text, to: textView, bottomPadding: bottomPadding)
@@ -1445,7 +1443,12 @@ private struct NoteTextView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
-        if textView.string != text { applyText(text, to: textView, bottomPadding: bottomPadding) }
+        context.coordinator.onCommit = onCommit
+        let currentContent = textView.string.trimmingCharacters(in: .newlines)
+        let newContent = text.trimmingCharacters(in: .newlines)
+        if textView.window?.firstResponder !== textView, currentContent != newContent {
+            applyText(text, to: textView, bottomPadding: bottomPadding)
+        }
     }
 
     private func applyText(_ text: String, to textView: NSTextView, bottomPadding: CGFloat) {
@@ -1457,9 +1460,26 @@ private struct NoteTextView: NSViewRepresentable {
             .paragraphStyle: style,
             .foregroundColor: NSColor.labelColor
         ]
-        let padding = String(repeating: "\n", count: max(1, Int(bottomPadding / 20)))
+        let lineCount = bottomPadding > 0 ? max(1, Int(bottomPadding / 18)) : 0
+        let padding = String(repeating: "\n", count: lineCount)
         let attrStr = NSMutableAttributedString(string: text + padding, attributes: attrs)
         textView.textStorage?.setAttributedString(attrStr)
         textView.typingAttributes = attrs
+    }
+
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var onCommit: ((String) -> Void)?
+        private var debounceTimer: Timer?
+
+        init(onCommit: ((String) -> Void)?) { self.onCommit = onCommit }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            debounceTimer?.invalidate()
+            debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self, weak textView] _ in
+                guard let text = textView?.string else { return }
+                self?.onCommit?(text.trimmingCharacters(in: .newlines))
+            }
+        }
     }
 }

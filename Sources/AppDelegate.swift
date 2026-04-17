@@ -146,12 +146,12 @@ private func showNoteBrowserWindow() {
             .environmentObject(ObsidianExportManager.shared)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 580),
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 700),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "노트 브라우저"
+        window.title = "Quill"
         window.contentView = NSHostingView(rootView: view)
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 600, height: 400)
