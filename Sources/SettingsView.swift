@@ -116,7 +116,7 @@ struct GeneralSettingsView: View {
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 64, height: 64)
 
-                    Text("FreeFlow")
+                    Text("Quill")
                         .font(.system(size: 20, weight: .bold, design: .rounded))
 
                     Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")")
@@ -273,7 +273,7 @@ struct GeneralSettingsView: View {
 
     private var startupSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Toggle("Launch FreeFlow at login", isOn: $appState.launchAtLogin)
+            Toggle("Launch Quill at login", isOn: $appState.launchAtLogin)
             Toggle("Show menu bar icon", isOn: $showMenuBarIcon)
 
             HStack(alignment: .center, spacing: 12) {
@@ -403,7 +403,7 @@ struct GeneralSettingsView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "arrow.down.circle.fill")
                                 .foregroundStyle(.blue)
-                            Text("A new version of FreeFlow is available!")
+                            Text("A new version of Quill is available!")
                                 .font(.caption.weight(.semibold))
                             Spacer()
                             Button("Update Now") {
@@ -426,7 +426,7 @@ struct GeneralSettingsView: View {
 
     private var apiKeySection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("FreeFlow uses Groq's whisper-large-v3 model for transcription.")
+            Text("Quill uses Groq's whisper-large-v3 model for transcription.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -729,7 +729,7 @@ struct GeneralSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle("Preserve clipboard after paste", isOn: $appState.preserveClipboard)
 
-            Text("FreeFlow will temporarily place the transcript on your clipboard to paste it, then restore whatever was there before. If you copy something else before the restore happens, FreeFlow leaves it alone.")
+            Text("Quill will temporarily place the transcript on your clipboard to paste it, then restore whatever was there before. If you copy something else before the restore happens, Quill leaves it alone.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -1143,11 +1143,11 @@ struct PromptsSettingsView: View {
         let vocabulary = appState.customVocabulary
 
         let context = AppContext(
-            appName: "FreeFlow Settings",
+            appName: "Quill Settings",
             bundleIdentifier: "com.zachlatta.freeflow",
             windowTitle: "System Prompt Test",
             selectedText: nil,
-            currentActivity: "User is testing the system prompt in FreeFlow settings.",
+            currentActivity: "User is testing the system prompt in Quill settings.",
             contextPrompt: nil,
             screenshotDataURL: nil,
             screenshotMimeType: nil,
@@ -1185,7 +1185,7 @@ struct PromptsSettingsView: View {
             && appState.customContextPromptLastModified < AppContextService.defaultContextPromptDate
 
         return VStack(alignment: .leading, spacing: 10) {
-            Text("Controls how FreeFlow infers your current activity from app metadata and screenshots.")
+            Text("Controls how Quill infers your current activity from app metadata and screenshots.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
