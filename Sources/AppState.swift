@@ -767,7 +767,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
         do {
             try pipelineHistoryStore.update(updated)
-            pipelineHistory = pipelineHistoryStore.loadAllHistory()
+            if let index = pipelineHistory.firstIndex(where: { $0.id == id }) {
+                pipelineHistory[index] = updated
+            }
         } catch {
             errorMessage = "Failed to save transcript edit: \(error.localizedDescription)"
         }

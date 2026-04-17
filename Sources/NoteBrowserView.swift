@@ -667,6 +667,7 @@ private struct NoteDetailView: View {
     @State private var showExportSheet = false
     @State private var titleDraft = ""
     @State private var isRetrying = false
+    @State private var titleDebounceTimer: Timer?
 
     private var isError: Bool { item.postProcessingStatus.hasPrefix("Error:") }
     private var canRetry: Bool { item.audioFileName != nil }
@@ -739,7 +740,12 @@ private struct NoteDetailView: View {
             .textFieldStyle(.plain)
             .foregroundStyle(.primary)
             .onChange(of: titleDraft) { newValue in
-                titleStore.setTitle(newValue, for: item.id)
+                titleDebounceTimer?.invalidate()
+                let timer = Timer(timeInterval: 0.5, repeats: false) { [weak titleStore] _ in
+                    titleStore?.setTitle(newValue, for: item.id)
+                }
+                RunLoop.main.add(timer, forMode: .common)
+                titleDebounceTimer = timer
             }
             .onAppear {
                 titleDraft = titleStore.title(for: item.id) ?? ""
@@ -1476,10 +1482,12 @@ private struct NoteTextView: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             debounceTimer?.invalidate()
-            debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self, weak textView] _ in
+            let timer = Timer(timeInterval: 0.5, repeats: false) { [weak self, weak textView] _ in
                 guard let text = textView?.string else { return }
                 self?.onCommit?(text.trimmingCharacters(in: .newlines))
             }
+            RunLoop.current.add(timer, forMode: .common)
+            debounceTimer = timer
         }
     }
 }
