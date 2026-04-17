@@ -202,6 +202,22 @@ source: FreeFlow
             process.arguments = ["--yolo", "-p", "\(prompt)\n\n---\n\(content)"]
             process.currentDirectoryURL = FileManager.default.temporaryDirectory
 
+            // GUI 앱은 셸 PATH를 상속받지 않으므로 node 경로를 명시적으로 추가
+            var env = ProcessInfo.processInfo.environment
+            let extraPaths: [String] = [
+                "/opt/homebrew/bin",
+                "/opt/homebrew/sbin",
+                "/usr/local/bin",
+                "/Users/\(NSUserName())/.npm-global/bin",
+                "/Users/\(NSUserName())/.volta/bin",
+                ObsidianExportManager.nvmNodeBinPath(),
+                "/usr/bin",
+                "/bin"
+            ].filter { !$0.isEmpty }
+            let existingPath = env["PATH"] ?? ""
+            env["PATH"] = (extraPaths + [existingPath]).filter { !$0.isEmpty }.joined(separator: ":")
+            process.environment = env
+
             let outputPipe = Pipe()
             let errorPipe = Pipe()
             process.standardOutput = outputPipe
@@ -228,6 +244,14 @@ source: FreeFlow
             }
             do { try process.run() } catch { continuation.resume(throwing: error) }
         }
+    }
+
+    // nvm으로 설치된 현재 node의 bin 경로를 반환
+    static func nvmNodeBinPath() -> String {
+        let nvmDir = "/Users/\(NSUserName())/.nvm/versions/node"
+        guard let versions = try? FileManager.default.contentsOfDirectory(atPath: nvmDir)
+                .sorted().last else { return "" }
+        return "\(nvmDir)/\(versions)/bin"
     }
 }
 
