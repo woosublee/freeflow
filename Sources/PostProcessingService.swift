@@ -298,7 +298,10 @@ Behavior:
         customVocabulary: [String],
         customSystemPrompt: String = ""
     ) async throws -> PostProcessingResult {
-        var request = URLRequest(url: URL(string: "\(baseURL)/chat/completions")!)
+        guard let url = URL(string: "\(baseURL)/chat/completions") else {
+            throw PostProcessingError.invalidInput("Invalid base URL: \(baseURL)")
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -398,7 +401,10 @@ Model: \(model)
         model: String,
         customVocabulary: [String]
     ) async throws -> PostProcessingResult {
-        var request = URLRequest(url: URL(string: "\(baseURL)/chat/completions")!)
+        guard let url = URL(string: "\(baseURL)/chat/completions") else {
+            throw PostProcessingError.invalidInput("Invalid base URL: \(baseURL)")
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

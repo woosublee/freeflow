@@ -300,7 +300,7 @@ final class MCPServer {
                 """)
 
         case "list_transcripts":
-            let limit = min(args["limit"] as? Int ?? 10, 50)
+            let limit = max(0, min(args["limit"] as? Int ?? 10, 50))
             let entries = Array(appState.pipelineHistory.prefix(limit))
             if entries.isEmpty {
                 return textContent("No transcripts found.")
