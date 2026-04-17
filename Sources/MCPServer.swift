@@ -211,6 +211,33 @@ final class MCPServer {
                     "type": "object",
                     "properties": [:]
                 ]
+            ],
+            [
+                "name": "list_transcripts",
+                "description": "List recent transcription history entries with id, timestamp, and a short preview.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "limit": [
+                            "type": "integer",
+                            "description": "Maximum number of entries to return (default: 10, max: 50)"
+                        ]
+                    ]
+                ]
+            ],
+            [
+                "name": "get_transcript",
+                "description": "Get the full content of a specific transcription entry by id.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "id": [
+                            "type": "string",
+                            "description": "UUID of the transcript entry from list_transcripts"
+                        ]
+                    ],
+                    "required": ["id"]
+                ]
             ]
         ]
     }
@@ -262,14 +289,49 @@ final class MCPServer {
                 status = "idle"
             }
             let ctx = appState.mcpAdditionalContext
-            let last = appState.lastTranscript
             let failed = appState.mcpLastRecordingFailed
-            let transcriptValue = failed ? "(transcription failed)" : last.isEmpty ? "(none)" : last
+            let lastEntry = appState.pipelineHistory.first
+            let lastTranscript = lastEntry?.postProcessedTranscript ?? lastEntry?.rawTranscript ?? ""
+            let transcriptValue = failed ? "(transcription failed)" : lastTranscript.isEmpty ? "(none)" : lastTranscript
             return textContent("""
                 status: \(status)
                 context: \(ctx.isEmpty ? "(none)" : ctx)
                 last_transcript: \(transcriptValue)
                 """)
+
+        case "list_transcripts":
+            let limit = min(args["limit"] as? Int ?? 10, 50)
+            let entries = Array(appState.pipelineHistory.prefix(limit))
+            if entries.isEmpty {
+                return textContent("No transcripts found.")
+            }
+            let formatter = ISO8601DateFormatter()
+            let lines = entries.map { item -> String in
+                let preview = item.postProcessedTranscript.isEmpty ? item.rawTranscript : item.postProcessedTranscript
+                let truncated = preview.count > 80 ? String(preview.prefix(80)) + "…" : preview
+                return "[\(formatter.string(from: item.timestamp))] \(item.id.uuidString)\n  \(truncated)"
+            }
+            return textContent(lines.joined(separator: "\n\n"))
+
+        case "get_transcript":
+            guard let idString = args["id"] as? String, let uuid = UUID(uuidString: idString) else {
+                return textContent("Error: valid 'id' is required.", isError: true)
+            }
+            guard let item = appState.pipelineHistory.first(where: { $0.id == uuid }) else {
+                return textContent("Error: transcript not found.", isError: true)
+            }
+            let formatter = ISO8601DateFormatter()
+            var lines = ["id: \(item.id.uuidString)", "timestamp: \(formatter.string(from: item.timestamp))"]
+            if !item.postProcessedTranscript.isEmpty {
+                lines.append("transcript: \(item.postProcessedTranscript)")
+            }
+            if !item.rawTranscript.isEmpty {
+                lines.append("raw_transcript: \(item.rawTranscript)")
+            }
+            if !item.contextSummary.isEmpty {
+                lines.append("context: \(item.contextSummary)")
+            }
+            return textContent(lines.joined(separator: "\n"))
 
         default:
             return textContent("Unknown tool: \(name)", isError: true)
