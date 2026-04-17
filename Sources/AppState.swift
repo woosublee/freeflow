@@ -1930,6 +1930,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             postProcessingPrompt: "",
                             context: resolvedContext,
                             processingStatus: "Error: \(error.localizedDescription)",
+                            intent: self.currentSessionIntent,
                             audioFileName: savedAudioFile?.fileName
                         )
                         self.audioRecorder.cleanup()
@@ -1954,17 +1955,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         self.lastContextScreenshotDataURL = resolvedContext.screenshotDataURL
                         self.lastContextScreenshotStatus = resolvedContext.screenshotError
                             ?? "available (\(resolvedContext.screenshotMimeType ?? "image"))"
-                        self.recordPipelineHistoryEntry(
-                            rawTranscript: "",
-                            postProcessedTranscript: "",
-                            postProcessingPrompt: "",
-                            context: resolvedContext,
-                            processingStatus: "Error: \(error.localizedDescription)",
-                            intent: sessionIntent,
-                            audioFileName: savedAudioFile?.fileName
-                        )
-                        self.audioRecorder.cleanup()
-                        self.refreshAvailableMicrophonesIfNeeded()
                     }
                 }
             }
