@@ -95,6 +95,7 @@ struct GeneralSettingsView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.openURL) private var openURL
     @AppStorage("show_menu_bar_icon") private var showMenuBarIcon = true
+    @AppStorage("app_appearance") private var appAppearance: String = "system"
     @State private var apiKeyInput: String = ""
     @State private var apiBaseURLInput: String = ""
     @State private var isValidatingKey = false
@@ -226,6 +227,9 @@ struct GeneralSettingsView: View {
                 .padding(.top, 4)
                 .padding(.bottom, 4)
 
+                SettingsCard("Appearance", icon: "paintbrush.fill") {
+                    appearanceSection
+                }
                 SettingsCard("App", icon: "power") {
                     startupSection
                 }
@@ -266,6 +270,34 @@ struct GeneralSettingsView: View {
             checkMicPermission()
             appState.refreshLaunchAtLoginStatus()
             Task { await githubCache.fetchIfNeeded() }
+        }
+    }
+
+    // MARK: Appearance
+
+    private var appearanceSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("테마")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Picker("", selection: $appAppearance) {
+                Text("시스템 설정 따름").tag("system")
+                Text("라이트 모드").tag("light")
+                Text("다크 모드").tag("dark")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .onChange(of: appAppearance) { value in
+                applyAppearance(value)
+            }
+        }
+    }
+
+    private func applyAppearance(_ value: String) {
+        switch value {
+        case "light":  NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark":   NSApp.appearance = NSAppearance(named: .darkAqua)
+        default:       NSApp.appearance = nil
         }
     }
 

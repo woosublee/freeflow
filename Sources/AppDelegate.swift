@@ -43,6 +43,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ObsidianExportManager.shared.requestNotificationPermission()
 
+        // 저장된 appearance 설정 적용
+        let savedAppearance = UserDefaults.standard.string(forKey: "app_appearance") ?? "system"
+        switch savedAppearance {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark":  NSApp.appearance = NSAppearance(named: .darkAqua)
+        default:      NSApp.appearance = nil
+        }
+
         // SwiftUI 메뉴 초기화 이후 Settings 단축키 강제 설정
         DispatchQueue.main.async {
             self.patchSettingsMenuItem()
