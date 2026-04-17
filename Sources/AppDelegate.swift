@@ -6,6 +6,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var setupWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var noteBrowserWindow: NSWindow?
+    private var mcpServer: MCPServer?
 
     private func patchSettingsMenuItem() {
         guard let appMenu = NSApp.mainMenu?.items.first?.submenu else { return }
@@ -85,6 +86,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if !AXIsProcessTrusted() {
                 appState.showAccessibilityAlert()
             }
+
+            startMCPServer()
         }
 
     }
@@ -247,6 +250,19 @@ private func showNoteBrowserWindow() {
 
         if !AXIsProcessTrusted() {
             appState.showAccessibilityAlert()
+        }
+    }
+
+    private func startMCPServer() {
+        let server = MCPServer(appState: appState)
+        appState.onTranscriptionCompleted = { [weak server] transcript, context in
+            server?.notifyRecordingCompleted(transcript: transcript, context: context)
+        }
+        do {
+            try server.start()
+            mcpServer = server
+        } catch {
+            print("[MCP] Failed to start server: \(error)")
         }
     }
 }

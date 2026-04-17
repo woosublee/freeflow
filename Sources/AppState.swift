@@ -306,6 +306,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var lastTranscript: String = ""
     @Published var errorMessage: String?
     @Published var statusText: String = "Ready"
+
+    // MCP interface
+    var mcpAdditionalContext: String = ""
+    var mcpLastRecordingFailed: Bool = false
+    var onTranscriptionCompleted: ((String, String) -> Void)?
     @Published var hasAccessibility = false
     @Published var isDebugOverlayActive = false
     @Published var selectedSettingsTab: SettingsTab? = .general
@@ -1017,6 +1022,19 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    // MCP public interface
+    func startRecordingFromMCP() {
+        lastTranscript = ""
+        mcpLastRecordingFailed = false
+        shortcutSessionController.beginManual(mode: .toggle)
+        startRecording(triggerMode: .toggle)
+    }
+
+    func stopRecordingFromMCP() {
+        guard isRecording else { return }
+        stopAndTranscribe()
+    }
+
     private func handleOverlayStopButtonPressed() {
         guard isRecording, activeRecordingTriggerMode == .toggle else { return }
         stopAndTranscribe()
@@ -1456,6 +1474,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     self.statusText = "Error"
                     self.overlayManager.dismiss()
                 }
+                self.mcpLastRecordingFailed = true
                 self.audioRecorder.cleanup()
                 self.refreshAvailableMicrophonesIfNeeded()
                 return
@@ -1559,6 +1578,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         let completionStatusText = self.preserveClipboard ? "Pasted at cursor!" : "Copied to clipboard!"
 
                         if trimmedFinalTranscript.isEmpty {
+                            self.mcpLastRecordingFailed = true
                             self.statusText = "Nothing to transcribe"
                             self.overlayManager.dismiss()
                         } else {
@@ -1668,6 +1688,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
             pipelineHistory = pipelineHistoryStore.loadAllHistory()
         } catch {
             errorMessage = "Unable to save run history entry: \(error.localizedDescription)"
+        }
+
+        // MCP notification
+        if !postProcessedTranscript.isEmpty, let callback = onTranscriptionCompleted {
+            let context = mcpAdditionalContext
+            mcpAdditionalContext = ""
+            callback(postProcessedTranscript, context)
         }
     }
 
