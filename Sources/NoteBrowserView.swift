@@ -1,7 +1,8 @@
 import SwiftUI
 import UserNotifications
+import AVFoundation
 
-// MARK: - Cursor + Glass helpers
+// MARK: - Cursor helper
 
 private class CursorNSView: NSView {
     var cursor: NSCursor
@@ -45,13 +46,27 @@ private struct CursorView: NSViewRepresentable {
     func updateNSView(_ nsView: CursorNSView, context: Context) { nsView.cursor = cursor }
 }
 
-// 진짜 NSVisualEffectView 기반 블러
+extension View {
+    func overrideCursor(_ cursor: NSCursor) -> some View {
+        self.background(CursorView(cursor: cursor))
+    }
+}
+
+// MARK: - Visual effect helpers
+
 private class GlassNSView: NSView {
+    var material: NSVisualEffectView.Material
     private let effectView = NSVisualEffectView()
 
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        effectView.material = .hudWindow
+    init(material: NSVisualEffectView.Material = .hudWindow) {
+        self.material = material
+        super.init(frame: .zero)
+        setup()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setup() {
+        effectView.material = material
         effectView.blendingMode = .withinWindow
         effectView.state = .active
         effectView.wantsLayer = true
@@ -59,7 +74,6 @@ private class GlassNSView: NSView {
         effectView.layer?.masksToBounds = true
         addSubview(effectView)
     }
-    required init?(coder: NSCoder) { fatalError() }
 
     override func layout() {
         super.layout()
@@ -69,14 +83,21 @@ private class GlassNSView: NSView {
 }
 
 private struct GlassView: NSViewRepresentable {
-    func makeNSView(context: Context) -> GlassNSView { GlassNSView() }
-    func updateNSView(_ nsView: GlassNSView, context: Context) {}
+    var material: NSVisualEffectView.Material = .hudWindow
+    func makeNSView(context: Context) -> GlassNSView { GlassNSView(material: material) }
+    func updateNSView(_ nsView: GlassNSView, context: Context) { nsView.material = material }
 }
 
-extension View {
-    func overrideCursor(_ cursor: NSCursor) -> some View {
-        self.background(CursorView(cursor: cursor))
-    }
+// MARK: - Status helpers
+
+private enum TranscriptStatus {
+    case done, progress, fail
+}
+
+private func transcriptStatus(for item: PipelineHistoryItem, retrying: Set<UUID>) -> TranscriptStatus {
+    if retrying.contains(item.id) { return .progress }
+    if item.postProcessingStatus.hasPrefix("Error:") { return .fail }
+    return .done
 }
 
 // MARK: - Obsidian Export Manager
@@ -102,12 +123,10 @@ final class ObsidianExportManager: ObservableObject {
         geminiPrompt: String,
         timestamp: Date
     ) {
-        processingIDs.insert(itemID)  // 메인 스레드에서 즉시 반영
+        processingIDs.insert(itemID)
         Task {
             defer {
-                Task { @MainActor in
-                    self.processingIDs.remove(itemID)
-                }
+                Task { @MainActor in self.processingIDs.remove(itemID) }
             }
             do {
                 let finalContent: String
@@ -123,12 +142,11 @@ final class ObsidianExportManager: ObservableObject {
 
                 let markdown: String
                 if useGemini {
-                    // Gemini 정리 내용 상단, 원본 전사문은 하단 섹션으로
                     markdown = """
 ---
 title: \(fileName)
 date: \(iso.string(from: timestamp))
-source: FreeFlow
+source: Quill
 ---
 
 \(finalContent)
@@ -144,7 +162,7 @@ source: FreeFlow
 ---
 title: \(fileName)
 date: \(iso.string(from: timestamp))
-source: FreeFlow
+source: Quill
 ---
 
 # 전사문
@@ -176,12 +194,7 @@ source: FreeFlow
         content.title = title
         content.body = body
         content.sound = success ? .default : nil
-
-        let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: content,
-            trigger: nil
-        )
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         try? await UNUserNotificationCenter.current().add(request)
     }
 
@@ -202,17 +215,13 @@ source: FreeFlow
             process.arguments = ["--yolo", "-p", "\(prompt)\n\n---\n\(content)"]
             process.currentDirectoryURL = FileManager.default.temporaryDirectory
 
-            // GUI 앱은 셸 PATH를 상속받지 않으므로 node 경로를 명시적으로 추가
             var env = ProcessInfo.processInfo.environment
             let extraPaths: [String] = [
-                "/opt/homebrew/bin",
-                "/opt/homebrew/sbin",
-                "/usr/local/bin",
+                "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin",
                 "/Users/\(NSUserName())/.npm-global/bin",
                 "/Users/\(NSUserName())/.volta/bin",
                 ObsidianExportManager.nvmNodeBinPath(),
-                "/usr/bin",
-                "/bin"
+                "/usr/bin", "/bin"
             ].filter { !$0.isEmpty }
             let existingPath = env["PATH"] ?? ""
             env["PATH"] = (extraPaths + [existingPath]).filter { !$0.isEmpty }.joined(separator: ":")
@@ -224,20 +233,13 @@ source: FreeFlow
             process.standardError = errorPipe
 
             process.terminationHandler = { _ in
-                let raw = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(),
-                                 encoding: .utf8) ?? ""
-                let cleaned = raw.replacingOccurrences(
-                    of: #"\x1B\[[0-9;]*[mGKHF]"#,
-                    with: "", options: .regularExpression
-                ).trimmingCharacters(in: .whitespacesAndNewlines)
-
+                let raw = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let cleaned = raw.replacingOccurrences(of: #"\x1B\[[0-9;]*[mGKHF]"#, with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 if cleaned.isEmpty {
-                    let err = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(),
-                                     encoding: .utf8) ?? "알 수 없는 오류"
-                    continuation.resume(throwing: NSError(
-                        domain: "GeminiCLI", code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: err.trimmingCharacters(in: .whitespacesAndNewlines)]
-                    ))
+                    let err = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "알 수 없는 오류"
+                    continuation.resume(throwing: NSError(domain: "GeminiCLI", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: err.trimmingCharacters(in: .whitespacesAndNewlines)]))
                 } else {
                     continuation.resume(returning: cleaned)
                 }
@@ -246,11 +248,9 @@ source: FreeFlow
         }
     }
 
-    // nvm으로 설치된 현재 node의 bin 경로를 반환
     static func nvmNodeBinPath() -> String {
         let nvmDir = "/Users/\(NSUserName())/.nvm/versions/node"
-        guard let versions = try? FileManager.default.contentsOfDirectory(atPath: nvmDir)
-                .sorted().last else { return "" }
+        guard let versions = try? FileManager.default.contentsOfDirectory(atPath: nvmDir).sorted().last else { return "" }
         return "\(nvmDir)/\(versions)/bin"
     }
 }
@@ -259,7 +259,6 @@ source: FreeFlow
 
 final class NoteTitleStore: ObservableObject {
     static let shared = NoteTitleStore()
-
     @Published private(set) var titles: [UUID: String] = [:]
     private let key = "note_custom_titles"
 
@@ -275,11 +274,7 @@ final class NoteTitleStore: ObservableObject {
 
     func setTitle(_ title: String, for id: UUID) {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            titles.removeValue(forKey: id)
-        } else {
-            titles[id] = trimmed
-        }
+        if trimmed.isEmpty { titles.removeValue(forKey: id) } else { titles[id] = trimmed }
         save()
     }
 
@@ -287,13 +282,11 @@ final class NoteTitleStore: ObservableObject {
 
     private func save() {
         let raw = Dictionary(uniqueKeysWithValues: titles.map { ($0.key.uuidString, $0.value) })
-        if let data = try? JSONEncoder().encode(raw) {
-            UserDefaults.standard.set(data, forKey: key)
-        }
+        if let data = try? JSONEncoder().encode(raw) { UserDefaults.standard.set(data, forKey: key) }
     }
 }
 
-// MARK: - Note Browser Window
+// MARK: - Note Browser View
 
 struct NoteBrowserView: View {
     @EnvironmentObject var appState: AppState
@@ -317,16 +310,23 @@ struct NoteBrowserView: View {
             sidebarPanel
             detailPanel
         }
-        .frame(minWidth: 780, minHeight: 500)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(minWidth: 800, minHeight: 520)
         .onAppear {
             if selectedItemID == nil {
                 selectedItemID = appState.pipelineHistory.first?.id
             }
         }
-        .onChange(of: appState.pipelineHistory.map(\.id)) { ids in
-            if let id = selectedItemID, ids.contains(id) { return }
-            selectedItemID = ids.first
+        .onReceive(appState.$pipelineHistory) { newHistory in
+            let ids = newHistory.map(\.id)
+            // 현재 선택이 사라진 경우 → 최신 항목 선택
+            guard let current = selectedItemID, ids.contains(current) else {
+                selectedItemID = ids.first
+                return
+            }
+            // 새 항목이 맨 위에 추가된 경우 → 자동으로 최신 항목 선택
+            if let newest = ids.first, newest != current {
+                selectedItemID = newest
+            }
         }
     }
 
@@ -334,30 +334,94 @@ struct NoteBrowserView: View {
 
     private var sidebarPanel: some View {
         VStack(spacing: 0) {
-            searchBar
-                .padding(.horizontal, 12)
-                .padding(.top, 14)
-                .padding(.bottom, 10)
-
-            if filteredHistory.isEmpty {
-                Spacer()
-                VStack(spacing: 6) {
-                    Image(systemName: appState.pipelineHistory.isEmpty ? "note.text" : "magnifyingglass")
-                        .font(.system(size: 24, weight: .ultraLight))
+            // Title row
+            HStack(spacing: 8) {
+                Text("Recordings")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.primary)
+                if !appState.pipelineHistory.isEmpty {
+                    Text("\(appState.pipelineHistory.count)")
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.tertiary)
-                    Text(appState.pipelineHistory.isEmpty ? "노트가 없습니다" : "검색 결과 없음")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.08), in: Capsule())
                 }
                 Spacer()
+                // Record button
+                Button {
+                    appState.toggleRecording()
+                } label: {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(.white)
+                            .frame(width: 6, height: 6)
+                            .opacity(appState.isRecording ? 0.6 : 1.0)
+                            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true),
+                                       value: appState.isRecording)
+                        Text(appState.isRecording ? "중지" : "녹음")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(appState.isRecording ? Color.orange : Color.red, in: Capsule())
+                    .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+                .overrideCursor(.arrow)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
+
+            // Search bar
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                TextField("검색", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                if !searchText.isEmpty {
+                    Button { searchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+
+            Divider().opacity(0.5)
+
+            // List
+            if appState.pipelineHistory.isEmpty {
+                emptyListState
+            } else if filteredHistory.isEmpty {
+                VStack(spacing: 8) {
+                    Spacer()
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 22, weight: .ultraLight))
+                        .foregroundStyle(.tertiary)
+                    Text("검색 결과 없음")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(spacing: 4) {
+                    LazyVStack(spacing: 2) {
                         ForEach(filteredHistory) { item in
                             NoteListRow(
                                 item: item,
                                 isSelected: selectedItemID == item.id,
-                                customTitle: titleStore.title(for: item.id)
+                                customTitle: titleStore.title(for: item.id),
+                                retryingIDs: appState.retryingItemIDs
                             )
                             .onTapGesture { selectedItemID = item.id }
                         }
@@ -367,36 +431,36 @@ struct NoteBrowserView: View {
                 }
             }
         }
-        .frame(width: 260)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(width: 280)
+        .background(.thickMaterial)
         .overlay(alignment: .trailing) {
             Rectangle()
                 .fill(Color.primary.opacity(0.07))
-                .frame(width: 1)
+                .frame(width: 0.5)
         }
     }
 
-    private var searchBar: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.tertiary)
-            TextField("검색", text: $searchText)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-            if !searchText.isEmpty {
-                Button { searchText = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-
+    private var emptyListState: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            ZStack {
+                Circle()
+                    .fill(Color.primary.opacity(0.04))
+                    .frame(width: 64, height: 64)
+                Image(systemName: "mic")
+                    .font(.system(size: 26, weight: .ultraLight))
+                    .foregroundStyle(.tertiary)
             }
+            Text("녹음이 없습니다")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text("단축키를 눌러 녹음을 시작하세요")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+            Spacer()
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
-        .background(Color.primary.opacity(0.06), in: Capsule())
+        .padding(.horizontal, 20)
     }
 
     // MARK: - Detail
@@ -409,20 +473,61 @@ struct NoteBrowserView: View {
                 appState.deleteHistoryEntry(id: id)
             }
             .id(id)
+        } else if appState.pipelineHistory.isEmpty {
+            emptyDetailNoRecordings
         } else {
-            VStack(spacing: 8) {
-                Spacer()
-                Image(systemName: "note.text")
-                    .font(.system(size: 40, weight: .ultraLight))
-                    .foregroundStyle(.tertiary)
-                Text("노트를 선택하세요")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.tertiary)
-                Spacer()
-            }
-            .frame(maxWidth: .infinity)
-            .background(Color(nsColor: .textBackgroundColor))
+            emptyDetailNoSelection
         }
+    }
+
+    private var emptyDetailNoSelection: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            ZStack {
+                Circle()
+                    .fill(Color.primary.opacity(0.04))
+                    .frame(width: 80, height: 80)
+                    .overlay(Circle().stroke(Color.primary.opacity(0.08), lineWidth: 1))
+                Image(systemName: "doc.text")
+                    .font(.system(size: 32, weight: .ultraLight))
+                    .foregroundStyle(.tertiary)
+            }
+            Text("노트를 선택하세요")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("왼쪽 목록에서 녹음을 선택하면\n전사된 내용이 표시됩니다")
+                .font(.system(size: 12))
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private var emptyDetailNoRecordings: some View {
+        VStack(spacing: 14) {
+            Spacer()
+            ZStack {
+                Circle()
+                    .fill(Color.primary.opacity(0.04))
+                    .frame(width: 96, height: 96)
+                    .overlay(Circle().stroke(Color.primary.opacity(0.08), style: StrokeStyle(lineWidth: 1, dash: [4])))
+                Image(systemName: "mic")
+                    .font(.system(size: 38, weight: .ultraLight))
+                    .foregroundStyle(.tertiary)
+            }
+            Text("녹음이 없습니다")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("단축키를 눌러 첫 번째 녹음을 시작하세요.\n전사된 내용이 여기에 나타납니다.")
+                .font(.system(size: 13))
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
     }
 }
 
@@ -432,61 +537,56 @@ private struct NoteListRow: View {
     let item: PipelineHistoryItem
     let isSelected: Bool
     var customTitle: String? = nil
+    let retryingIDs: Set<UUID>
 
     @EnvironmentObject private var exportManager: ObsidianExportManager
     @State private var isHovered = false
 
-    private var isExporting: Bool {
-        exportManager.processingIDs.contains(item.id)
-    }
+    private var status: TranscriptStatus { transcriptStatus(for: item, retrying: retryingIDs) }
+
+    private var isExporting: Bool { exportManager.processingIDs.contains(item.id) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            // Date row (very small caps, tertiary)
-            HStack(spacing: 4) {
-                Text(rowDate)
-                    .font(.system(size: 9, weight: .semibold, design: .default))
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.65) : Color.secondary.opacity(0.7))
-                    .textCase(.uppercase)
-                    .kerning(0.5)
-                if isExporting {
-                    HStack(spacing: 2) {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .scaleEffect(0.65)
-                        Text("내보내는 중")
-                            .font(.system(size: 8, weight: .medium))
-                            .foregroundStyle(isSelected ? Color.white.opacity(0.75) : Color.orange)
+        HStack(alignment: .top, spacing: 10) {
+            // Content
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 4) {
+                    Text(rowDate)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.65) : Color.secondary.opacity(0.7))
+                        .textCase(.uppercase)
+                        .kerning(0.4)
+                    if isExporting {
+                        HStack(spacing: 2) {
+                            ProgressView().controlSize(.mini).scaleEffect(0.6)
+                            Text("내보내는 중")
+                                .font(.system(size: 8, weight: .medium))
+                                .foregroundStyle(isSelected ? Color.white.opacity(0.75) : .orange)
+                        }
                     }
+                    Spacer()
+                    statusIndicator
                 }
-                Spacer()
-                if item.postProcessingStatus.hasPrefix("Error:") {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 8))
-                        .foregroundStyle(isSelected ? Color.white.opacity(0.8) : Color.red.opacity(0.7))
+
+                Text(displayTitle)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isSelected ? .white : .primary)
+                    .lineLimit(1)
+
+                if !notePreview.isEmpty {
+                    Text(notePreview)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.72) : .secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
                 }
-            }
-
-            // Title (bold, 14pt)
-            Text(displayTitle)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(isSelected ? Color.white : Color.primary)
-                .lineLimit(1)
-
-            // Preview (12pt, secondary, 2 lines)
-            if !notePreview.isEmpty {
-                Text(notePreview)
-                    .font(.system(size: 12))
-                    .foregroundStyle(isSelected ? Color.white.opacity(0.7) : Color.secondary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background {
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 8)
                 .fill(
                     isSelected
                         ? Color.accentColor
@@ -495,6 +595,25 @@ private struct NoteListRow: View {
         }
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
+    }
+
+    @ViewBuilder
+    private var statusIndicator: some View {
+        switch status {
+        case .done:
+            Circle()
+                .fill(isSelected ? Color.white.opacity(0.5) : Color.green)
+                .frame(width: 6, height: 6)
+        case .progress:
+            ProgressView()
+                .controlSize(.mini)
+                .scaleEffect(0.7)
+                .tint(isSelected ? .white : .orange)
+        case .fail:
+            Circle()
+                .fill(isSelected ? Color.white.opacity(0.5) : Color.red)
+                .frame(width: 6, height: 6)
+        }
     }
 
     private var rowDate: String {
@@ -510,7 +629,7 @@ private struct NoteListRow: View {
 
     private var autoTitle: String {
         let content = item.postProcessedTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-        if content.isEmpty { return "(내용 없음)" }
+        if content.isEmpty { return status == .fail ? "전사 실패" : "(내용 없음)" }
         let firstLine = content.components(separatedBy: .newlines)
             .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? content
         let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
@@ -518,7 +637,7 @@ private struct NoteListRow: View {
     }
 
     private var notePreview: String {
-        // 커스텀 제목이 있으면 내용 첫 줄을 미리보기로
+        if status == .fail { return item.postProcessingStatus.replacingOccurrences(of: "Error: ", with: "") }
         if customTitle != nil {
             let content = item.postProcessedTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
             return String(content.prefix(100))
@@ -545,14 +664,8 @@ private struct NoteDetailView: View {
     @State private var titleDraft = ""
     @State private var isRetrying = false
 
-    private var isError: Bool {
-        item.postProcessingStatus.hasPrefix("Error:")
-    }
-
-    private var canRetry: Bool {
-        isError && item.audioFileName != nil
-    }
-
+    private var isError: Bool { item.postProcessingStatus.hasPrefix("Error:") }
+    private var canRetry: Bool { isError && item.audioFileName != nil }
     private var displayContent: String { loadedContent ?? item.postProcessedTranscript }
 
     var body: some View {
@@ -561,7 +674,7 @@ private struct NoteDetailView: View {
                 noteHeader
                 contentArea
             }
-            bottomToolbar
+            floatingToolbar
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
@@ -579,8 +692,36 @@ private struct NoteDetailView: View {
     // MARK: Header
 
     private var noteHeader: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Title — click to edit inline
+        VStack(alignment: .leading, spacing: 6) {
+            // Meta line — monospace, small caps
+            HStack(spacing: 8) {
+                Text(item.timestamp.formatted(date: .abbreviated, time: .shortened))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .textCase(.uppercase)
+                    .kerning(0.5)
+                statusBadges
+                if isError {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 10, weight: .light))
+                        .foregroundStyle(.red.opacity(0.6))
+                        .help("전사 실패")
+                }
+                if !item.contextSummary.isEmpty
+                    && !item.contextSummary.hasPrefix("Could not")
+                    && item.contextSummary != "Context capture disabled" {
+                    Text("·")
+                        .foregroundStyle(.quaternary)
+                        .font(.system(size: 10))
+                    Text(item.contextSummary)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+
+            // Title
             if isEditingTitle {
                 HStack(spacing: 8) {
                     TextField("제목 입력", text: $titleDraft)
@@ -593,55 +734,42 @@ private struct NoteDetailView: View {
                             .font(.system(size: 20))
                     }
                     .buttonStyle(.plain)
-
                     Button { isEditingTitle = false } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.secondary)
                             .font(.system(size: 20))
                     }
                     .buttonStyle(.plain)
-
                 }
             } else {
                 Text(titleStore.title(for: item.id) ?? item.timestamp.formatted(date: .long, time: .shortened))
-                    .font(.system(size: 28, weight: .bold))
+                    .font(.system(size: 28, weight: .bold, design: .default))
                     .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
                     .onTapGesture {
                         titleDraft = titleStore.title(for: item.id) ?? ""
                         isEditingTitle = true
                     }
                     .help("클릭하여 제목 편집")
-                    .fixedSize(horizontal: false, vertical: true)
                     .overrideCursor(.iBeam)
             }
 
-            // Date + badges in one tertiary line
-            HStack(spacing: 5) {
-                Text(item.timestamp.formatted(date: .abbreviated, time: .shortened))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                statusBadges
-                if isError {
-                    badge("전사 실패", color: .red)
+            // Audio player (오디오 파일이 있을 때만 표시)
+            if let audioFileName = item.audioFileName {
+                let audioURL = AppState.audioStorageDirectory().appendingPathComponent(audioFileName)
+                if FileManager.default.fileExists(atPath: audioURL.path) {
+                    NoteAudioPlayerView(audioURL: audioURL)
+                        .padding(.top, 4)
                 }
-                if !item.contextSummary.isEmpty
-                    && !item.contextSummary.hasPrefix("Could not")
-                    && item.contextSummary != "Context capture disabled" {
-                    Text("·")
-                        .foregroundStyle(.tertiary)
-                        .font(.system(size: 11))
-                    Text(item.contextSummary)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-                Spacer()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 40)
         .padding(.top, 28)
-        .padding(.bottom, 16)
+        .padding(.bottom, 14)
+        .overlay(alignment: .bottom) {
+            Divider().opacity(0.4)
+        }
     }
 
     private func commitTitle() {
@@ -651,23 +779,51 @@ private struct NoteDetailView: View {
 
     @ViewBuilder
     private var statusBadges: some View {
-        HStack(spacing: 4) {
-            if item.usedLocalTranscription { badge("Local", color: .blue) }
-            if !item.usedContextCapture    { badge("No Context", color: .orange) }
-            if !item.usedPostProcessing    { badge("No LLM", color: .purple) }
+        HStack(spacing: 5) {
+            metaTag(
+                item.usedLocalTranscription ? "LOCAL" : "CLOUD",
+                active: item.usedLocalTranscription,
+                help: item.usedLocalTranscription ? "로컬 전사" : "클라우드 전사"
+            )
+            metaDot
+            metaTag(
+                item.usedContextCapture ? "CTX" : "NO CTX",
+                active: item.usedContextCapture,
+                help: item.usedContextCapture ? "컨텍스트 캡처 사용" : "컨텍스트 미사용"
+            )
+            metaDot
+            metaTag(
+                item.usedPostProcessing ? "LLM" : "NO LLM",
+                active: item.usedPostProcessing,
+                help: item.usedPostProcessing ? "LLM 후처리 사용" : "LLM 후처리 미사용"
+            )
             if item.transcriptionLanguageCode != "auto" {
-                badge(item.transcriptionLanguageCode, color: .green)
+                metaDot
+                metaTag(
+                    item.transcriptionLanguageCode.uppercased(),
+                    active: true,
+                    help: "전사 언어"
+                )
             }
         }
     }
 
-    private func badge(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.system(size: 10, weight: .medium))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
-            .foregroundStyle(color)
+    private var metaDot: some View {
+        Text("·")
+            .font(.system(size: 9, design: .monospaced))
+            .foregroundStyle(.quaternary)
+    }
+
+    private func metaTag(_ label: String, active: Bool, help tooltip: String) -> some View {
+        Button(action: {}) {
+            Text(label)
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(active ? Color.secondary.opacity(0.7) : Color.secondary.opacity(0.35))
+                .padding(.vertical, 3)
+                .padding(.horizontal, 2)
+        }
+        .buttonStyle(.plain)
+        .help(tooltip)
     }
 
     // MARK: Content
@@ -682,122 +838,148 @@ private struct NoteDetailView: View {
                 }
                 .frame(maxWidth: .infinity)
             } else if displayContent.isEmpty {
-                VStack(spacing: 10) {
-                    Spacer()
-                    if isError {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.system(size: 32, weight: .ultraLight))
-                            .foregroundStyle(.red.opacity(0.5))
-                        Text("전사에 실패했습니다")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        Text(item.postProcessingStatus.replacingOccurrences(of: "Error: ", with: ""))
-                            .font(.system(size: 12))
-                            .foregroundStyle(.tertiary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 60)
-                    } else {
-                        Image(systemName: "doc.text")
-                            .font(.system(size: 32, weight: .ultraLight))
-                            .foregroundStyle(.tertiary)
-                        Text("내용 없음")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.tertiary)
-                    }
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
+                emptyContentState
             } else {
                 NoteTextView(text: displayContent, bottomPadding: 80)
             }
         }
     }
 
-    // MARK: Bottom Toolbar (floating pill)
-
-    private var bottomToolbar: some View {
-        HStack {
+    @ViewBuilder
+    private var emptyContentState: some View {
+        VStack(spacing: 14) {
             Spacer()
-            HStack(spacing: 2) {
-                // Obsidian export
-                Button {
-                    showExportSheet = true
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 13, weight: .medium))
-                        .frame(width: 32, height: 32)
+            if isError {
+                ZStack {
+                    Circle()
+                        .fill(Color.red.opacity(0.06))
+                        .frame(width: 80, height: 80)
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 30, weight: .ultraLight))
+                        .foregroundStyle(.red.opacity(0.6))
                 }
-                .buttonStyle(.plain)
-
-                .disabled(displayContent.isEmpty)
-                .help("Obsidian으로 내보내기")
-
-                // Copy
-                Button {
-                    copyContent()
-                } label: {
-                    Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(isCopied ? Color.accentColor : Color.primary)
-                        .frame(width: 32, height: 32)
+                Text("전사에 실패했습니다")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(item.postProcessingStatus.replacingOccurrences(of: "Error: ", with: ""))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 60)
+            } else {
+                ZStack {
+                    Circle()
+                        .fill(Color.primary.opacity(0.04))
+                        .frame(width: 80, height: 80)
+                    Image(systemName: "doc.text")
+                        .font(.system(size: 30, weight: .ultraLight))
+                        .foregroundStyle(.tertiary)
                 }
-                .buttonStyle(.plain)
+                Text("내용 없음")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
 
-                .help("내용 복사")
+    // MARK: Floating Toolbar
 
-                // Retry (only if error)
-                if canRetry {
-                    Button {
-                        retryTranscription()
-                    } label: {
+    private var floatingToolbar: some View {
+        HStack(spacing: 2) {
+            // Retry (error일 때만)
+            if canRetry {
+                toolbarButton(
+                    action: { retryTranscription() },
+                    label: {
                         Group {
                             if isRetrying {
-                                ProgressView().controlSize(.mini).frame(width: 13, height: 13)
+                                ProgressView().controlSize(.mini).frame(width: 14, height: 14)
                             } else {
                                 Image(systemName: "arrow.clockwise")
                                     .font(.system(size: 13, weight: .medium))
                                     .foregroundStyle(.orange)
                             }
                         }
-                        .frame(width: 32, height: 32)
-                    }
-                    .buttonStyle(.plain)
+                    },
+                    disabled: isRetrying,
+                    help: "전사 재시도"
+                )
+                toolbarDivider
+            }
 
-                    .disabled(isRetrying)
-                    .help("전사 재시도")
-                }
+            // Copy
+            toolbarButton(
+                action: { copyContent() },
+                label: {
+                    Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(isCopied ? Color.accentColor : Color.primary)
+                },
+                disabled: displayContent.isEmpty,
+                help: "내용 복사"
+            )
 
-                // Separator
-                Rectangle()
-                    .fill(Color.primary.opacity(0.12))
-                    .frame(width: 1, height: 18)
-                    .padding(.horizontal, 4)
+            // Share (Obsidian export)
+            toolbarButton(
+                action: { showExportSheet = true },
+                label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.primary)
+                },
+                disabled: displayContent.isEmpty,
+                help: "Obsidian으로 내보내기"
+            )
 
-                // Delete
-                Button(role: .destructive) {
-                    onDelete()
-                } label: {
+            toolbarDivider
+
+            // Delete
+            toolbarButton(
+                action: { onDelete() },
+                label: {
                     Image(systemName: "trash")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.red.opacity(0.75))
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(.plain)
-
-                .help("노트 삭제")
-            }
-            .padding(.horizontal, 20)
-            .frame(height: 48)
-            .background {
-                Capsule().fill(Color.clear)
-                    .overlay(GlassView().clipShape(Capsule()))
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.25), lineWidth: 0.5))
-            }
-            .shadow(color: .black.opacity(0.18), radius: 24, x: 0, y: 8)
-            .overrideCursor(.arrow)
-            Spacer()
+                        .foregroundStyle(Color.red.opacity(0.8))
+                },
+                disabled: false,
+                help: "노트 삭제"
+            )
         }
+        .padding(.horizontal, 6)
+        .frame(height: 48)
+        .background {
+            Capsule().fill(Color.clear)
+                .overlay(GlassView().clipShape(Capsule()))
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5))
+        }
+        .shadow(color: .black.opacity(0.15), radius: 20, x: 0, y: 6)
+        .shadow(color: .black.opacity(0.06), radius: 4, x: 0, y: 2)
         .padding(.bottom, 20)
+        .overrideCursor(.arrow)
+    }
+
+    private func toolbarButton<L: View>(
+        action: @escaping () -> Void,
+        @ViewBuilder label: () -> L,
+        disabled: Bool,
+        help: String
+    ) -> some View {
+        Button(action: action) {
+            label()
+                .frame(width: 36, height: 36)
+        }
+        .buttonStyle(ToolbarButtonStyle())
+        .disabled(disabled)
+        .help(help)
+    }
+
+    private var toolbarDivider: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.12))
+            .frame(width: 0.5, height: 18)
+            .padding(.horizontal, 4)
     }
 
     // MARK: Actions
@@ -822,7 +1004,6 @@ private struct NoteDetailView: View {
     private func retryTranscription() {
         isRetrying = true
         appState.retryTranscription(item: item)
-        // retryingItemIDs 변화 감지해서 완료 시 isRetrying 해제
         Task {
             while appState.retryingItemIDs.contains(item.id) {
                 try? await Task.sleep(nanoseconds: 300_000_000)
@@ -839,6 +1020,209 @@ private struct NoteDetailView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             withAnimation { isCopied = false }
         }
+    }
+}
+
+// MARK: - Note Audio Player View (wireframe design)
+
+struct NoteAudioPlayerView: View {
+    let audioURL: URL
+
+    @State private var player: AVAudioPlayer?
+    @State private var delegate = AudioPlayerDelegate()
+    @State private var isPlaying = false
+    @State private var duration: TimeInterval = 0
+    @State private var elapsed: TimeInterval = 0
+    @State private var progressTimer: Timer?
+
+    @State private var barHeights: [CGFloat] = Array(repeating: 0.15, count: 80)
+
+    private var progress: Double {
+        guard duration > 0 else { return 0 }
+        return min(elapsed / duration, 1.0)
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            // Play / Stop button
+            Button { togglePlayback() } label: {
+                ZStack {
+                    Circle()
+                        .fill(Color.primary)
+                        .frame(width: 36, height: 36)
+                    Image(systemName: isPlaying ? "stop.fill" : "play.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color(nsColor: .windowBackgroundColor))
+                        .offset(x: isPlaying ? 0 : 1)
+                }
+            }
+            .buttonStyle(.plain)
+
+            // Waveform bars
+            GeometryReader { geo in
+                let barCount = barHeights.count
+                let gap: CGFloat = 2
+                let totalGap = gap * CGFloat(barCount - 1)
+                let barWidth = max(1, (geo.size.width - totalGap) / CGFloat(barCount))
+                let playedCount = Int(Double(barCount) * progress)
+
+                HStack(alignment: .center, spacing: gap) {
+                    ForEach(0..<barCount, id: \.self) { i in
+                        Capsule()
+                            .fill(i < playedCount ? Color.accentColor : Color.primary.opacity(0.2))
+                            .frame(width: barWidth, height: geo.size.height * barHeights[i])
+                    }
+                }
+                .frame(maxHeight: .infinity, alignment: .center)
+            }
+            .frame(height: 36)
+
+            // Time
+            Text("\(formatDuration(elapsed)) / \(formatDuration(duration))")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .fixedSize()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background {
+            RoundedRectangle(cornerRadius: 14)
+                .fill(
+                    LinearGradient(
+                        colors: [Color.accentColor.opacity(0.08), Color.accentColor.opacity(0.02)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                )
+        }
+        .onAppear {
+            loadDuration()
+            loadWaveform()
+        }
+        .onDisappear { stopPlayback() }
+    }
+
+    private func loadWaveform() {
+        guard FileManager.default.fileExists(atPath: audioURL.path) else { return }
+        Task.detached(priority: .utility) {
+            let asset = AVURLAsset(url: audioURL)
+            guard let track = try? await asset.loadTracks(withMediaType: .audio).first else { return }
+            let settings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsFloatKey: true,
+                AVLinearPCMBitDepthKey: 32
+            ]
+            let reader: AVAssetReader
+            do { reader = try AVAssetReader(asset: asset) } catch { return }
+            let output = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
+            reader.add(output)
+            guard reader.startReading() else { return }
+
+            var samples: [Float] = []
+            while let buf = output.copyNextSampleBuffer(),
+                  let block = CMSampleBufferGetDataBuffer(buf) {
+                let len = CMBlockBufferGetDataLength(block)
+                var data = Data(count: len)
+                data.withUnsafeMutableBytes { ptr in
+                    CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: len, destination: ptr.baseAddress!)
+                }
+                data.withUnsafeBytes { ptr in
+                    let floats = ptr.bindMemory(to: Float.self)
+                    samples.append(contentsOf: floats)
+                }
+            }
+
+            guard !samples.isEmpty else { return }
+            let bucketSize = max(1, samples.count / 80)
+            var heights: [CGFloat] = []
+            for i in 0..<80 {
+                let start = i * bucketSize
+                let end = min(start + bucketSize, samples.count)
+                let rms = sqrt(samples[start..<end].map { $0 * $0 }.reduce(0, +) / Float(end - start))
+                heights.append(CGFloat(min(1.0, max(0.04, rms * 8))))
+            }
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.4)) { barHeights = heights }
+            }
+        }
+    }
+
+    private func loadDuration() {
+        guard FileManager.default.fileExists(atPath: audioURL.path) else { return }
+        Task.detached(priority: .utility) {
+            let asset = AVURLAsset(url: audioURL)
+            let seconds: Double
+            if let cmDuration = try? await asset.load(.duration) {
+                seconds = CMTimeGetSeconds(cmDuration)
+            } else {
+                seconds = 0
+            }
+            await MainActor.run { duration = seconds }
+        }
+    }
+
+    private func togglePlayback() {
+        if isPlaying {
+            stopPlayback()
+        } else {
+            guard FileManager.default.fileExists(atPath: audioURL.path) else { return }
+            do {
+                let p = try AVAudioPlayer(contentsOf: audioURL)
+                delegate.onFinish = { stopPlayback() }
+                p.delegate = delegate
+                p.play()
+                player = p
+                isPlaying = true
+                elapsed = 0
+                startProgressTimer()
+            } catch {}
+        }
+    }
+
+    private func stopPlayback() {
+        player?.stop()
+        player = nil
+        isPlaying = false
+        progressTimer?.invalidate()
+        progressTimer = nil
+        elapsed = 0
+    }
+
+    private func startProgressTimer() {
+        progressTimer?.invalidate()
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+            elapsed = player?.currentTime ?? 0
+        }
+    }
+
+    private func formatDuration(_ t: TimeInterval) -> String {
+        guard t.isFinite else { return "0:00" }
+        let total = Int(t)
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
+        return String(format: "%d:%02d", m, s)
+    }
+}
+
+// MARK: - Toolbar Button Style
+
+private struct ToolbarButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                Circle()
+                    .fill(configuration.isPressed ? Color.primary.opacity(0.1) : Color.clear)
+            )
+            .contentShape(Circle())
+            .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
     }
 }
 
@@ -861,10 +1245,8 @@ private struct ObsidianExportSheet: View {
 
     private var defaultTitleInput: String {
         guard let custom = customTitle, !custom.isEmpty else { return "" }
-        return custom.replacingOccurrences(
-            of: #"^\d{4}-\d{2}-\d{2}\s*"#,
-            with: "", options: .regularExpression
-        ).trimmingCharacters(in: .whitespaces)
+        return custom.replacingOccurrences(of: #"^\d{4}-\d{2}-\d{2}\s*"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
     }
 
     private var hasAudio: Bool {
@@ -890,7 +1272,6 @@ private struct ObsidianExportSheet: View {
                 .font(.headline)
                 .padding(.bottom, 20)
 
-            // 파일 제목
             fieldLabel("파일 제목")
             HStack(spacing: 6) {
                 Text(datePrefix)
@@ -904,7 +1285,6 @@ private struct ObsidianExportSheet: View {
                 .font(.caption).foregroundStyle(.tertiary)
                 .padding(.top, 4).padding(.bottom, 16)
 
-            // Vault 폴더
             fieldLabel("Obsidian Vault 폴더")
             HStack(spacing: 8) {
                 Text(vaultPath.isEmpty ? "폴더를 선택하세요" : vaultPath)
@@ -920,7 +1300,6 @@ private struct ObsidianExportSheet: View {
             }
             .padding(.bottom, 16)
 
-            // 오디오 포함
             if hasAudio {
                 Toggle(isOn: $includeAudio) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -932,7 +1311,6 @@ private struct ObsidianExportSheet: View {
                 .toggleStyle(.checkbox).padding(.bottom, 12)
             }
 
-            // Gemini 정리
             VStack(alignment: .leading, spacing: 8) {
                 Toggle(isOn: $useGemini) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -948,10 +1326,8 @@ private struct ObsidianExportSheet: View {
                         HStack {
                             Text("프롬프트").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                             Spacer()
-                            Button(showPromptEditor ? "접기" : "편집") {
-                                showPromptEditor.toggle()
-                            }
-                            .font(.caption).controlSize(.mini)
+                            Button(showPromptEditor ? "접기" : "편집") { showPromptEditor.toggle() }
+                                .font(.caption).controlSize(.mini)
                         }
                         if showPromptEditor {
                             TextEditor(text: $geminiPrompt)
@@ -971,7 +1347,6 @@ private struct ObsidianExportSheet: View {
             }
             .padding(.bottom, 16)
 
-            // 결과 메시지
             if let result = exportResult {
                 HStack(spacing: 6) {
                     Image(systemName: isSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
@@ -1011,23 +1386,18 @@ private struct ObsidianExportSheet: View {
         panel.allowsMultipleSelection = false
         panel.prompt = "선택"
         panel.message = "Obsidian Vault 폴더를 선택하세요"
-        if panel.runModal() == .OK, let url = panel.url {
-            vaultPath = url.path
-        }
+        if panel.runModal() == .OK, let url = panel.url { vaultPath = url.path }
     }
 
     @MainActor
     private func exportNote() {
         guard !vaultPath.isEmpty else { return }
-
         let safeFileName = finalFileName
             .components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|"))
             .joined(separator: "-")
-
         let audioSrcURL: URL? = (includeAudio && hasAudio && item.audioFileName != nil)
             ? AppState.audioStorageDirectory().appendingPathComponent(item.audioFileName!)
             : nil
-
         ObsidianExportManager.shared.export(
             itemID: item.id,
             content: content,
@@ -1038,64 +1408,11 @@ private struct ObsidianExportSheet: View {
             geminiPrompt: geminiPrompt,
             timestamp: item.timestamp
         )
-
         onDismiss()
-    }
-
-    // 더미 — 컴파일러 오류 방지용 (실제 구현은 ObsidianExportManager에 있음)
-    private func runGemini_unused(content: String, prompt: String) async throws -> String {
-        // gemini CLI 경로 탐색
-        let candidates = [
-            "/Users/\(NSUserName())/.npm-global/bin/gemini",
-            "/usr/local/bin/gemini",
-            "/opt/homebrew/bin/gemini"
-        ]
-        guard let geminiPath = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-            throw NSError(domain: "GeminiCLI", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "gemini CLI를 찾을 수 없습니다"])
-        }
-
-        return try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: geminiPath)
-            process.arguments = ["--yolo", "-p", "\(prompt)\n\n---\n\(content)"]
-            process.currentDirectoryURL = FileManager.default.temporaryDirectory
-
-            let outputPipe = Pipe()
-            let errorPipe = Pipe()
-            process.standardOutput = outputPipe
-            process.standardError = errorPipe
-
-            process.terminationHandler = { _ in
-                let raw = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(),
-                                 encoding: .utf8) ?? ""
-                let cleaned = raw.replacingOccurrences(
-                    of: #"\x1B\[[0-9;]*[mGKHF]"#,
-                    with: "", options: .regularExpression
-                ).trimmingCharacters(in: .whitespacesAndNewlines)
-
-                if cleaned.isEmpty {
-                    let err = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(),
-                                     encoding: .utf8) ?? "알 수 없는 오류"
-                    continuation.resume(throwing: NSError(
-                        domain: "GeminiCLI", code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: err.trimmingCharacters(in: .whitespacesAndNewlines)]
-                    ))
-                } else {
-                    continuation.resume(returning: cleaned)
-                }
-            }
-
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: error)
-            }
-        }
     }
 }
 
-// MARK: - Native Text View (NSTextView wrapper)
+// MARK: - Native Text View
 
 private struct NoteTextView: NSViewRepresentable {
     let text: String
@@ -1119,7 +1436,7 @@ private struct NoteTextView: NSViewRepresentable {
         textView.autoresizingMask = .width
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.heightTracksTextView = false
-        textView.textContainerInset = NSSize(width: 28, height: 16)
+        textView.textContainerInset = NSSize(width: 40, height: 20)
 
         scrollView.documentView = textView
         applyText(text, to: textView, bottomPadding: bottomPadding)
@@ -1128,21 +1445,18 @@ private struct NoteTextView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
-        if textView.string != text {
-            applyText(text, to: textView, bottomPadding: bottomPadding)
-        }
+        if textView.string != text { applyText(text, to: textView, bottomPadding: bottomPadding) }
     }
 
     private func applyText(_ text: String, to textView: NSTextView, bottomPadding: CGFloat) {
         let style = NSMutableParagraphStyle()
-        style.lineSpacing = 6
-        style.paragraphSpacing = 4
+        style.lineSpacing = 5
+        style.paragraphSpacing = 6
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 15),
             .paragraphStyle: style,
             .foregroundColor: NSColor.labelColor
         ]
-        // 하단 툴바 공간 확보용 빈 줄 추가
         let padding = String(repeating: "\n", count: max(1, Int(bottomPadding / 20)))
         let attrStr = NSMutableAttributedString(string: text + padding, attributes: attrs)
         textView.textStorage?.setAttributedString(attrStr)
