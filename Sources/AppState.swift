@@ -736,6 +736,43 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    func updateTranscript(id: UUID, text: String) {
+        guard let item = pipelineHistory.first(where: { $0.id == id }) else { return }
+        // 파일에도 동기화해서 앱 재시작 후 폴백 로딩 시에도 일관성 유지
+        if let fileName = item.transcriptFileName {
+            let fileURL = Self.transcriptStorageDirectory().appendingPathComponent(fileName)
+            try? text.write(to: fileURL, atomically: true, encoding: .utf8)
+        }
+        let updated = PipelineHistoryItem(
+            intent: item.intent,
+            selectedText: item.selectedText,
+            id: item.id,
+            timestamp: item.timestamp,
+            rawTranscript: item.rawTranscript,
+            postProcessedTranscript: text,
+            postProcessingPrompt: item.postProcessingPrompt,
+            contextSummary: item.contextSummary,
+            contextPrompt: item.contextPrompt,
+            contextScreenshotDataURL: item.contextScreenshotDataURL,
+            contextScreenshotStatus: item.contextScreenshotStatus,
+            postProcessingStatus: item.postProcessingStatus,
+            debugStatus: item.debugStatus,
+            customVocabulary: item.customVocabulary,
+            audioFileName: item.audioFileName,
+            usedLocalTranscription: item.usedLocalTranscription,
+            usedContextCapture: item.usedContextCapture,
+            usedPostProcessing: item.usedPostProcessing,
+            transcriptionLanguageCode: item.transcriptionLanguageCode,
+            transcriptFileName: item.transcriptFileName
+        )
+        do {
+            try pipelineHistoryStore.update(updated)
+            pipelineHistory = pipelineHistoryStore.loadAllHistory()
+        } catch {
+            errorMessage = "Failed to save transcript edit: \(error.localizedDescription)"
+        }
+    }
+
     func retryTranscription(item: PipelineHistoryItem) {
         guard let audioFileName = item.audioFileName else { return }
         guard !retryingItemIDs.contains(item.id) else { return }
