@@ -10,7 +10,7 @@ final class MCPServer {
     static let port: UInt16 = 3457
 
     private var listener: NWListener?
-    private let queue = DispatchQueue(label: "com.freeflow.mcp", qos: .utility)
+    private let queue = DispatchQueue(label: "com.quill.mcp", qos: .utility)
     private var sseClients: [SSEClient] = []
     private let sseClientsLock = NSLock()
 
@@ -146,7 +146,7 @@ final class MCPServer {
             return ["result": [
                 "protocolVersion": "2024-11-05",
                 "capabilities": ["tools": [:], "notifications": [:]],
-                "serverInfo": ["name": "freeflow", "version": "1.0.0"]
+                "serverInfo": ["name": "quill", "version": "1.0.0"]
             ]]
 
         case "notifications/initialized":
@@ -171,7 +171,7 @@ final class MCPServer {
         [
             [
                 "name": "start_recording",
-                "description": "Start a FreeFlow recording session. Call this to begin recording audio.",
+                "description": "Start a Quill recording session. Call this to begin recording audio.",
                 "inputSchema": [
                     "type": "object",
                     "properties": [
@@ -246,7 +246,7 @@ final class MCPServer {
 
     private func callTool(name: String, args: [String: Any]) -> [String: Any] {
         guard let appState else {
-            return textContent("Error: FreeFlow is not ready", isError: true)
+            return textContent("Error: Quill is not ready", isError: true)
         }
 
         switch name {
