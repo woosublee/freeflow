@@ -165,7 +165,7 @@ private enum SessionIntent {
 final class AppState: ObservableObject, @unchecked Sendable {
     private let apiKeyStorageKey = "groq_api_key"
     private let apiBaseURLStorageKey = "api_base_url"
-    private let transcriptionModelStorageKey = "transcription_model"
+    private let apiTranscriptionModelStorageKey = "api_transcription_model"
     private let postProcessingModelStorageKey = "post_processing_model"
     private let postProcessingFallbackModelStorageKey = "post_processing_fallback_model"
     private let contextModelStorageKey = "context_model"
@@ -190,7 +190,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let disableAutoPasteStorageKey = "disable_auto_paste"
     private let disablePostProcessingStorageKey = "disable_post_processing"
     private let transcriptionLanguageStorageKey = "transcription_language"
-    private let localTranscriptionModelStorageKey = "local_transcription_model_id"
+    private let localTranscriptionModelStorageKey = "transcription_model"
     private let noteBrowserEnabledStorageKey = "note_browser_enabled"
     private let commandModeEnabledStorageKey = "command_mode_enabled"
     private let commandModeStyleStorageKey = "command_mode_style"
@@ -225,7 +225,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @Published var transcriptionModel: String {
         didSet {
-            UserDefaults.standard.set(transcriptionModel, forKey: transcriptionModelStorageKey)
+            UserDefaults.standard.set(transcriptionModel, forKey: apiTranscriptionModelStorageKey)
         }
     }
 
@@ -475,7 +475,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let hasCompletedSetup = UserDefaults.standard.bool(forKey: "hasCompletedSetup")
         let apiKey = Self.loadStoredAPIKey(account: apiKeyStorageKey)
         let apiBaseURL = Self.loadStoredAPIBaseURL(account: "api_base_url")
-        let transcriptionModel = UserDefaults.standard.string(forKey: transcriptionModelStorageKey) ?? Self.defaultTranscriptionModel
+        let transcriptionModel = UserDefaults.standard.string(forKey: apiTranscriptionModelStorageKey) ?? Self.defaultTranscriptionModel
         let postProcessingModel = UserDefaults.standard.string(forKey: postProcessingModelStorageKey) ?? Self.defaultPostProcessingModel
         let postProcessingFallbackModel = UserDefaults.standard.string(forKey: postProcessingFallbackModelStorageKey) ?? Self.defaultPostProcessingFallbackModel
         let contextModel = UserDefaults.standard.string(forKey: contextModelStorageKey) ?? Self.defaultContextModel
@@ -1910,16 +1910,23 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
 
             // 이전 전사 태스크는 취소하지 않고 백그라운드에서 계속 실행
+            let capturedApiKey = self.apiKey
+            let capturedApiBaseURL = self.apiBaseURL
+            let capturedUseLocalTranscription = self.useLocalTranscription
+            let capturedLocalWhisperPath = self.localWhisperPath
+            let capturedTranscriptionLanguage = self.transcriptionLanguage
+            let capturedLocalTranscriptionModel = self.localTranscriptionModel
+            let capturedTranscriptionModel = self.transcriptionModel
             self.transcriptionTask = Task {
                 do {
                     let transcriptionService = try TranscriptionService(
-                        apiKey: self.apiKey,
-                        baseURL: self.apiBaseURL,
-                        useLocalTranscription: self.useLocalTranscription,
-                        localWhisperPath: self.localWhisperPath.isEmpty ? nil : self.localWhisperPath,
-                        transcriptionLanguage: self.transcriptionLanguage,
-                        localTranscriptionModel: self.localTranscriptionModel,
-                        transcriptionModel: self.transcriptionModel
+                        apiKey: capturedApiKey,
+                        baseURL: capturedApiBaseURL,
+                        useLocalTranscription: capturedUseLocalTranscription,
+                        localWhisperPath: capturedLocalWhisperPath.isEmpty ? nil : capturedLocalWhisperPath,
+                        transcriptionLanguage: capturedTranscriptionLanguage,
+                        localTranscriptionModel: capturedLocalTranscriptionModel,
+                        transcriptionModel: capturedTranscriptionModel
                     )
                     async let transcript = transcriptionService.transcribe(fileURL: transcriptionFileURL)
                     let rawTranscript = try await transcript

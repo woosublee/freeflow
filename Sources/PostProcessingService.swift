@@ -116,8 +116,8 @@ Behavior:
     private let baseURL: String
     private let preferredModel: String
     private let preferredFallbackModel: String
-    private let defaultModel = "openai/gpt-oss-20b"
-    private let defaultFallbackModel = "meta-llama/llama-4-scout-17b-16e-instruct"
+    private let defaultModel = AppState.defaultPostProcessingModel
+    private let defaultFallbackModel = AppState.defaultPostProcessingFallbackModel
     private let defaultModelReasoningEffort = "low"
     private let postProcessingMaxCompletionTokens = 4096
     private let postProcessingTimeoutSeconds: TimeInterval = 20

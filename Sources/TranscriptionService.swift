@@ -25,7 +25,7 @@ class TranscriptionService {
         localWhisperPath: String? = nil,
         transcriptionLanguage: TranscriptionLanguage = .auto,
         localTranscriptionModel: TranscriptionModel = .default,
-        transcriptionModel: String = "whisper-large-v3"
+        transcriptionModel: String = AppState.defaultTranscriptionModel
     ) throws {
         self.apiKey = apiKey
         self.baseURL = try Self.normalizedBaseURL(from: baseURL)
