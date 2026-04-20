@@ -864,7 +864,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let capturedCustomVocabulary = customVocabulary
         let capturedCustomSystemPrompt = customSystemPrompt
 
-        Task {
+        Task { [weak self] in
+            guard let self else { return }
             do {
                 let transcriptionService = try TranscriptionService(
                     apiKey: apiKey,
@@ -1917,7 +1918,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
             let capturedTranscriptionLanguage = self.transcriptionLanguage
             let capturedLocalTranscriptionModel = self.localTranscriptionModel
             let capturedTranscriptionModel = self.transcriptionModel
-            self.transcriptionTask = Task {
+            let capturedCustomVocabulary = self.customVocabulary
+            let capturedCustomSystemPrompt = self.customSystemPrompt
+            self.transcriptionTask = Task { [weak self] in
+                guard let self else { return }
                 do {
                     let transcriptionService = try TranscriptionService(
                         apiKey: capturedApiKey,
@@ -1948,8 +1952,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         intent: sessionIntent,
                         context: appContext,
                         postProcessingService: postProcessingService,
-                        customVocabulary: self.customVocabulary,
-                        customSystemPrompt: self.customSystemPrompt
+                        customVocabulary: capturedCustomVocabulary,
+                        customSystemPrompt: capturedCustomSystemPrompt
                     )
                     try Task.checkCancellation()
 
