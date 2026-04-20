@@ -46,7 +46,7 @@ Return only two sentences, no labels, no markdown, no extra commentary.
 
     init(
         apiKey: String,
-        baseURL: String = "https://api.groq.com/openai/v1",
+        baseURL: String = AppState.defaultAPIBaseURL,
         customContextPrompt: String = "",
         contextModel: String = AppState.defaultContextModel
     ) {

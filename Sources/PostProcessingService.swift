@@ -124,7 +124,7 @@ Behavior:
 
     init(
         apiKey: String,
-        baseURL: String = "https://api.groq.com/openai/v1",
+        baseURL: String = AppState.defaultAPIBaseURL,
         preferredModel: String = "",
         preferredFallbackModel: String = ""
     ) {
