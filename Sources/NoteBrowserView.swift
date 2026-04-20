@@ -668,6 +668,7 @@ private struct NoteDetailView: View {
     @State private var titleDraft = ""
     @State private var isRetrying = false
     @State private var titleDebounceTimer: Timer?
+    @State private var showDeleteConfirmation = false
 
     private var isError: Bool { item.postProcessingStatus.hasPrefix("Error:") }
     private var canRetry: Bool { item.audioFileName != nil }
@@ -696,6 +697,12 @@ private struct NoteDetailView: View {
                 customTitle: titleStore.title(for: item.id),
                 onDismiss: { showExportSheet = false }
             )
+        }
+        .confirmationDialog("노트를 삭제할까요?", isPresented: $showDeleteConfirmation, titleVisibility: .visible) {
+            Button("삭제", role: .destructive) { onDelete() }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text("삭제한 노트는 복구할 수 없습니다.")
         }
     }
 
@@ -932,7 +939,7 @@ private struct NoteDetailView: View {
 
             // Delete
             toolbarButton(
-                action: { onDelete() },
+                action: { showDeleteConfirmation = true },
                 label: {
                     Image(systemName: "trash")
                         .font(.system(size: 13, weight: .medium))

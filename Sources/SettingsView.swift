@@ -38,6 +38,229 @@ private let iso8601DayFormatter: DateFormatter = {
     return formatter
 }()
 
+struct ProviderSettingsFields: View {
+    @EnvironmentObject var appState: AppState
+    @Binding var apiBaseURLInput: String
+    @FocusState private var isEditingAPIBaseURL: Bool
+    @FocusState private var isEditingTranscriptionModel: Bool
+    @FocusState private var isEditingPostProcessingModel: Bool
+    @FocusState private var isEditingPostProcessingFallbackModel: Bool
+    @FocusState private var isEditingContextModel: Bool
+    @State private var transcriptionModelDraft: String = ""
+    @State private var postProcessingModelDraft: String = ""
+    @State private var postProcessingFallbackModelDraft: String = ""
+    @State private var contextModelDraft: String = ""
+
+    let showsModelDescription: Bool
+
+    private func commitAPIBaseURL() {
+        let trimmed = apiBaseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedBaseURL = trimmed.isEmpty ? AppState.defaultAPIBaseURL : trimmed
+        apiBaseURLInput = resolvedBaseURL
+        appState.apiBaseURL = resolvedBaseURL
+    }
+
+    private func commitTranscriptionModel() {
+        let trimmed = transcriptionModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolved = trimmed.isEmpty ? AppState.defaultTranscriptionModel : trimmed
+        transcriptionModelDraft = resolved
+        guard appState.transcriptionModel != resolved else { return }
+        appState.transcriptionModel = resolved
+    }
+
+    private func commitPostProcessingModel() {
+        let trimmed = postProcessingModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolved = trimmed.isEmpty ? AppState.defaultPostProcessingModel : trimmed
+        postProcessingModelDraft = resolved
+        guard appState.postProcessingModel != resolved else { return }
+        appState.postProcessingModel = resolved
+    }
+
+    private func commitPostProcessingFallbackModel() {
+        let trimmed = postProcessingFallbackModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolved = trimmed.isEmpty ? AppState.defaultPostProcessingFallbackModel : trimmed
+        postProcessingFallbackModelDraft = resolved
+        guard appState.postProcessingFallbackModel != resolved else { return }
+        appState.postProcessingFallbackModel = resolved
+    }
+
+    private func commitContextModel() {
+        let trimmed = contextModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolved = trimmed.isEmpty ? AppState.defaultContextModel : trimmed
+        contextModelDraft = resolved
+        guard appState.contextModel != resolved else { return }
+        appState.contextModel = resolved
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("API Base URL")
+                .font(.caption.weight(.semibold))
+
+            Text("Change this to use a different OpenAI-compatible API provider.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                TextField(AppState.defaultAPIBaseURL, text: $apiBaseURLInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .focused($isEditingAPIBaseURL)
+                    .onSubmit {
+                        commitAPIBaseURL()
+                    }
+                    .onChange(of: isEditingAPIBaseURL) { isEditing in
+                        if !isEditing {
+                            commitAPIBaseURL()
+                        }
+                    }
+
+                Button("Reset to Default") {
+                    apiBaseURLInput = AppState.defaultAPIBaseURL
+                    appState.apiBaseURL = AppState.defaultAPIBaseURL
+                }
+                .font(.caption)
+            }
+
+            if showsModelDescription {
+                Text("If you use another provider, enter that provider's model IDs here.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Transcription Model")
+                    .font(.caption.weight(.semibold))
+                HStack(spacing: 8) {
+                    TextField(AppState.defaultTranscriptionModel, text: $transcriptionModelDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isEditingTranscriptionModel)
+                        .onSubmit {
+                            commitTranscriptionModel()
+                        }
+                        .onChange(of: isEditingTranscriptionModel) { isEditing in
+                            if !isEditing {
+                                commitTranscriptionModel()
+                            }
+                        }
+                    Button("Reset to Default") {
+                        transcriptionModelDraft = AppState.defaultTranscriptionModel
+                        appState.transcriptionModel = AppState.defaultTranscriptionModel
+                    }
+                    .font(.caption)
+                }
+                Text("Used for speech-to-text transcription.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Post-Processing Model")
+                    .font(.caption.weight(.semibold))
+                HStack(spacing: 8) {
+                    TextField(AppState.defaultPostProcessingModel, text: $postProcessingModelDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isEditingPostProcessingModel)
+                        .onSubmit {
+                            commitPostProcessingModel()
+                        }
+                        .onChange(of: isEditingPostProcessingModel) { isEditing in
+                            if !isEditing {
+                                commitPostProcessingModel()
+                            }
+                        }
+                    Button("Reset to Default") {
+                        postProcessingModelDraft = AppState.defaultPostProcessingModel
+                        appState.postProcessingModel = AppState.defaultPostProcessingModel
+                    }
+                    .font(.caption)
+                }
+                Text("Used for transcript cleanup and Edit Mode transforms.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Post-Processing Fallback Model")
+                    .font(.caption.weight(.semibold))
+                HStack(spacing: 8) {
+                    TextField(AppState.defaultPostProcessingFallbackModel, text: $postProcessingFallbackModelDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isEditingPostProcessingFallbackModel)
+                        .onSubmit {
+                            commitPostProcessingFallbackModel()
+                        }
+                        .onChange(of: isEditingPostProcessingFallbackModel) { isEditing in
+                            if !isEditing {
+                                commitPostProcessingFallbackModel()
+                            }
+                        }
+                    Button("Reset to Default") {
+                        postProcessingFallbackModelDraft = AppState.defaultPostProcessingFallbackModel
+                        appState.postProcessingFallbackModel = AppState.defaultPostProcessingFallbackModel
+                    }
+                    .font(.caption)
+                }
+                Text("Used as the explicit retry model for transcript cleanup and Edit Mode transforms.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Context Model")
+                    .font(.caption.weight(.semibold))
+                HStack(spacing: 8) {
+                    TextField(AppState.defaultContextModel, text: $contextModelDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isEditingContextModel)
+                        .onSubmit {
+                            commitContextModel()
+                        }
+                        .onChange(of: isEditingContextModel) { isEditing in
+                            if !isEditing {
+                                commitContextModel()
+                            }
+                        }
+                    Button("Reset to Default") {
+                        contextModelDraft = AppState.defaultContextModel
+                        appState.contextModel = AppState.defaultContextModel
+                    }
+                    .font(.caption)
+                }
+                Text("Used for context inference, with a text-only retry when screenshot analysis fails.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .onAppear {
+            transcriptionModelDraft = appState.transcriptionModel
+            postProcessingModelDraft = appState.postProcessingModel
+            postProcessingFallbackModelDraft = appState.postProcessingFallbackModel
+            contextModelDraft = appState.contextModel
+        }
+        .onChange(of: appState.transcriptionModel) { value in
+            if !isEditingTranscriptionModel {
+                transcriptionModelDraft = value
+            }
+        }
+        .onChange(of: appState.postProcessingModel) { value in
+            if !isEditingPostProcessingModel {
+                postProcessingModelDraft = value
+            }
+        }
+        .onChange(of: appState.postProcessingFallbackModel) { value in
+            if !isEditingPostProcessingFallbackModel {
+                postProcessingFallbackModelDraft = value
+            }
+        }
+        .onChange(of: appState.contextModel) { value in
+            if !isEditingContextModel {
+                contextModelDraft = value
+            }
+        }
+    }
+}
+
 // MARK: - Settings
 
 struct SettingsView: View {
@@ -98,6 +321,7 @@ struct GeneralSettingsView: View {
     @AppStorage("app_appearance") private var appAppearance: String = "system"
     @State private var apiKeyInput: String = ""
     @State private var apiBaseURLInput: String = ""
+    @State private var advancedProviderSettingsExpanded = false
     @State private var isValidatingKey = false
     @State private var keyValidationError: String?
     @State private var keyValidationSuccess = false
@@ -458,7 +682,7 @@ struct GeneralSettingsView: View {
 
     private var apiKeySection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Quill uses Groq's whisper-large-v3 model for transcription.")
+            Text("Quill uses the configured transcription model with your selected OpenAI-compatible provider.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -488,31 +712,23 @@ struct GeneralSettingsView: View {
                     .font(.caption)
             }
 
-            Divider()
-
-            Text("API Base URL")
-                .font(.caption.weight(.semibold))
-
-            Text("Change this to use a different OpenAI-compatible API provider.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 8) {
-                TextField("https://api.groq.com/openai/v1", text: $apiBaseURLInput)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-                    .onChange(of: apiBaseURLInput) { newValue in
-                        let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty {
-                            appState.apiBaseURL = trimmed
-                        }
-                    }
-
-                Button("Reset to Default") {
-                    apiBaseURLInput = "https://api.groq.com/openai/v1"
-                    appState.apiBaseURL = "https://api.groq.com/openai/v1"
+            DisclosureGroup(isExpanded: $advancedProviderSettingsExpanded) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Divider()
+                    ProviderSettingsFields(
+                        apiBaseURLInput: $apiBaseURLInput,
+                        showsModelDescription: false
+                    )
                 }
-                .font(.caption)
+            } label: {
+                HStack {
+                    Text("Advanced Provider Settings")
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    advancedProviderSettingsExpanded.toggle()
+                }
             }
 
             Divider()
@@ -540,12 +756,12 @@ struct GeneralSettingsView: View {
                     ForEach(TranscriptionModel.all) { model in
                         ModelRowView(
                             model: model,
-                            isSelected: appState.transcriptionModel == model,
+                            isSelected: appState.localTranscriptionModel == model,
                             whisperBin: appState.localWhisperPath.isEmpty
                                 ? "\(FileManager.default.homeDirectoryForCurrentUser.path)/.local/bin/mlx_whisper"
                                 : appState.localWhisperPath
                         ) {
-                            appState.transcriptionModel = model
+                            appState.localTranscriptionModel = model
                         }
                     }
                 }
@@ -643,14 +859,17 @@ struct GeneralSettingsView: View {
         keyValidationSuccess = false
 
         Task {
-            let valid = await TranscriptionService.validateAPIKey(key, baseURL: baseURL.isEmpty ? "https://api.groq.com/openai/v1" : baseURL)
+            let valid = await TranscriptionService.validateAPIKey(
+                key,
+                baseURL: baseURL.isEmpty ? AppState.defaultAPIBaseURL : baseURL
+            )
             await MainActor.run {
                 isValidatingKey = false
                 if valid {
                     appState.apiKey = key
                     keyValidationSuccess = true
                 } else {
-                    keyValidationError = "Invalid API key. Please check and try again."
+                    keyValidationError = "Validation failed. Please check your API key and provider settings, then try again."
                 }
             }
         }
@@ -1169,7 +1388,12 @@ struct PromptsSettingsView: View {
         systemTestError = nil
         systemTestPrompt = nil
 
-        let service = PostProcessingService(apiKey: appState.apiKey, baseURL: appState.apiBaseURL)
+        let service = PostProcessingService(
+            apiKey: appState.apiKey,
+            baseURL: appState.apiBaseURL,
+            preferredModel: appState.postProcessingModel,
+            preferredFallbackModel: appState.postProcessingFallbackModel
+        )
         let input = systemTestInput
         let customPrompt = appState.customSystemPrompt
         let vocabulary = appState.customVocabulary
@@ -1382,7 +1606,8 @@ struct PromptsSettingsView: View {
         let service = AppContextService(
             apiKey: appState.apiKey,
             baseURL: appState.apiBaseURL,
-            customContextPrompt: appState.customContextPrompt
+            customContextPrompt: appState.customContextPrompt,
+            contextModel: appState.contextModel
         )
 
         Task {
