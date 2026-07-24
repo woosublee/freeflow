@@ -18,6 +18,7 @@ struct ModelsSettingsUIContractTests {
         testExistingModelCatalogRemains(modelConfiguration)
         testExistingModelLifecycleRemains(settings)
         try testModelFirstTopLevelStructure(settings)
+        testPromptControlsMovedOutOfModels(settings)
         testCloudAPIReadinessPresentation(settings)
         try testTranscriptionUsesNativePickerAndExistingChoiceAPI(settings)
         testNativeDropdownUsesPendingContextualManagement(settings)
@@ -138,7 +139,7 @@ struct ModelsSettingsUIContractTests {
         let models = block(
             in: source,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
         guard let cloudProvider = models.range(of: "SettingsCard(\"Cloud Provider\""),
               let transcription = models.range(of: "SettingsCard(\"Transcription\""),
@@ -157,11 +158,49 @@ struct ModelsSettingsUIContractTests {
         precondition(!models.contains("@State private var showingLocalTranscriptionSettings"))
     }
 
+    private static func testPromptControlsMovedOutOfModels(_ source: String) {
+        let models = block(
+            in: source,
+            from: "struct ModelsSettingsView",
+            to: "// MARK: - Prompts Settings"
+        )
+        let contextDetails = block(
+            in: models,
+            from: "private var contextDetails: some View",
+            to: "\n    private var meetingSummaryDetails"
+        )
+        let screenshot = block(
+            in: models,
+            from: "private var contextScreenshotResolutionSection: some View",
+            to: "\n    private var transcriptionLanguageSetting"
+        )
+
+        for removed in [
+            "@State private var customSystemPromptInput",
+            "@State private var customContextPromptInput",
+            "systemPromptSection",
+            "contextPromptSection",
+            "instructionGuardSection",
+            "runSystemPromptTest()",
+            "runContextPromptTest()",
+            "Test System Prompt",
+            "Test Context Prompt"
+        ] {
+            precondition(!models.contains(removed), "Prompt behavior remains in Models: \(removed)")
+        }
+
+        precondition(contextDetails.contains("contextScreenshotResolutionSection"))
+        precondition(screenshot.contains("Text(\"Screenshot Resolution\")"))
+        precondition(screenshot.contains("selection: $appState.contextScreenshotMaxDimension"))
+        precondition(screenshot.contains("AppState.contextScreenshotDimensionOptions"))
+        precondition(screenshot.contains("appState.contextScreenshotMaxDimension = AppState.defaultContextScreenshotMaxDimension"))
+    }
+
     private static func testCloudAPIReadinessPresentation(_ source: String) {
         let models = block(
             in: source,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
         let provider = block(
             in: models,
@@ -188,16 +227,6 @@ struct ModelsSettingsUIContractTests {
             from: "private var postProcessingDetails: some View",
             to: "\n    private var transcriptionLanguageSetting"
         )
-        let systemPrompt = block(
-            in: models,
-            from: "private var systemPromptSection: some View",
-            to: "\n    private func runSystemPromptTest()"
-        )
-        let contextPrompt = block(
-            in: models,
-            from: "private var contextPromptSection: some View",
-            to: "\n    private func runContextPromptTest()"
-        )
 
         precondition(models.contains("private var hasConfiguredCloudAPIKey: Bool"))
         precondition(models.contains("!appState.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty"))
@@ -212,8 +241,6 @@ struct ModelsSettingsUIContractTests {
         precondition(transcription.contains("providerConfigurationWarning("))
         precondition(postProcessing.contains("providerConfigurationWarning("))
         precondition(context.contains("providerConfigurationWarning("))
-        precondition(systemPrompt.contains("providerConfigurationWarning("))
-        precondition(contextPrompt.contains("providerConfigurationWarning("))
 
         precondition(!postProcessing.contains(".disabled(!hasConfiguredCloudAPIKey)"))
         precondition(!postProcessing.contains(".opacity(hasConfiguredCloudAPIKey ? 1 : 0.45)"))
@@ -234,7 +261,7 @@ struct ModelsSettingsUIContractTests {
         let models = block(
             in: source,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
         let picker = block(
             in: models,
@@ -282,7 +309,7 @@ struct ModelsSettingsUIContractTests {
         let models = block(
             in: source,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
         let transcription = block(
             in: models,
@@ -332,7 +359,7 @@ struct ModelsSettingsUIContractTests {
         let models = block(
             in: settings,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
         let nativeRow = block(
             in: settings,
@@ -386,7 +413,7 @@ struct ModelsSettingsUIContractTests {
         let models = block(
             in: settings,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
         for draftState in [
             "@State private var transcriptionEnabledDraft = false",
@@ -407,7 +434,7 @@ struct ModelsSettingsUIContractTests {
         let models = block(
             in: source,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
         let displays = block(
             in: models,
@@ -427,7 +454,7 @@ struct ModelsSettingsUIContractTests {
         let validation = block(
             in: models,
             from: "private func validateAndSaveKey()",
-            to: "\n    // MARK: System Prompt"
+            to: "\n}"
         )
 
         precondition(displays.contains("case .legacyMlxWhisper:"))
@@ -448,7 +475,7 @@ struct ModelsSettingsUIContractTests {
         let models = block(
             in: source,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
         let context = block(
             in: models,
@@ -460,7 +487,7 @@ struct ModelsSettingsUIContractTests {
             "get: { contextEnabledDraft }",
             "contextEnabledDraft = newValue",
             "customAIProcessingModelSetting(",
-            "contextPromptSection",
+            "contextScreenshotResolutionSection",
             "selection: $appState.contextScreenshotMaxDimension"
         ] {
             precondition(models.contains(expected), "Missing Context binding/configuration: \(expected)")
@@ -486,7 +513,7 @@ struct ModelsSettingsUIContractTests {
         let models = block(
             in: source,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
 
         precondition(
@@ -520,7 +547,7 @@ struct ModelsSettingsUIContractTests {
         let models = block(
             in: source,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
         let postProcessing = block(
             in: models,
@@ -537,9 +564,7 @@ struct ModelsSettingsUIContractTests {
             "customAIProcessingModelSetting(",
             "defaultModel: AppState.defaultPostProcessingFallbackModel",
             "selection: $appState.outputLanguage",
-            "vocabularySection",
-            "systemPromptSection",
-            "instructionGuardSection"
+            "vocabularySection"
         ] {
             precondition(models.contains(expected), "Missing Post-processing UI binding: \(expected)")
         }
@@ -571,7 +596,7 @@ struct ModelsSettingsUIContractTests {
         let models = block(
             in: settings,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
         let postProcessing = block(
             in: models,
@@ -607,16 +632,6 @@ struct ModelsSettingsUIContractTests {
             in: models,
             from: "private func customAIProcessingModelDraft(",
             to: "\n    private func customStandardAPIModelDraft"
-        )
-        let systemPrompt = block(
-            in: models,
-            from: "private var systemPromptSection: some View",
-            to: "\n    private func runSystemPromptTest()"
-        )
-        let contextPrompt = block(
-            in: models,
-            from: "private var contextPromptSection: some View",
-            to: "\n    private func runContextPromptTest()"
         )
         let choiceBinding = block(
             in: models,
@@ -802,11 +817,6 @@ struct ModelsSettingsUIContractTests {
         precondition(modelDropdown.contains("self._isEditing = isEditing"))
         precondition(modelDropdown.contains("isEditing = focused"))
 
-        precondition(systemPrompt.contains("appState.isAIProcessingBackendReady(for: .postProcessing)"))
-        precondition(contextPrompt.contains("appState.isAIProcessingBackendReady(for: .context)"))
-        precondition(models.contains("let service = appState.makePostProcessingService()"))
-        precondition(!models.contains("let service = PostProcessingService("))
-
         precondition(!localAIModelRow.isEmpty, "Missing LocalAIModelRowView source")
         precondition(localAIModelRow.contains("appState.localAIInstallState(for: model)"))
         precondition(localAIModelRow.contains("appState.pendingLocalAIModelID(for: feature)"))
@@ -826,7 +836,7 @@ struct ModelsSettingsUIContractTests {
         let models = block(
             in: source,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
         let shortcuts = block(
             in: source,
@@ -855,7 +865,7 @@ struct ModelsSettingsUIContractTests {
         let models = block(
             in: source,
             from: "struct ModelsSettingsView",
-            to: "// MARK: - Shortcuts Settings"
+            to: "// MARK: - Prompts Settings"
         )
         let local = block(
             in: models,

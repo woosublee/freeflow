@@ -4,6 +4,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     case general
     case appearance
     case models
+    case prompts
     case shortcuts
     case input
     case calendar
@@ -14,7 +15,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     static var orderedCases: [SettingsTab] {
-        [.general, .appearance, .models, .shortcuts, .input, .calendar, .about, .runLog, .debug]
+        [.general, .appearance, .models, .prompts, .shortcuts, .input, .calendar, .about, .runLog, .debug]
     }
 
     var title: String {
@@ -22,6 +23,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: return "General"
         case .appearance: return "Appearance"
         case .models: return "Models"
+        case .prompts: return "Prompts"
         case .shortcuts: return "Shortcuts"
         case .input: return "Input"
         case .calendar: return "Calendar"
@@ -36,6 +38,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: return "gearshape"
         case .appearance: return "paintbrush"
         case .models: return "waveform.badge.magnifyingglass"
+        case .prompts: return "text.bubble"
         case .shortcuts: return "keyboard.fill"
         case .input: return "mic.fill"
         case .calendar: return "calendar"

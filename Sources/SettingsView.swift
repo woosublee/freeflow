@@ -391,6 +391,8 @@ struct SettingsView: View {
                     AppearanceSettingsView()
                 case .models:
                     ModelsSettingsView()
+                case .prompts:
+                    PromptsSettingsView()
                 case .shortcuts:
                     ShortcutsSettingsView()
                 case .input:
@@ -1541,21 +1543,6 @@ struct ModelsSettingsView: View {
     @State private var customVocabularyInput: String = ""
     @State private var advancedProviderSettingsExpanded = false
 
-    @State private var customSystemPromptInput: String = ""
-    @State private var customContextPromptInput: String = ""
-    @State private var showDefaultSystemPrompt = false
-    @State private var showDefaultContextPrompt = false
-    @State private var systemTestInput: String = "Um, so I was like, thinking we should uh, refactor the authentication module, you know?"
-    @State private var systemTestRunning = false
-    @State private var systemTestOutput: String? = nil
-    @State private var systemTestIssue: QuillUserIssueRecord? = nil
-    @State private var systemTestPrompt: String? = nil
-    @State private var contextTestRunning = false
-    @State private var contextTestOutput: String? = nil
-    @State private var contextTestIssue: QuillUserIssueRecord? = nil
-    @State private var contextTestError: String? = nil
-    @State private var contextTestPrompt: String? = nil
-
     private struct OutputLanguageOption {
         let label: LocalizedStringKey
         let value: String // Persisted prompt/API value; never localize.
@@ -1617,12 +1604,6 @@ struct ModelsSettingsView: View {
             )
             meetingSummaryFallbackModelDraft = appState.meetingSummaryFallbackModel
             customVocabularyInput = appState.customVocabulary
-            customSystemPromptInput = appState.customSystemPrompt.isEmpty
-                ? PostProcessingService.defaultSystemPrompt
-                : appState.customSystemPrompt
-            customContextPromptInput = appState.customContextPrompt.isEmpty
-                ? AppContextService.defaultContextPrompt
-                : appState.customContextPrompt
             initializeManagedNativeModel()
             reconcileRetainedLocalAIModels()
         }
@@ -2613,10 +2594,6 @@ struct ModelsSettingsView: View {
             Divider()
             vocabularySection
             Divider()
-            systemPromptSection
-            Divider()
-            instructionGuardSection
-            Divider()
             Text("Edit Mode uses this model, fallback model, Output Language, and Custom Vocabulary. Invocation Style and Extra Modifier remain in Shortcuts.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -2630,7 +2607,7 @@ struct ModelsSettingsView: View {
                 feature: .context
             )
             Divider()
-            contextPromptSection
+            contextScreenshotResolutionSection
         }
     }
 
@@ -2663,6 +2640,44 @@ struct ModelsSettingsView: View {
                 Text("Cloud fallback is only used when Meeting Summary uses a cloud model.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var contextScreenshotResolutionSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Screenshot Resolution")
+                .font(.caption.weight(.semibold))
+            Text("Controls the maximum image dimension sent for context inference.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("", selection: $appState.contextScreenshotMaxDimension) {
+                ForEach(AppState.contextScreenshotDimensionOptions, id: \.self) { dimension in
+                    Text("\(dimension) px").tag(dimension)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .accessibilityLabel("Screenshot Resolution")
+
+            HStack {
+                if appState.contextScreenshotMaxDimension == AppState.defaultContextScreenshotMaxDimension {
+                    Label("Using default", systemImage: "checkmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label("Using custom value", systemImage: "pencil")
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                }
+                Spacer()
+                if appState.contextScreenshotMaxDimension != AppState.defaultContextScreenshotMaxDimension {
+                    Button("Reset to Default") {
+                        appState.contextScreenshotMaxDimension = AppState.defaultContextScreenshotMaxDimension
+                    }
+                    .font(.caption)
+                }
             }
         }
     }
@@ -3048,6 +3063,86 @@ struct ModelsSettingsView: View {
         }
     }
 
+}
+
+// MARK: - Prompts Settings
+
+struct PromptsSettingsView: View {
+    @EnvironmentObject var appState: AppState
+    @State private var customSystemPromptInput: String = ""
+    @State private var customContextPromptInput: String = ""
+    @State private var showDefaultSystemPrompt = false
+    @State private var showDefaultContextPrompt = false
+    @State private var systemTestInput = "Um, so I was like, thinking we should uh, refactor the authentication module, you know?"
+    @State private var systemTestRunning = false
+    @State private var systemTestOutput: String?
+    @State private var systemTestIssue: QuillUserIssueRecord?
+    @State private var systemTestPrompt: String?
+    @State private var contextTestRunning = false
+    @State private var contextTestOutput: String?
+    @State private var contextTestIssue: QuillUserIssueRecord?
+    @State private var contextTestError: String?
+    @State private var contextTestPrompt: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                SettingsCard("System Prompt", icon: "text.bubble.fill") {
+                    systemPromptSection
+                }
+                SettingsCard("Instruction Guard", icon: "shield.lefthalf.filled") {
+                    instructionGuardSection
+                }
+                SettingsCard("Context Prompt", icon: "eye.fill") {
+                    contextPromptSection
+                }
+            }
+            .padding(24)
+        }
+        .onAppear {
+            customSystemPromptInput = appState.customSystemPrompt.isEmpty
+                ? PostProcessingService.defaultSystemPrompt
+                : appState.customSystemPrompt
+            customContextPromptInput = appState.customContextPrompt.isEmpty
+                ? AppContextService.defaultContextPrompt
+                : appState.customContextPrompt
+        }
+    }
+
+    private var hasConfiguredCloudAPIKey: Bool {
+        !appState.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var postProcessingUsesCloud: Bool {
+        if case .cloud = appState.postProcessingBackendChoice { return true }
+        return false
+    }
+
+    private var contextUsesCloud: Bool {
+        if case .cloud = appState.contextBackendChoice { return true }
+        return false
+    }
+
+    private func settingsTestRecoveryAction(
+        for issue: QuillUserIssueRecord,
+        retry: @escaping () -> Void
+    ) -> (() -> Void)? {
+        switch issue.recoveryAction {
+        case .retryTranscription:
+            return retry
+        case .openProviderSettings, .openModelsSettings,
+             .openMicrophoneSettings, .openSpeechRecognitionSettings,
+             .openScreenRecordingSettings, .none:
+            return nil
+        }
+    }
+
+    private func providerConfigurationWarning(_ message: String) -> some View {
+        Label(localizedCatalogString(message), systemImage: "exclamationmark.triangle")
+            .font(.caption)
+            .foregroundStyle(.orange)
+    }
+
     // MARK: System Prompt
 
     private var instructionGuardSection: some View {
@@ -3367,44 +3462,6 @@ struct ModelsSettingsView: View {
                         appState.customContextPromptLastModified = ""
                     }
                     .font(.caption)
-                }
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Screenshot Resolution")
-                    .font(.caption.weight(.semibold))
-                Text("Controls the maximum image dimension sent for context inference.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Picker("", selection: $appState.contextScreenshotMaxDimension) {
-                    ForEach(AppState.contextScreenshotDimensionOptions, id: \.self) { dimension in
-                        Text("\(dimension) px").tag(dimension)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .accessibilityLabel("Screenshot Resolution")
-
-                HStack {
-                    if appState.contextScreenshotMaxDimension == AppState.defaultContextScreenshotMaxDimension {
-                        Label("Using default", systemImage: "checkmark.circle")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Label("Using custom value", systemImage: "pencil")
-                            .font(.caption)
-                            .foregroundStyle(.blue)
-                    }
-                    Spacer()
-                    if appState.contextScreenshotMaxDimension != AppState.defaultContextScreenshotMaxDimension {
-                        Button("Reset to Default") {
-                            appState.contextScreenshotMaxDimension = AppState.defaultContextScreenshotMaxDimension
-                        }
-                        .font(.caption)
-                    }
                 }
             }
 

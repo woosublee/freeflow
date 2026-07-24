@@ -6687,6 +6687,22 @@
         }
       }
     },
+    "Prompts": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prompts"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "프롬프트"
+          }
+        }
+      }
+    },
     "Shortcuts": {
       "localizations": {
         "en": {

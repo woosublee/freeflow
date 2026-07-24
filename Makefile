@@ -475,6 +475,8 @@ _test-core: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(TEST_BUILD_DIR)/Localizatio
 	@$(TEST_BUILD_DIR)/SettingsLocalizationTests
 	@swiftc -parse-as-library Tests/ModelsSettingsUIContractTests.swift -o $(TEST_BUILD_DIR)/ModelsSettingsUIContractTests
 	@$(TEST_BUILD_DIR)/ModelsSettingsUIContractTests
+	@swiftc -parse-as-library Tests/PromptsSettingsUIContractTests.swift -o $(TEST_BUILD_DIR)/PromptsSettingsUIContractTests
+	@$(TEST_BUILD_DIR)/PromptsSettingsUIContractTests
 	@swiftc -parse-as-library Tests/QuillUserIssueUIContractTests.swift -o $(TEST_BUILD_DIR)/QuillUserIssueUIContractTests
 	@$(TEST_BUILD_DIR)/QuillUserIssueUIContractTests
 	@swiftc -parse-as-library Sources/CanonicalPCM16WAV.swift Tests/CanonicalPCM16WAVTests.swift -o $(TEST_BUILD_DIR)/CanonicalPCM16WAVTests

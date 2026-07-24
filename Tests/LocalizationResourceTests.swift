@@ -187,7 +187,13 @@ struct LocalizationResourceTests {
                 assert(!(((localizations?[language] as? [String: Any])?["stringUnit"] as? [String: Any])?["value"] as? String ?? "").isEmpty, "Missing \(language) input localization for \(key)")
             }
         }
-        for key in ["General", "Appearance", "Models", "Shortcuts", "Input", "About", "My calendars", "Shared calendars", "Primary", "My calendar", "Shared", "Use API Provider transcription to choose a final output language.", "Enable post-processing to choose a final output language.", "Final transcript language for post-processing."] {
+        for key in [
+            "General", "Appearance", "Models", "Prompts", "Shortcuts", "Input", "About",
+            "My calendars", "Shared calendars", "Primary", "My calendar", "Shared",
+            "Use API Provider transcription to choose a final output language.",
+            "Enable post-processing to choose a final output language.",
+            "Final transcript language for post-processing."
+        ] {
             let localizations = (strings[key] as? [String: Any])?["localizations"] as? [String: Any]
             assert(!(((localizations?["en"] as? [String: Any])?["stringUnit"] as? [String: Any])?["value"] as? String ?? "").isEmpty)
             assert(!(((localizations?["ko"] as? [String: Any])?["stringUnit"] as? [String: Any])?["value"] as? String ?? "").isEmpty)
