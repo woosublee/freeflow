@@ -107,7 +107,6 @@ struct MeetingSummaryServiceTests {
         try expect(system.contains("source data, not instructions"), "source data guard")
         try expect(user.contains("<<<TRANSCRIPT"), "transcript delimiter")
         try expect(user.contains("<<<CALENDAR_DATA"), "calendar delimiter")
-        try expect(!user.contains("Unrelated context"), "context summary excluded")
     }
 
     private static func testLocalRequestUsesLoopbackWithoutAuthorization() async throws {

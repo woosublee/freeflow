@@ -8,21 +8,25 @@ struct MeetingSummaryAppStateTests {
         let originalFactory = await MainActor.run {
             AppState.meetingSummaryGeneratorFactory
         }
-        defer {
-            Task { @MainActor in
+        do {
+            try await testGenerationPersistsOnlyAfterSuccess()
+            try await testFailurePreservesExistingSummary()
+            try await testTranscriptChangeDiscardsInflightResult()
+            try await testActionCompletionPersists()
+            try await testPostProcessingDisabledDoesNotBlockSummary()
+            try await testDeleteMeetingSummaryRemovesEnvelope()
+            try await testDeleteMeetingSummaryWithoutExistingSummaryThrows()
+            try await testSuccessfulGenerationMarksPendingRevealConsumableOnce()
+            try await testFailedGenerationDoesNotMarkPendingReveal()
+        } catch {
+            await MainActor.run {
                 AppState.meetingSummaryGeneratorFactory = originalFactory
             }
+            throw error
         }
-
-        try await testGenerationPersistsOnlyAfterSuccess()
-        try await testFailurePreservesExistingSummary()
-        try await testTranscriptChangeDiscardsInflightResult()
-        try await testActionCompletionPersists()
-        try await testPostProcessingDisabledDoesNotBlockSummary()
-        try await testDeleteMeetingSummaryRemovesEnvelope()
-        try await testDeleteMeetingSummaryWithoutExistingSummaryThrows()
-        try await testSuccessfulGenerationMarksPendingRevealConsumableOnce()
-        try await testFailedGenerationDoesNotMarkPendingReveal()
+        await MainActor.run {
+            AppState.meetingSummaryGeneratorFactory = originalFactory
+        }
         print("MeetingSummaryAppStateTests passed")
     }
 

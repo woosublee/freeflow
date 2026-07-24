@@ -101,7 +101,7 @@ struct MeetingSummaryUIContractTests {
             "? \"Create Summary\"",
             ": \"Regenerate Summary\"",
             "private var showsSummaryTab: Bool {",
-            "summaryEnvelope != nil",
+            "summaryEnvelope != nil || summaryIssue != nil",
             "summaryActionIsDisabled",
             "handleSummaryAction",
             "@State private var showDeleteSummaryConfirmation = false",
@@ -129,6 +129,10 @@ struct MeetingSummaryUIContractTests {
         precondition(
             !generateSummaryBody.contains("selectedContentMode = .summary"),
             "generateSummary must not directly set selectedContentMode"
+        )
+        precondition(
+            generateSummaryBody.contains("switchToSummaryTab()"),
+            "generateSummary must switch to the Summary tab so a failed first-time generation is visible"
         )
         let revealSummaryIfPendingBody = block(
             in: noteBrowser,

@@ -409,7 +409,7 @@ MeetingSummaryTextChunker
 - deterministic text chunks
 - stable source offsets
 
-MeetingSummaryDecoder
+MeetingSummaryStrictDecoder
 - provider-neutral structured response decode
 - field validation
 - source quote validation

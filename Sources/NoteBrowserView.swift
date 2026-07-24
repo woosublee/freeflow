@@ -1298,7 +1298,7 @@ private struct NoteDetailView: View {
         appState.meetingSummaryAvailability(for: item)
     }
     private var showsSummaryTab: Bool {
-        summaryEnvelope != nil
+        summaryEnvelope != nil || summaryIssue != nil
     }
     private var isGeneratingSummary: Bool {
         appState.meetingSummaryGeneratingNoteIDs.contains(item.id)
@@ -1765,7 +1765,12 @@ private struct NoteDetailView: View {
                     action: {
                         performRecoveryAction(presentation.recoveryAction)
                     },
-                    onDismiss: { self.summaryIssue = nil }
+                    onDismiss: {
+                        self.summaryIssue = nil
+                        if summaryEnvelope == nil {
+                            selectedContentMode = .transcript
+                        }
+                    }
                 )
                 .padding(.horizontal, 40)
                 .padding(.top, 16)
@@ -2146,6 +2151,10 @@ private struct NoteDetailView: View {
 
     private func revealSummaryIfPending() {
         guard appState.consumeMeetingSummaryPendingReveal(id: item.id) else { return }
+        switchToSummaryTab()
+    }
+
+    private func switchToSummaryTab() {
         // The Summary segment is only added to the picker once showsSummaryTab
         // flips true. Selecting it in the same update as its first appearance
         // can be dropped by the underlying segmented control, so defer the
@@ -2168,10 +2177,13 @@ private struct NoteDetailView: View {
                         ? "Local AI"
                         : nil
                 )
+                switchToSummaryTab()
             } catch let error as QuillUserIssueError {
                 summaryIssue = error.record
+                switchToSummaryTab()
             } catch {
                 summaryIssue = QuillUserIssueRecord(code: .unknown)
+                switchToSummaryTab()
             }
         }
     }
