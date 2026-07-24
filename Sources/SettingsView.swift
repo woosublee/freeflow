@@ -391,6 +391,8 @@ struct SettingsView: View {
                     AppearanceSettingsView()
                 case .models:
                     ModelsSettingsView()
+                case .prompts:
+                    PromptsSettingsView()
                 case .shortcuts:
                     ShortcutsSettingsView()
                 case .input:
@@ -3405,6 +3407,509 @@ struct ModelsSettingsView: View {
                         }
                         .font(.caption)
                     }
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Test Context Prompt")
+                    .font(.caption.weight(.semibold))
+                Text("Captures a screenshot and metadata from the frontmost app, then runs the context prompt to infer activity.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Button {
+                    runContextPromptTest()
+                } label: {
+                    HStack(spacing: 6) {
+                        if contextTestRunning {
+                            ProgressView().controlSize(.small)
+                            Text("Running...")
+                        } else {
+                            Image(systemName: "play.fill")
+                            Text("Test Context Prompt")
+                        }
+                    }
+                }
+                .disabled(
+                    contextTestRunning
+                        || !appState.isAIProcessingBackendReady(for: .context)
+                )
+
+                if contextUsesCloud && !hasConfiguredCloudAPIKey {
+                    providerConfigurationWarning("API key required to test")
+                }
+
+                if let issue = contextTestIssue {
+                    QuillUserIssueView(
+                        presentation: issue.presentation(),
+                        style: .inline,
+                        action: settingsTestRecoveryAction(
+                            for: issue,
+                            retry: runContextPromptTest
+                        )
+                    )
+                }
+
+                if let error = contextTestError {
+                    Label(error, systemImage: "xmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                if let output = contextTestOutput {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Result:")
+                            .font(.caption.weight(.semibold))
+                        Text(output.isEmpty ? "(empty — no output)" : output)
+                            .font(.system(.caption, design: .monospaced))
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.green.opacity(0.08))
+                            .cornerRadius(6)
+                    }
+                }
+
+                if let prompt = contextTestPrompt {
+                    DisclosureGroup("Full prompt sent") {
+                        Text(prompt)
+                            .font(.system(.caption2, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func runContextPromptTest() {
+        contextTestRunning = true
+        contextTestOutput = nil
+        contextTestIssue = nil
+        contextTestError = nil
+        contextTestPrompt = nil
+
+        let service = appState.makeAppContextService()
+
+        Task {
+            let context = await service.collectContext()
+            await MainActor.run {
+                contextTestIssue = context.userIssueRecord
+                if context.userIssueRecord != nil {
+                    contextTestOutput = context.contextSummary
+                    contextTestPrompt = context.contextPrompt
+                } else if let prompt = context.contextPrompt {
+                    contextTestOutput = context.contextSummary
+                    contextTestPrompt = prompt
+                } else {
+                    contextTestError = "Context inference returned no result. This may be a permissions issue or the API could not be reached."
+                    contextTestOutput = context.contextSummary
+                }
+                contextTestRunning = false
+            }
+        }
+    }
+}
+
+// MARK: - Prompts Settings
+
+struct PromptsSettingsView: View {
+    @EnvironmentObject var appState: AppState
+    @State private var customSystemPromptInput: String = ""
+    @State private var customContextPromptInput: String = ""
+    @State private var showDefaultSystemPrompt = false
+    @State private var showDefaultContextPrompt = false
+    @State private var systemTestInput = "Um, so I was like, thinking we should uh, refactor the authentication module, you know?"
+    @State private var systemTestRunning = false
+    @State private var systemTestOutput: String?
+    @State private var systemTestIssue: QuillUserIssueRecord?
+    @State private var systemTestPrompt: String?
+    @State private var contextTestRunning = false
+    @State private var contextTestOutput: String?
+    @State private var contextTestIssue: QuillUserIssueRecord?
+    @State private var contextTestError: String?
+    @State private var contextTestPrompt: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                SettingsCard("System Prompt", icon: "text.bubble.fill") {
+                    systemPromptSection
+                }
+                SettingsCard("Instruction Guard", icon: "shield.lefthalf.filled") {
+                    instructionGuardSection
+                }
+                SettingsCard("Context Prompt", icon: "eye.fill") {
+                    contextPromptSection
+                }
+            }
+            .padding(24)
+        }
+        .onAppear {
+            customSystemPromptInput = appState.customSystemPrompt.isEmpty
+                ? PostProcessingService.defaultSystemPrompt
+                : appState.customSystemPrompt
+            customContextPromptInput = appState.customContextPrompt.isEmpty
+                ? AppContextService.defaultContextPrompt
+                : appState.customContextPrompt
+        }
+    }
+
+    private var hasConfiguredCloudAPIKey: Bool {
+        !appState.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var postProcessingUsesCloud: Bool {
+        if case .cloud = appState.postProcessingBackendChoice { return true }
+        return false
+    }
+
+    private var contextUsesCloud: Bool {
+        if case .cloud = appState.contextBackendChoice { return true }
+        return false
+    }
+
+    private func settingsTestRecoveryAction(
+        for issue: QuillUserIssueRecord,
+        retry: @escaping () -> Void
+    ) -> (() -> Void)? {
+        switch issue.recoveryAction {
+        case .retryTranscription:
+            return retry
+        case .openProviderSettings, .openModelsSettings,
+             .openMicrophoneSettings, .openSpeechRecognitionSettings,
+             .openScreenRecordingSettings, .none:
+            return nil
+        }
+    }
+
+    private func providerConfigurationWarning(_ message: String) -> some View {
+        Label(localizedCatalogString(message), systemImage: "exclamationmark.triangle")
+            .font(.caption)
+            .foregroundStyle(.orange)
+    }
+
+    // MARK: System Prompt
+
+    private var instructionGuardSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle(
+                "Prevent dictated prompts from being executed",
+                isOn: $appState.instructionExecutionGuardEnabled
+            )
+            .toggleStyle(.switch)
+
+            Text("When enabled, \(AppName.displayName) retries or falls back to the literal transcript if post-processing looks like it answered the dictated text instead of cleaning it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var systemPromptSection: some View {
+        let isCustom = !appState.customSystemPrompt.isEmpty
+        let hasNewerDefault = isCustom
+            && !appState.customSystemPromptLastModified.isEmpty
+            && appState.customSystemPromptLastModified < PostProcessingService.defaultSystemPromptDate
+
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Controls how raw transcriptions are cleaned up.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if hasNewerDefault {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.blue)
+                    Text("A newer default prompt is available.")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Button("View Default") { showDefaultSystemPrompt.toggle() }
+                        .font(.caption)
+                    Button("Switch to Default") {
+                        customSystemPromptInput = PostProcessingService.defaultSystemPrompt
+                        appState.customSystemPrompt = ""
+                        appState.customSystemPromptLastModified = ""
+                    }
+                    .font(.caption)
+                }
+                .padding(10)
+                .background(Color.blue.opacity(0.1))
+                .cornerRadius(6)
+            }
+
+            if showDefaultSystemPrompt {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Default System Prompt")
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        Button("Hide") { showDefaultSystemPrompt = false }
+                            .font(.caption)
+                    }
+                    Text(verbatim: PostProcessingService.defaultSystemPrompt)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(10)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(6)
+            }
+
+            TextEditor(text: $customSystemPromptInput)
+                .font(.system(.body, design: .monospaced))
+                .frame(minHeight: 120, maxHeight: 200)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3), lineWidth: 1))
+                .onChange(of: customSystemPromptInput) { newValue in
+                    let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let defaultTrimmed = PostProcessingService.defaultSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed == defaultTrimmed || trimmed.isEmpty {
+                        if !appState.customSystemPrompt.isEmpty {
+                            appState.customSystemPrompt = ""
+                            appState.customSystemPromptLastModified = ""
+                        }
+                    } else {
+                        appState.customSystemPrompt = trimmed
+                        let today = iso8601DayFormatter.string(from: Date())
+                        if appState.customSystemPromptLastModified != today {
+                            appState.customSystemPromptLastModified = today
+                        }
+                    }
+                }
+
+            HStack {
+                if isCustom {
+                    Label("Using custom prompt", systemImage: "pencil")
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                } else {
+                    Label("Using default", systemImage: "checkmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if isCustom {
+                    Button("Reset to Default") {
+                        customSystemPromptInput = PostProcessingService.defaultSystemPrompt
+                        appState.customSystemPrompt = ""
+                        appState.customSystemPromptLastModified = ""
+                    }
+                    .font(.caption)
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Test System Prompt")
+                    .font(.caption.weight(.semibold))
+                Text("Enter sample text to see how the current prompt cleans it up.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextEditor(text: $systemTestInput)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 60, maxHeight: 100)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3), lineWidth: 1))
+
+                Button {
+                    runSystemPromptTest()
+                } label: {
+                    HStack(spacing: 6) {
+                        if systemTestRunning {
+                            ProgressView().controlSize(.small)
+                            Text("Running...")
+                        } else {
+                            Image(systemName: "play.fill")
+                            Text("Test System Prompt")
+                        }
+                    }
+                }
+                .disabled(
+                    systemTestRunning
+                        || !appState.isAIProcessingBackendReady(for: .postProcessing)
+                        || systemTestInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+
+                if postProcessingUsesCloud && !hasConfiguredCloudAPIKey {
+                    providerConfigurationWarning("API key required to test")
+                }
+
+                if let issue = systemTestIssue {
+                    QuillUserIssueView(
+                        presentation: issue.presentation(),
+                        style: .inline,
+                        action: settingsTestRecoveryAction(
+                            for: issue,
+                            retry: runSystemPromptTest
+                        )
+                    )
+                }
+
+                if let output = systemTestOutput {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Result:")
+                            .font(.caption.weight(.semibold))
+                        Text(output.isEmpty ? "(empty — no output)" : output)
+                            .font(.system(.caption, design: .monospaced))
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.green.opacity(0.08))
+                            .cornerRadius(6)
+                    }
+                }
+
+                if let prompt = systemTestPrompt {
+                    DisclosureGroup("Full prompt sent") {
+                        Text(prompt)
+                            .font(.system(.caption2, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func runSystemPromptTest() {
+        systemTestRunning = true
+        systemTestOutput = nil
+        systemTestIssue = nil
+        systemTestPrompt = nil
+
+        let service = appState.makePostProcessingService()
+        let input = systemTestInput
+        let customPrompt = appState.customSystemPrompt
+        let vocabulary = appState.customVocabulary
+
+        let context = AppContext(
+            appName: "Quill Settings",
+            bundleIdentifier: "com.woosublee.quill",
+            windowTitle: "System Prompt Test",
+            selectedText: nil,
+            currentActivity: "User is testing the system prompt in Quill settings.",
+            contextSystemPrompt: nil,
+            contextPrompt: nil,
+            screenshotDataURL: nil,
+            screenshotMimeType: nil,
+            screenshotError: nil
+        )
+
+        Task {
+            do {
+                let result = try await service.postProcess(
+                    transcript: input,
+                    context: context,
+                    customVocabulary: vocabulary,
+                    customSystemPrompt: customPrompt
+                )
+                await MainActor.run {
+                    systemTestOutput = result.transcript
+                    systemTestPrompt = result.prompt
+                    systemTestRunning = false
+                }
+            } catch {
+                await MainActor.run {
+                    systemTestIssue = service.userIssue(for: error).record
+                    systemTestRunning = false
+                }
+            }
+        }
+    }
+
+    // MARK: Context Prompt
+
+    private var contextPromptSection: some View {
+        let isCustom = !appState.customContextPrompt.isEmpty
+        let hasNewerDefault = isCustom
+            && !appState.customContextPromptLastModified.isEmpty
+            && appState.customContextPromptLastModified < AppContextService.defaultContextPromptDate
+
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Controls how Quill infers your current activity from app metadata and screenshots.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if hasNewerDefault {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.blue)
+                    Text("A newer default prompt is available.")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Button("View Default") { showDefaultContextPrompt.toggle() }
+                        .font(.caption)
+                    Button("Switch to Default") {
+                        customContextPromptInput = AppContextService.defaultContextPrompt
+                        appState.customContextPrompt = ""
+                        appState.customContextPromptLastModified = ""
+                    }
+                    .font(.caption)
+                }
+                .padding(10)
+                .background(Color.blue.opacity(0.1))
+                .cornerRadius(6)
+            }
+
+            if showDefaultContextPrompt {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Default Context Prompt")
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        Button("Hide") { showDefaultContextPrompt = false }
+                            .font(.caption)
+                    }
+                    Text(verbatim: AppContextService.defaultContextPrompt)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(10)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(6)
+            }
+
+            TextEditor(text: $customContextPromptInput)
+                .font(.system(.body, design: .monospaced))
+                .frame(minHeight: 120, maxHeight: 200)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3), lineWidth: 1))
+                .onChange(of: customContextPromptInput) { newValue in
+                    let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let defaultTrimmed = AppContextService.defaultContextPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed == defaultTrimmed || trimmed.isEmpty {
+                        if !appState.customContextPrompt.isEmpty {
+                            appState.customContextPrompt = ""
+                            appState.customContextPromptLastModified = ""
+                        }
+                    } else {
+                        appState.customContextPrompt = trimmed
+                        let today = iso8601DayFormatter.string(from: Date())
+                        if appState.customContextPromptLastModified != today {
+                            appState.customContextPromptLastModified = today
+                        }
+                    }
+                }
+
+            HStack {
+                if isCustom {
+                    Label("Using custom prompt", systemImage: "pencil")
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                } else {
+                    Label("Using default", systemImage: "checkmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if isCustom {
+                    Button("Reset to Default") {
+                        customContextPromptInput = AppContextService.defaultContextPrompt
+                        appState.customContextPrompt = ""
+                        appState.customContextPromptLastModified = ""
+                    }
+                    .font(.caption)
                 }
             }
 
