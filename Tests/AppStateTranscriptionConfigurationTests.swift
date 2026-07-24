@@ -532,7 +532,9 @@ struct AppStateTranscriptionConfigurationTests {
                 postProcessingEnabled: false,
                 postProcessingChoice: appState.postProcessingBackendChoice,
                 contextEnabled: false,
-                contextChoice: appState.contextBackendChoice
+                contextChoice: appState.contextBackendChoice,
+                meetingSummaryEnabled: !appState.disableMeetingSummary,
+                meetingSummaryChoice: appState.meetingSummaryBackendChoice
             )
 
             precondition(appState.transcriptionEnabled)

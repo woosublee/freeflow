@@ -291,6 +291,7 @@ final class PipelineHistoryStore {
         entity.contextBundleIdentifier = item.contextBundleIdentifier
         entity.contextWindowTitle = item.contextWindowTitle
         entity.customTitle = item.customTitle
+        entity.meetingSummaryJSON = item.meetingSummaryJSON
     }
 
     private func saveContext() throws {
@@ -391,7 +392,8 @@ final class PipelineHistoryStore {
             contextAppName: entity.contextAppName,
             contextBundleIdentifier: entity.contextBundleIdentifier,
             contextWindowTitle: entity.contextWindowTitle,
-            customTitle: entity.customTitle
+            customTitle: entity.customTitle,
+            meetingSummaryJSON: entity.meetingSummaryJSON
         )
     }
 
@@ -434,7 +436,8 @@ final class PipelineHistoryStore {
             makeAttribute(name: "contextAppName", type: .stringAttributeType, isOptional: true),
             makeAttribute(name: "contextBundleIdentifier", type: .stringAttributeType, isOptional: true),
             makeAttribute(name: "contextWindowTitle", type: .stringAttributeType, isOptional: true),
-            makeAttribute(name: "customTitle", type: .stringAttributeType, isOptional: true)
+            makeAttribute(name: "customTitle", type: .stringAttributeType, isOptional: true),
+            makeAttribute(name: "meetingSummaryJSON", type: .binaryDataAttributeType, isOptional: true)
         ]
 
         model.entities = [entity]
@@ -490,4 +493,5 @@ final class PipelineHistoryEntry: NSManagedObject {
     @NSManaged var contextBundleIdentifier: String?
     @NSManaged var contextWindowTitle: String?
     @NSManaged var customTitle: String?
+    @NSManaged var meetingSummaryJSON: Data?
 }

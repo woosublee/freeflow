@@ -40,6 +40,8 @@ struct AppStateAIProcessingBackendTests {
         await testChangingCloudModelWhileLocalPreservesLocalChoice()
         await testDirectCloudChoiceSynchronizesRememberedModel()
         await testPostProcessingAndContextChoicesStayIndependent()
+        await testMeetingSummaryUsesIndependentStoredChoice()
+        await testMeetingSummaryDraftFallsBackOrTurnsOffOnDismissal()
         await testDiscardUndownloadedSelectionsRestoresActiveChoices()
         await testDiscardUndownloadedSelectionsPreservesStartedDownloads()
         await testSettingsDismissalDisablesAIWithoutReadyModels()
@@ -282,6 +284,55 @@ struct AppStateAIProcessingBackendTests {
         }
     }
 
+    private static func testMeetingSummaryUsesIndependentStoredChoice() async {
+        resetAIProcessingDefaults()
+        let appState = await makeRefreshedAppState()
+
+        await MainActor.run {
+            appState.apiKey = "configured-key"
+            appState.selectAIProcessingBackendChoice(
+                .cloud(modelID: "summary/model"),
+                for: .meetingSummary
+            )
+
+            precondition(
+                appState.meetingSummaryBackendChoice
+                    == .cloud(modelID: "summary/model")
+            )
+            precondition(
+                appState.postProcessingBackendChoice
+                    != appState.meetingSummaryBackendChoice
+            )
+        }
+    }
+
+    private static func testMeetingSummaryDraftFallsBackOrTurnsOffOnDismissal() async {
+        resetAIProcessingDefaults()
+        let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
+        let seams = LocalAISeamSnapshot()
+        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
+        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
+        defer { seams.restore() }
+
+        let appState = await makeRefreshedAppState()
+        await MainActor.run {
+            appState.apiKey = ""
+            appState.disableMeetingSummary = false
+            appState.commitModelSettingsDrafts(
+                transcriptionEnabled: appState.transcriptionEnabled,
+                transcriptionChoice: appState.currentNoteBrowserTranscriptionChoice,
+                postProcessingEnabled: !appState.disablePostProcessing,
+                postProcessingChoice: appState.postProcessingBackendChoice,
+                contextEnabled: !appState.disableContextCapture,
+                contextChoice: appState.contextBackendChoice,
+                meetingSummaryEnabled: true,
+                meetingSummaryChoice: .cloud(modelID: "summary/model")
+            )
+
+            precondition(appState.disableMeetingSummary)
+        }
+    }
+
     private static func testDiscardUndownloadedSelectionsRestoresActiveChoices() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
@@ -315,7 +366,9 @@ struct AppStateAIProcessingBackendTests {
                 postProcessingEnabled: true,
                 postProcessingChoice: .localAI(modelID: model.id),
                 contextEnabled: true,
-                contextChoice: .localAI(modelID: model.id)
+                contextChoice: .localAI(modelID: model.id),
+                meetingSummaryEnabled: !appState.disableMeetingSummary,
+                meetingSummaryChoice: appState.meetingSummaryBackendChoice
             )
 
             precondition(appState.pendingLocalAIModelID(for: .postProcessing) == nil)
@@ -425,6 +478,7 @@ struct AppStateAIProcessingBackendTests {
         await MainActor.run {
             let originalPostChoice = appState.postProcessingBackendChoice
             let originalContextChoice = appState.contextBackendChoice
+            let originalSummaryChoice = appState.meetingSummaryBackendChoice
             appState.selectAIProcessingBackendChoice(
                 .localAI(modelID: model.id),
                 for: .postProcessing
@@ -433,11 +487,17 @@ struct AppStateAIProcessingBackendTests {
                 .localAI(modelID: model.id),
                 for: .context
             )
+            appState.selectAIProcessingBackendChoice(
+                .localAI(modelID: model.id),
+                for: .meetingSummary
+            )
 
             precondition(appState.postProcessingBackendChoice == originalPostChoice)
             precondition(appState.contextBackendChoice == originalContextChoice)
+            precondition(appState.meetingSummaryBackendChoice == originalSummaryChoice)
             precondition(appState.pendingLocalAIModelID(for: .postProcessing) == model.id)
             precondition(appState.pendingLocalAIModelID(for: .context) == model.id)
+            precondition(appState.pendingLocalAIModelID(for: .meetingSummary) == model.id)
             precondition(appState.selectedOrPendingLocalAIModel(for: .postProcessing) == model)
             precondition(!appState.localAIInstallState(for: model).isInstalling)
         }
@@ -459,8 +519,10 @@ struct AppStateAIProcessingBackendTests {
             let expected = AIProcessingBackendChoice.localAI(modelID: model.id)
             precondition(appState.postProcessingBackendChoice == expected)
             precondition(appState.contextBackendChoice == expected)
+            precondition(appState.meetingSummaryBackendChoice == expected)
             precondition(appState.pendingLocalAIModelID(for: .postProcessing) == nil)
             precondition(appState.pendingLocalAIModelID(for: .context) == nil)
+            precondition(appState.pendingLocalAIModelID(for: .meetingSummary) == nil)
             precondition(appState.localAIInstallState(for: model).status == .ready)
             precondition(appState.localAIInstallState(for: model).issue == nil)
         }
@@ -2318,8 +2380,14 @@ struct AppStateAIProcessingBackendTests {
             "context_model",
             "post_processing_backend_choice",
             "context_backend_choice",
+            "meeting_summary_model",
+            "meeting_summary_fallback_model",
+            "meeting_summary_backend_choice",
             "disable_post_processing",
-            "disable_context_capture"
+            "disable_context_capture",
+            "disable_meeting_summary",
+            "meeting_summary_output_language",
+            "meeting_summary_settings_initialized"
         ] {
             UserDefaults.standard.removeObject(forKey: key)
         }

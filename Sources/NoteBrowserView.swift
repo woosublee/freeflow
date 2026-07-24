@@ -1111,6 +1111,14 @@ private struct NoteListRow: View {
                             .padding(.vertical, 1)
                             .background(Color.primary.opacity(0.08), in: Capsule())
                     }
+                    if displayData.hasMeetingSummary {
+                        Text(localizedCatalogString("Summary"))
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(selectedMetaColor)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.primary.opacity(0.08), in: Capsule())
+                    }
                     Spacer()
                     statusIndicator
                 }
@@ -1208,6 +1216,11 @@ private struct NoteListRow: View {
 
 // MARK: - Note Detail View
 
+enum NoteContentMode: Hashable {
+    case transcript
+    case summary
+}
+
 private struct NoteDetailView: View {
     let item: PipelineHistoryItem
     let onDelete: () -> Void
@@ -1224,6 +1237,10 @@ private struct NoteDetailView: View {
     @State private var isRetrying = false
     @State private var titleDebounceTimer: Timer?
     @State private var showDeleteConfirmation = false
+    @State private var showDeleteSummaryConfirmation = false
+    @State private var selectedContentMode: NoteContentMode = .transcript
+    @State private var summaryIssue: QuillUserIssueRecord?
+    @State private var highlightedSourceQuote: String?
 
     private var isError: Bool {
         if case .failed = item.machineStatus { return true }
@@ -1273,6 +1290,50 @@ private struct NoteDetailView: View {
     private var isLiveRecording: Bool { item.postProcessingStatus == "live-recording" }
     private var displayContent: String {
         loadedContent ?? item.postProcessedTranscript
+    }
+    private var summaryEnvelope: MeetingSummaryEnvelope? {
+        item.meetingSummary
+    }
+    private var summaryAvailability: MeetingSummaryAvailability {
+        appState.meetingSummaryAvailability(for: item)
+    }
+    private var showsSummaryTab: Bool {
+        summaryEnvelope != nil
+    }
+    private var isGeneratingSummary: Bool {
+        appState.meetingSummaryGeneratingNoteIDs.contains(item.id)
+    }
+    private var isSummaryStale: Bool {
+        guard let summaryEnvelope else { return false }
+        return summaryEnvelope.sourceFingerprint
+            != appState.meetingSummarySource(for: item).fingerprint
+    }
+    private var summaryActionIsDisabled: Bool {
+        switch summaryAvailability {
+        case .available, .featureDisabled:
+            return false
+        case .modelUnavailable, .transcriptUnavailable,
+             .transcriptionInProgress, .generationInProgress:
+            return true
+        }
+    }
+    private var canCopyDisplayedContent: Bool {
+        switch selectedContentMode {
+        case .transcript:
+            return !displayContent.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).isEmpty
+        case .summary:
+            return summaryEnvelope != nil
+        }
+    }
+    private var unavailableCopyHelp: LocalizedStringKey {
+        switch selectedContentMode {
+        case .transcript:
+            return "No transcript text to copy."
+        case .summary:
+            return "No summary text to copy."
+        }
     }
     private var storedAudioURL: URL? {
         appState.noteBrowserStoredAudioURL(for: item)
@@ -1330,6 +1391,9 @@ private struct NoteDetailView: View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
                 noteHeader
+                if showsSummaryTab {
+                    contentModePicker
+                }
                 contentArea
             }
             floatingToolbar
@@ -1343,10 +1407,28 @@ private struct NoteDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
-        .onAppear { loadContent() }
+        .onAppear {
+            loadContent()
+            revealSummaryIfPending()
+        }
         .onChange(of: item.postProcessedTranscript) { newValue in
             if !newValue.isEmpty {
                 loadedContent = newValue
+            }
+        }
+        .onChange(of: item.meetingSummaryJSON) { newValue in
+            // Read newValue directly rather than a computed property on self:
+            // this closure's captured self can still see the previous item
+            // even though SwiftUI already passes the fresh trigger value.
+            if newValue == nil {
+                selectedContentMode = .transcript
+            } else {
+                revealSummaryIfPending()
+            }
+        }
+        .onChange(of: selectedContentMode) { newValue in
+            if newValue != .transcript {
+                highlightedSourceQuote = nil
             }
         }
         .sheet(isPresented: $showFileExportSheet) {
@@ -1381,6 +1463,12 @@ private struct NoteDetailView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Deleted notes cannot be recovered.")
+        }
+        .confirmationDialog("Delete this summary?", isPresented: $showDeleteSummaryConfirmation, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) { deleteSummary() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the saved meeting summary. You can create a new one from the transcript.")
         }
     }
 
@@ -1594,6 +1682,23 @@ private struct NoteDetailView: View {
 
     // MARK: Content
 
+    private var contentModePicker: some View {
+        Picker("Note Content", selection: $selectedContentMode) {
+            Text("Transcript").tag(NoteContentMode.transcript)
+            if showsSummaryTab {
+                Text("Summary").tag(NoteContentMode.summary)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .controlSize(.small)
+        .frame(maxWidth: 220)
+        .padding(.horizontal, 40)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
+        .accessibilityLabel("Note Content")
+    }
+
     private var contentArea: some View {
         Group {
             if loadedContent == nil {
@@ -1603,36 +1708,93 @@ private struct NoteDetailView: View {
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
-            } else if displayContent.isEmpty {
-                emptyContentState
+            } else if selectedContentMode == .summary && showsSummaryTab {
+                summaryContentArea
             } else {
-                VStack(spacing: 0) {
-                    if let warningPresentation, !isWarningBannerDismissed {
-                        QuillUserIssueView(
-                            presentation: warningPresentation,
-                            style: .warningBanner,
-                            action: {
-                                performRecoveryAction(
-                                    warningPresentation.recoveryAction
+                transcriptContentArea
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var transcriptContentArea: some View {
+        if displayContent.isEmpty {
+            emptyContentState
+        } else {
+            VStack(spacing: 0) {
+                if let warningPresentation, !isWarningBannerDismissed {
+                    QuillUserIssueView(
+                        presentation: warningPresentation,
+                        style: .warningBanner,
+                        action: {
+                            performRecoveryAction(
+                                warningPresentation.recoveryAction
+                            )
+                        },
+                        onDismiss: {
+                            if let warningBannerCode {
+                                appState.dismissWarningBanner(
+                                    noteID: item.id,
+                                    code: warningBannerCode
                                 )
-                            },
-                            onDismiss: {
-                                if let warningBannerCode {
-                                    appState.dismissWarningBanner(
-                                        noteID: item.id,
-                                        code: warningBannerCode
-                                    )
-                                }
                             }
-                        )
-                        .padding(.horizontal, 40)
-                        .padding(.top, 16)
-                    }
-                    NoteTextView(text: displayContent, bottomPadding: 36) { edited in
-                        loadedContent = edited
-                        appState.updateTranscript(id: item.id, text: edited)
-                    }
+                        }
+                    )
+                    .padding(.horizontal, 40)
+                    .padding(.top, 16)
                 }
+                NoteTextView(
+                    text: displayContent,
+                    bottomPadding: 36,
+                    highlightedSourceQuote: highlightedSourceQuote
+                ) { edited in
+                    loadedContent = edited
+                    appState.updateTranscript(id: item.id, text: edited)
+                }
+            }
+        }
+    }
+
+    private var summaryContentArea: some View {
+        VStack(spacing: 0) {
+            if let summaryIssue {
+                let presentation = summaryIssue.presentation()
+                QuillUserIssueView(
+                    presentation: presentation,
+                    style: .warningBanner,
+                    action: {
+                        performRecoveryAction(presentation.recoveryAction)
+                    },
+                    onDismiss: { self.summaryIssue = nil }
+                )
+                .padding(.horizontal, 40)
+                .padding(.top, 16)
+            }
+            if let summaryEnvelope {
+                MeetingSummaryView(
+                    envelope: summaryEnvelope,
+                    availability: summaryAvailability,
+                    isStale: isSummaryStale,
+                    sourceQuoteIsValid: { quote in
+                        MeetingSummarySourceLocator.range(
+                            of: quote,
+                            in: displayContent
+                        ) != nil
+                    },
+                    onToggleAction: { actionID, isCompleted in
+                        do {
+                            try appState.setMeetingSummaryActionCompleted(
+                                noteID: item.id,
+                                actionID: actionID,
+                                isCompleted: isCompleted
+                            )
+                        } catch {
+                            showToast(localizedCatalogString("Could not update action item."))
+                        }
+                    },
+                    onViewSource: viewSource,
+                    onDelete: { showDeleteSummaryConfirmation = true }
+                )
             }
         }
     }
@@ -1743,15 +1905,15 @@ private struct NoteDetailView: View {
                         .foregroundStyle(
                             isCopied
                                 ? Color.accentColor
-                                : actionState.canCopy
+                                : canCopyDisplayedContent
                                     ? Color.primary
                                     : Color.secondary
                         )
                 },
-                disabled: !actionState.canCopy,
-                help: actionState.canCopy
+                disabled: !canCopyDisplayedContent,
+                help: canCopyDisplayedContent
                     ? "Copy content"
-                    : "No transcript text to copy."
+                    : unavailableCopyHelp
             )
 
             // Save transcript text and recording files
@@ -1769,6 +1931,33 @@ private struct NoteDetailView: View {
                 },
                 disabled: !actionState.canSaveFiles,
                 help: "Save Files"
+            )
+
+            toolbarButton(
+                action: { handleSummaryAction() },
+                label: {
+                    if isGeneratingSummary {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .frame(width: 14, height: 14)
+                    } else {
+                        Image(
+                            systemName: summaryEnvelope == nil
+                                ? "sparkles"
+                                : "arrow.triangle.2.circlepath"
+                        )
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(
+                            summaryActionIsDisabled
+                                ? Color.secondary
+                                : Color.primary
+                        )
+                    }
+                },
+                disabled: summaryActionIsDisabled,
+                help: summaryEnvelope == nil
+                    ? "Create Summary"
+                    : "Regenerate Summary"
             )
 
             ToolbarIconMenu(help: "More Actions") {
@@ -1934,10 +2123,79 @@ private struct NoteDetailView: View {
         }
     }
 
+    private func viewSource(_ quote: String) {
+        guard MeetingSummarySourceLocator.range(
+            of: quote,
+            in: displayContent
+        ) != nil else {
+            return
+        }
+        highlightedSourceQuote = quote
+        selectedContentMode = .transcript
+    }
+
+    private func handleSummaryAction() {
+        guard summaryAvailability != .featureDisabled else {
+            showToast(localizedCatalogString(
+                "Meeting Summary is off. Turn it on in Model Settings to create a summary."
+            ))
+            return
+        }
+        generateSummary()
+    }
+
+    private func revealSummaryIfPending() {
+        guard appState.consumeMeetingSummaryPendingReveal(id: item.id) else { return }
+        // The Summary segment is only added to the picker once showsSummaryTab
+        // flips true. Selecting it in the same update as its first appearance
+        // can be dropped by the underlying segmented control, so defer the
+        // selection to the next run loop turn once the segment already exists.
+        DispatchQueue.main.async {
+            selectedContentMode = .summary
+        }
+    }
+
+    private func generateSummary() {
+        Task { @MainActor in
+            do {
+                try await appState.generateMeetingSummary(id: item.id)
+                summaryIssue = nil
+            } catch let error as MeetingSummaryError {
+                summaryIssue = error.userIssue(
+                    providerHost: URL(string: appState.apiBaseURL)?.host,
+                    modelID: appState.meetingSummaryBackendChoice.modelID,
+                    localBackend: appState.meetingSummaryBackendChoice.isLocal
+                        ? "Local AI"
+                        : nil
+                )
+            } catch let error as QuillUserIssueError {
+                summaryIssue = error.record
+            } catch {
+                summaryIssue = QuillUserIssueRecord(code: .unknown)
+            }
+        }
+    }
+
+    private func deleteSummary() {
+        do {
+            try appState.deleteMeetingSummary(noteID: item.id)
+        } catch {
+            showToast(localizedCatalogString("Could not delete summary."))
+        }
+    }
+
     private func copyContent() {
-        guard !displayContent.isEmpty else { return }
+        let content: String
+        switch selectedContentMode {
+        case .transcript:
+            content = displayContent
+        case .summary:
+            guard let summaryEnvelope else { return }
+            content = MeetingSummaryMarkdownRenderer.render(summaryEnvelope)
+        }
+        guard !content.isEmpty else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(displayContent, forType: .string)
+        NSPasteboard.general.setString(content, forType: .string)
         withAnimation { isCopied = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             withAnimation { isCopied = false }
@@ -2553,8 +2811,21 @@ private struct ObsidianExportSheet: View {
 
 private struct NoteTextView: NSViewRepresentable {
     let text: String
-    var bottomPadding: CGFloat = 0
-    var onCommit: ((String) -> Void)? = nil
+    let bottomPadding: CGFloat
+    let highlightedSourceQuote: String?
+    let onCommit: ((String) -> Void)?
+
+    init(
+        text: String,
+        bottomPadding: CGFloat = 0,
+        highlightedSourceQuote: String? = nil,
+        onCommit: ((String) -> Void)? = nil
+    ) {
+        self.text = text
+        self.bottomPadding = bottomPadding
+        self.highlightedSourceQuote = highlightedSourceQuote
+        self.onCommit = onCommit
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(onCommit: onCommit) }
 
@@ -2596,6 +2867,10 @@ private struct NoteTextView: NSViewRepresentable {
 
         scrollView.documentView = textView
         applyText(text, to: textView, bottomPadding: bottomPadding)
+        context.coordinator.applyHighlight(
+            highlightedSourceQuote,
+            to: textView
+        )
         return scrollView
     }
 
@@ -2606,7 +2881,12 @@ private struct NoteTextView: NSViewRepresentable {
         let newContent = text.trimmingCharacters(in: .newlines)
         if textView.window?.firstResponder !== textView, currentContent != newContent {
             applyText(text, to: textView, bottomPadding: bottomPadding)
+            context.coordinator.resetHighlight()
         }
+        context.coordinator.applyHighlight(
+            highlightedSourceQuote,
+            to: textView
+        )
     }
 
     private func applyText(_ text: String, to textView: NSTextView, bottomPadding: CGFloat) {
@@ -2629,11 +2909,59 @@ private struct NoteTextView: NSViewRepresentable {
     class Coordinator: NSObject, NSTextViewDelegate {
         var onCommit: ((String) -> Void)?
         private var debounceTimer: Timer?
+        private var lastHighlightedQuote: String?
+        private var highlightedRange: NSRange?
 
         init(onCommit: ((String) -> Void)?) { self.onCommit = onCommit }
 
+        func resetHighlight() {
+            lastHighlightedQuote = nil
+            highlightedRange = nil
+        }
+
+        func applyHighlight(
+            _ quote: String?,
+            to textView: NSTextView
+        ) {
+            guard quote != lastHighlightedQuote else { return }
+            removeHighlight(from: textView)
+            lastHighlightedQuote = quote
+            guard let quote,
+                  let range = MeetingSummarySourceLocator.range(
+                    of: quote,
+                    in: textView.string
+                  ) else {
+                return
+            }
+
+            let nsRange = NSRange(range, in: textView.string)
+            textView.textStorage?.addAttribute(
+                .backgroundColor,
+                value: NSColor.systemYellow.withAlphaComponent(0.28),
+                range: nsRange
+            )
+            highlightedRange = nsRange
+            textView.scrollRangeToVisible(nsRange)
+        }
+
+        private func removeHighlight(from textView: NSTextView) {
+            guard let highlightedRange,
+                  NSMaxRange(highlightedRange)
+                    <= (textView.textStorage?.length ?? 0) else {
+                self.highlightedRange = nil
+                return
+            }
+            textView.textStorage?.removeAttribute(
+                .backgroundColor,
+                range: highlightedRange
+            )
+            self.highlightedRange = nil
+        }
+
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
+            removeHighlight(from: textView)
+            lastHighlightedQuote = nil
             debounceTimer?.invalidate()
             let timer = Timer(timeInterval: 0.5, repeats: false) { [weak self, weak textView] _ in
                 guard let text = textView?.string else { return }

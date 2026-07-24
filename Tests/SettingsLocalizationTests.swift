@@ -12,6 +12,7 @@ struct SettingsLocalizationTests {
         try testCalendarReminderLeadTimeUsesLocalizedCopy()
         try testRecordingOverlaySettingsCopyLocalizes()
         try testModelFirstSettingsCopyLocalizes()
+        try testMeetingSummaryCopyLocalizes()
         try testModelDownloadTerminationCopyLocalizes()
         try testCombinedAudioSourceUnavailableReasonsLocalize()
         print("SettingsLocalizationTests passed")
@@ -216,6 +217,64 @@ struct SettingsLocalizationTests {
             "Streams audio through the provider's OpenAI-compatible /v1/realtime WebSocket so transcription runs while you speak.": "제공자의 OpenAI-compatible /v1/realtime WebSocket으로 오디오를 스트리밍하여 말하는 동안 전사를 실행합니다.",
             "Realtime Transcription Model": "실시간 전사 모델",
             "Used only for realtime streaming. Leave empty for providers that supply a server default.": "실시간 스트리밍에만 사용합니다. 서버 기본값을 제공하는 공급자에서는 비워 두세요."
+        ]
+
+        for (key, korean) in expected {
+            assert(localizedCatalogString(key, language: "en", bundle: bundle) == key)
+            assert(localizedCatalogString(key, language: "ko", bundle: bundle) == korean)
+        }
+    }
+
+    private static func testMeetingSummaryCopyLocalizes() throws {
+        let bundle = try compiledLocalizationBundle()
+        let expected: [String: String] = [
+            "Meeting Summary": "회의 요약",
+            "Create a reviewable summary from completed transcripts.":
+                "완료된 전사문으로 검토 가능한 회의 요약을 만듭니다.",
+            "Meeting Summary is off. Existing summaries are kept.":
+                "회의 요약이 꺼져 있습니다. 기존 요약은 유지됩니다.",
+            "Meeting Summary is on, but cloud summarization is unavailable until an API key is configured.":
+                "회의 요약이 켜져 있지만 API Key를 설정하기 전에는 클라우드 요약을 사용할 수 없습니다.",
+            "Transcript": "전사문",
+            "Summary": "요약",
+            "Create Summary": "요약 만들기",
+            "Regenerate Summary": "요약 다시 만들기",
+            "Quick review draft": "빠른 검토 초안",
+            "Generated from this transcript and calendar details. Review before sharing.":
+                "이 전사문과 캘린더 세부 정보로 생성했습니다. 공유하기 전에 검토하세요.",
+            "Transcript changed after this summary was generated.":
+                "이 요약을 생성한 뒤 전사문이 변경되었습니다.",
+            "Meeting Summary is off": "회의 요약이 꺼져 있습니다",
+            "This saved summary is still available. Turn the feature on to regenerate it.":
+                "저장된 요약은 계속 볼 수 있습니다. 다시 생성하려면 기능을 켜세요.",
+            "Summary model is unavailable.": "요약 모델을 사용할 수 없습니다.",
+            "No summary text to copy.": "복사할 요약 텍스트가 없습니다.",
+            "Open Model Settings": "모델 설정 열기",
+            "Overview": "개요",
+            "Key Points": "핵심 내용",
+            "Decisions": "결정 사항",
+            "Action Items": "할 일",
+            "Open Questions": "미해결 질문",
+            "View in Transcript": "전사문에서 보기",
+            "Owner needs review": "담당자 확인 필요",
+            "Due date needs review": "기한 확인 필요",
+            "Delete Summary": "요약 삭제",
+            "Delete this summary?": "이 요약을 삭제할까요?",
+            "This removes the saved meeting summary. You can create a new one from the transcript.":
+                "저장된 회의 요약을 삭제합니다. 전사문에서 새로 만들 수 있습니다.",
+            "Could not delete summary.": "요약을 삭제하지 못했습니다.",
+            "Meeting Summary is off. Turn it on in Model Settings to create a summary.":
+                "회의 요약이 꺼져 있습니다. 모델 설정에서 켜면 요약을 만들 수 있습니다.",
+            "Summary service unavailable": "요약 서비스를 사용할 수 없음",
+            "The selected provider could not create a meeting summary right now.":
+                "선택한 제공자가 지금은 회의 요약을 만들지 못했습니다.",
+            "Try Regenerate again later, or choose another configured model in Meeting Summary settings.":
+                "잠시 후 다시 만들기를 시도하거나, 회의 요약 설정에서 다른 모델을 선택하세요.",
+            "Summary response could not be read": "요약 응답을 읽을 수 없음",
+            "The provider returned a response Quill could not use for the summary.":
+                "제공자가 Quill에서 요약에 사용할 수 없는 응답을 반환했습니다.",
+            "Try Regenerate again. If it continues, check the provider configuration.":
+                "다시 만들기를 시도하세요. 계속되면 제공자 설정을 확인하세요."
         ]
 
         for (key, korean) in expected {

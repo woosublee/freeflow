@@ -316,7 +316,22 @@ private enum SessionIntent {
     }
 }
 
+enum MeetingSummaryAvailability: Equatable {
+    case available
+    case featureDisabled
+    case modelUnavailable
+    case transcriptUnavailable
+    case transcriptionInProgress
+    case generationInProgress
+}
+
 final class AppState: ObservableObject, @unchecked Sendable {
+    @MainActor
+    static var meetingSummaryGeneratorFactory:
+        (AppState) -> any MeetingSummaryGenerating = { appState in
+            appState.makeMeetingSummaryService()
+        }
+
     static var googleCalendarTokenLoader: (Bool) -> GoogleCalendarOAuthToken? = { allowsAuthenticationUI in
         GoogleCalendarTokenStore.load(allowsAuthenticationUI: allowsAuthenticationUI)
     }
@@ -431,6 +446,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let postProcessingModelStorageKey = "post_processing_model"
     private let postProcessingFallbackModelStorageKey = "post_processing_fallback_model"
     private let contextModelStorageKey = "context_model"
+    private let meetingSummaryModelStorageKey = "meeting_summary_model"
+    private let meetingSummaryFallbackModelStorageKey = "meeting_summary_fallback_model"
+    private let meetingSummaryBackendChoiceStorageKey = "meeting_summary_backend_choice"
+    private let meetingSummaryOutputLanguageStorageKey = "meeting_summary_output_language"
+    private let meetingSummarySettingsInitializedStorageKey = "meeting_summary_settings_initialized"
     private let postProcessingBackendChoiceStorageKey = "post_processing_backend_choice"
     private let contextBackendChoiceStorageKey = "context_backend_choice"
     private let holdShortcutStorageKey = "hold_shortcut"
@@ -463,6 +483,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let disableContextCaptureStorageKey = "disable_context_capture"
     private let disableAutoPasteStorageKey = "disable_auto_paste"
     private let disablePostProcessingStorageKey = "disable_post_processing"
+    private let disableMeetingSummaryStorageKey = "disable_meeting_summary"
     private let transcriptionLanguageStorageKey = "transcription_language"
     private let outputLanguageStorageKey = "output_language"
     private let localTranscriptionModelStorageKey = AppState.localTranscriptionModelStorageKeyName
@@ -492,6 +513,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     static let defaultPostProcessingModel = "openai/gpt-oss-20b"
     static let defaultPostProcessingFallbackModel = "meta-llama/llama-4-scout-17b-16e-instruct"
     static let defaultContextModel = "qwen/qwen3.6-27b"
+    static let defaultMeetingSummaryModel = defaultPostProcessingModel
+    static let defaultMeetingSummaryFallbackModel = defaultPostProcessingFallbackModel
     private static let deprecatedDefaultContextModel = "meta-llama/llama-4-scout-17b-16e-instruct"
     private static let trailingPressEnterCommandPattern = try! NSRegularExpression(
         pattern: #"(?i)(?:^|[ \t\r\n,;:\-]+)press[ \t\r\n]+enter[\s\p{P}]*$"#
@@ -659,6 +682,41 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     contextBackendChoice = derivedChoice
                 }
             }
+        }
+    }
+
+    @Published var meetingSummaryModel: String {
+        didSet {
+            UserDefaults.standard.set(
+                meetingSummaryModel,
+                forKey: meetingSummaryModelStorageKey
+            )
+            if case .cloud = meetingSummaryBackendChoice {
+                let derivedChoice = AIProcessingBackendChoice.cloud(
+                    modelID: resolvedMeetingSummaryCloudModelID
+                )
+                if derivedChoice != meetingSummaryBackendChoice {
+                    meetingSummaryBackendChoice = derivedChoice
+                }
+            }
+        }
+    }
+
+    @Published var meetingSummaryFallbackModel: String {
+        didSet {
+            UserDefaults.standard.set(
+                meetingSummaryFallbackModel,
+                forKey: meetingSummaryFallbackModelStorageKey
+            )
+        }
+    }
+
+    @Published var meetingSummaryOutputLanguage: String {
+        didSet {
+            UserDefaults.standard.set(
+                meetingSummaryOutputLanguage,
+                forKey: meetingSummaryOutputLanguageStorageKey
+            )
         }
     }
 
@@ -957,6 +1015,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @Published var disableMeetingSummary: Bool {
+        didSet {
+            UserDefaults.standard.set(
+                disableMeetingSummary,
+                forKey: disableMeetingSummaryStorageKey
+            )
+        }
+    }
+
     @Published var noteBrowserEnabled: Bool {
         didSet {
             UserDefaults.standard.set(noteBrowserEnabled, forKey: noteBrowserEnabledStorageKey)
@@ -1209,6 +1276,23 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private var resolvedContextCloudModelID: String {
         nonEmptyModelID(contextModel) ?? Self.defaultContextModel
+    }
+
+    private var resolvedMeetingSummaryCloudModelID: String {
+        nonEmptyModelID(meetingSummaryModel) ?? Self.defaultMeetingSummaryModel
+    }
+
+    private func resolvedCloudModelID(
+        for feature: AIProcessingFeature
+    ) -> String {
+        switch feature {
+        case .postProcessing:
+            return resolvedPostProcessingCloudModelID
+        case .context:
+            return resolvedContextCloudModelID
+        case .meetingSummary:
+            return resolvedMeetingSummaryCloudModelID
+        }
     }
 
     private func nonEmptyModelID(_ modelID: String) -> String? {
@@ -1960,6 +2044,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var isDebugOverlayActive = false
     @Published var selectedSettingsTab: SettingsTab? = .general
     @Published var pipelineHistory: [PipelineHistoryItem] = []
+    @Published private(set) var meetingSummaryGeneratingNoteIDs: Set<UUID> = []
+    private var meetingSummaryPendingRevealNoteIDs: Set<UUID> = []
     @Published var debugStatusMessage = "Idle"
     @Published var debugShowsUpdateReminderAfterDictation = false
     @Published var lastRawTranscript = ""
@@ -2140,6 +2226,29 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @Published var meetingSummaryBackendChoice: AIProcessingBackendChoice {
+        didSet {
+            let normalizedChoice = Self.normalizedAIProcessingBackendChoice(
+                meetingSummaryBackendChoice,
+                fallbackCloudModelID: meetingSummaryModel,
+                defaultCloudModelID: Self.defaultMeetingSummaryModel
+            )
+            if normalizedChoice != meetingSummaryBackendChoice {
+                meetingSummaryBackendChoice = normalizedChoice
+            } else {
+                AIProcessingBackendChoiceStore.save(
+                    meetingSummaryBackendChoice,
+                    defaults: .standard,
+                    key: meetingSummaryBackendChoiceStorageKey
+                )
+                if case .cloud(let modelID) = meetingSummaryBackendChoice,
+                   meetingSummaryModel != modelID {
+                    meetingSummaryModel = modelID
+                }
+            }
+        }
+    }
+
     private var contextService: AppContextService
     private var contextCaptureTask: Task<AppContext?, Never>?
     private var capturedContext: AppContext?
@@ -2241,11 +2350,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let transcriptionModel = UserDefaults.standard.string(forKey: transcriptionModelStorageKey) ?? Self.defaultTranscriptionModel
         let transcriptionAPIURL = Self.loadOptionalStoredAPIValue(account: transcriptionAPIURLStorageKey)
         let transcriptionAPIKey = Self.loadStoredAPIKey(account: transcriptionAPIKeyStorageKey)
+        let meetingSummarySettingsInitialized = UserDefaults.standard.bool(
+            forKey: meetingSummarySettingsInitializedStorageKey
+        )
         let rememberedPostProcessingModel = Self.normalizedCloudModelID(
             UserDefaults.standard.string(forKey: postProcessingModelStorageKey) ?? "",
             defaultModelID: Self.defaultPostProcessingModel
         )
-        let postProcessingFallbackModel = UserDefaults.standard.string(forKey: postProcessingFallbackModelStorageKey) ?? Self.defaultPostProcessingFallbackModel
+        let postProcessingFallbackModel = UserDefaults.standard.string(
+            forKey: postProcessingFallbackModelStorageKey
+        ) ?? Self.defaultPostProcessingFallbackModel
         let rememberedContextModel = Self.normalizedCloudModelID(
             Self.loadStoredContextModel(key: contextModelStorageKey),
             defaultModelID: Self.defaultContextModel
@@ -2276,11 +2390,63 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case .cloud(let modelID): modelID
         case .localAI: rememberedContextModel
         }
+        let rememberedMeetingSummaryModel: String
+        let meetingSummaryFallbackModel: String
+        let meetingSummaryBackendChoice: AIProcessingBackendChoice
+        if meetingSummarySettingsInitialized {
+            rememberedMeetingSummaryModel = Self.normalizedCloudModelID(
+                UserDefaults.standard.string(
+                    forKey: meetingSummaryModelStorageKey
+                ) ?? "",
+                defaultModelID: Self.defaultMeetingSummaryModel
+            )
+            meetingSummaryFallbackModel = UserDefaults.standard.string(
+                forKey: meetingSummaryFallbackModelStorageKey
+            ) ?? Self.defaultMeetingSummaryFallbackModel
+            meetingSummaryBackendChoice = Self.normalizedAIProcessingBackendChoice(
+                AIProcessingBackendChoiceStore.load(
+                    defaults: .standard,
+                    key: meetingSummaryBackendChoiceStorageKey,
+                    fallbackCloudModelID: rememberedMeetingSummaryModel
+                ),
+                fallbackCloudModelID: rememberedMeetingSummaryModel,
+                defaultCloudModelID: Self.defaultMeetingSummaryModel
+            )
+        } else {
+            rememberedMeetingSummaryModel = postProcessingModel
+            meetingSummaryFallbackModel = postProcessingFallbackModel
+            meetingSummaryBackendChoice = postProcessingBackendChoice
+        }
+        let meetingSummaryModel = switch meetingSummaryBackendChoice {
+        case .cloud(let modelID): modelID
+        case .localAI: rememberedMeetingSummaryModel
+        }
+        let outputLanguage = UserDefaults.standard.string(
+            forKey: outputLanguageStorageKey
+        ) ?? ""
+        let meetingSummaryOutputLanguage = meetingSummarySettingsInitialized
+            ? UserDefaults.standard.string(
+                forKey: meetingSummaryOutputLanguageStorageKey
+            ) ?? ""
+            : outputLanguage
+
         UserDefaults.standard.set(
             postProcessingModel,
             forKey: postProcessingModelStorageKey
         )
         UserDefaults.standard.set(contextModel, forKey: contextModelStorageKey)
+        UserDefaults.standard.set(
+            meetingSummaryModel,
+            forKey: meetingSummaryModelStorageKey
+        )
+        UserDefaults.standard.set(
+            meetingSummaryFallbackModel,
+            forKey: meetingSummaryFallbackModelStorageKey
+        )
+        UserDefaults.standard.set(
+            meetingSummaryOutputLanguage,
+            forKey: meetingSummaryOutputLanguageStorageKey
+        )
         AIProcessingBackendChoiceStore.save(
             postProcessingBackendChoice,
             defaults: .standard,
@@ -2290,6 +2456,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
             contextBackendChoice,
             defaults: .standard,
             key: contextBackendChoiceStorageKey
+        )
+        AIProcessingBackendChoiceStore.save(
+            meetingSummaryBackendChoice,
+            defaults: .standard,
+            key: meetingSummaryBackendChoiceStorageKey
         )
         let localAIServerManager = Self.localAIServerManagerFactory()
         let shortcuts = Self.loadShortcutConfiguration(
@@ -2413,13 +2584,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let disableContextCapture = UserDefaults.standard.bool(forKey: disableContextCaptureStorageKey)
         let disableAutoPaste = UserDefaults.standard.bool(forKey: disableAutoPasteStorageKey)
         let disablePostProcessing = UserDefaults.standard.bool(forKey: disablePostProcessingStorageKey)
+        let disableMeetingSummary = meetingSummarySettingsInitialized
+            ? UserDefaults.standard.bool(forKey: disableMeetingSummaryStorageKey)
+            : true
         let noteBrowserEnabled = UserDefaults.standard.object(forKey: noteBrowserEnabledStorageKey) == nil
             ? true
             : UserDefaults.standard.bool(forKey: noteBrowserEnabledStorageKey)
         let transcriptionLanguage = TranscriptionLanguage.find(
             code: UserDefaults.standard.string(forKey: transcriptionLanguageStorageKey) ?? "ko"
         )
-        let outputLanguage = UserDefaults.standard.string(forKey: outputLanguageStorageKey) ?? ""
         let localTranscriptionModel = TranscriptionModel.find(
             id: UserDefaults.standard.string(forKey: localTranscriptionModelStorageKey) ?? TranscriptionModel.default.id
         )
@@ -2511,8 +2684,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.postProcessingModel = postProcessingModel
         self.postProcessingFallbackModel = postProcessingFallbackModel
         self.contextModel = contextModel
+        self.meetingSummaryModel = meetingSummaryModel
+        self.meetingSummaryFallbackModel = meetingSummaryFallbackModel
+        self.meetingSummaryOutputLanguage = meetingSummaryOutputLanguage
         self.postProcessingBackendChoice = postProcessingBackendChoice
         self.contextBackendChoice = contextBackendChoice
+        self.meetingSummaryBackendChoice = meetingSummaryBackendChoice
         self.holdShortcut = shortcuts.hold
         self.toggleShortcut = shortcuts.toggle
         self.recordingCancelShortcut = recordingCancelShortcut
@@ -2557,6 +2734,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.disableContextCapture = disableContextCapture
         self.disableAutoPaste = disableAutoPaste
         self.disablePostProcessing = disablePostProcessing
+        self.disableMeetingSummary = disableMeetingSummary
         self.noteBrowserEnabled = noteBrowserEnabled
         self.transcriptionLanguage = transcriptionLanguage
         self.outputLanguage = outputLanguage
@@ -2769,10 +2947,34 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
+    private func initializeMeetingSummarySettingsIfNeeded() {
+        guard !UserDefaults.standard.bool(
+            forKey: meetingSummarySettingsInitializedStorageKey
+        ) else {
+            return
+        }
+
+        if let readyChoice = readyAIProcessingChoice(
+            preferred: meetingSummaryBackendChoice,
+            for: .meetingSummary
+        ) {
+            applyAIProcessingChoice(readyChoice, for: .meetingSummary)
+            disableMeetingSummary = false
+        } else {
+            disableMeetingSummary = true
+        }
+        UserDefaults.standard.set(
+            true,
+            forKey: meetingSummarySettingsInitializedStorageKey
+        )
+    }
+
+    @MainActor
     private func finishLocalAIStatusRefreshIfReady() {
         guard localAIStatusRefreshPendingModelIDs.isEmpty else { return }
         hasCompletedLocalAIStatusRefresh = true
         normalizeAIProcessingChoices()
+        initializeMeetingSummarySettingsIfNeeded()
         resumeDeferredLocalAIRequests()
         let waiters = localAIStatusRefreshWaiters
         localAIStatusRefreshWaiters.removeAll()
@@ -2847,6 +3049,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         switch feature {
         case .postProcessing: return postProcessingBackendChoice
         case .context: return contextBackendChoice
+        case .meetingSummary: return meetingSummaryBackendChoice
         }
     }
 
@@ -2861,6 +3064,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             postProcessingBackendChoice = choice
         case .context:
             contextBackendChoice = choice
+        case .meetingSummary:
+            meetingSummaryBackendChoice = choice
         }
     }
 
@@ -2935,7 +3140,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         postProcessingEnabled requestedPostProcessingEnabled: Bool,
         postProcessingChoice: AIProcessingBackendChoice,
         contextEnabled requestedContextEnabled: Bool,
-        contextChoice: AIProcessingBackendChoice
+        contextChoice: AIProcessingBackendChoice,
+        meetingSummaryEnabled requestedMeetingSummaryEnabled: Bool,
+        meetingSummaryChoice: AIProcessingBackendChoice
     ) {
         discardUndownloadedLocalAISelections()
 
@@ -2959,6 +3166,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
             isEnabled: requestedContextEnabled,
             preferredChoice: contextChoice
         )
+        commitAIProcessingSettingsDraft(
+            feature: .meetingSummary,
+            isEnabled: requestedMeetingSummaryEnabled,
+            preferredChoice: meetingSummaryChoice
+        )
     }
 
     @MainActor
@@ -2969,7 +3181,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             postProcessingEnabled: !disablePostProcessing,
             postProcessingChoice: postProcessingBackendChoice,
             contextEnabled: !disableContextCapture,
-            contextChoice: contextBackendChoice
+            contextChoice: contextBackendChoice,
+            meetingSummaryEnabled: !disableMeetingSummary,
+            meetingSummaryChoice: meetingSummaryBackendChoice
         )
     }
 
@@ -2989,6 +3203,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 disablePostProcessing = true
             case .context:
                 disableContextCapture = true
+            case .meetingSummary:
+                disableMeetingSummary = true
             }
             return
         }
@@ -2999,6 +3215,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             disablePostProcessing = false
         case .context:
             disableContextCapture = false
+        case .meetingSummary:
+            disableMeetingSummary = false
         }
     }
 
@@ -3068,19 +3286,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
-        let modelID = feature == .postProcessing
-            ? resolvedPostProcessingCloudModelID
-            : resolvedContextCloudModelID
-        return .cloud(modelID: modelID)
+        return .cloud(modelID: resolvedCloudModelID(for: feature))
     }
 
     @MainActor
     func aiProcessingChoiceDisplays(
         for feature: AIProcessingFeature
     ) -> [AIProcessingChoiceDisplay] {
-        let rememberedCloudModel = feature == .postProcessing
-            ? resolvedPostProcessingCloudModelID
-            : resolvedContextCloudModelID
+        let rememberedCloudModel = resolvedCloudModelID(for: feature)
         var cloudModelIDs: [String] = []
         for modelID in ModelConfiguration.llmModels + [rememberedCloudModel] {
             if !modelID.isEmpty, !cloudModelIDs.contains(modelID) {
@@ -3134,6 +3347,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
             case .context:
                 if contextModel != modelID {
                     contextModel = modelID
+                }
+            case .meetingSummary:
+                if meetingSummaryModel != modelID {
+                    meetingSummaryModel = modelID
                 }
             }
             applyAIProcessingChoice(choice, for: feature)
@@ -3428,10 +3645,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             if let preferred {
                 return .localAI(modelID: preferred.id)
             }
-            let modelID = feature == .postProcessing
-                ? resolvedPostProcessingCloudModelID
-                : resolvedContextCloudModelID
-            return .cloud(modelID: modelID)
+            return .cloud(modelID: resolvedCloudModelID(for: feature))
         }
     }
 
@@ -3450,9 +3664,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 continue
             }
 
-            let rememberedCloudModel = feature == .postProcessing
-                ? resolvedPostProcessingCloudModelID
-                : resolvedContextCloudModelID
+            let rememberedCloudModel = resolvedCloudModelID(for: feature)
             applyAIProcessingChoice(
                 .cloud(modelID: rememberedCloudModel),
                 for: feature
@@ -3462,6 +3674,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 disablePostProcessing = true
             case .context:
                 disableContextCapture = true
+            case .meetingSummary:
+                disableMeetingSummary = true
             }
         }
     }
@@ -3730,6 +3944,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
             cloudBaseURL: apiBaseURL,
             cloudAPIKey: apiKey,
             localServerManager: localAIServerManager
+        )
+    }
+
+    func makeMeetingSummaryService() -> MeetingSummaryService {
+        MeetingSummaryService(
+            backendExecutor: makeAIProcessingBackendExecutor(
+                choice: meetingSummaryBackendChoice
+            ),
+            cloudFallbackModelID: meetingSummaryBackendChoice.isLocal
+                ? nil
+                : meetingSummaryFallbackModel,
+            outputLanguage: meetingSummaryOutputLanguage
         )
     }
 
@@ -5405,6 +5631,145 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @MainActor
+    func meetingSummaryAvailability(
+        for item: PipelineHistoryItem
+    ) -> MeetingSummaryAvailability {
+        if meetingSummaryGeneratingNoteIDs.contains(item.id) {
+            return .generationInProgress
+        }
+        guard item.intent == .dictation else {
+            return .transcriptUnavailable
+        }
+        if item.isIncompleteTranscription {
+            return .transcriptionInProgress
+        }
+        guard item.machineStatus == .completed else {
+            return .transcriptUnavailable
+        }
+        guard !meetingSummarySource(for: item).normalizedTranscript.isEmpty else {
+            return .transcriptUnavailable
+        }
+        guard !disableMeetingSummary else {
+            return .featureDisabled
+        }
+        guard isAIProcessingBackendReady(for: .meetingSummary) else {
+            return .modelUnavailable
+        }
+        return .available
+    }
+
+    @MainActor
+    func meetingSummarySource(
+        for item: PipelineHistoryItem
+    ) -> MeetingSummarySource {
+        let processed = item.postProcessedTranscript.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let transcript = processed.isEmpty ? item.rawTranscript : processed
+        let calendar = item.calendarMatch.map { match in
+            MeetingSummaryCalendarContext(
+                title: match.title,
+                start: match.start,
+                end: match.end,
+                attendees: match.attendees.compactMap { attendee in
+                    let name = attendee.displayName?.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ) ?? ""
+                    if !name.isEmpty { return name }
+                    let email = attendee.email?.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ) ?? ""
+                    return email.isEmpty ? nil : email
+                }
+            )
+        }
+        return MeetingSummarySource(
+            transcript: transcript,
+            calendar: calendar
+        )
+    }
+
+    @MainActor
+    func generateMeetingSummary(id: UUID) async throws {
+        guard let startItem = pipelineHistory.first(where: { $0.id == id }) else {
+            throw MeetingSummaryError.invalidInput
+        }
+        guard meetingSummaryAvailability(for: startItem) == .available else {
+            throw MeetingSummaryError.invalidInput
+        }
+
+        let source = meetingSummarySource(for: startItem)
+        meetingSummaryGeneratingNoteIDs.insert(id)
+        defer { meetingSummaryGeneratingNoteIDs.remove(id) }
+
+        let result = try await Self.meetingSummaryGeneratorFactory(self)
+            .generate(source: source)
+
+        guard let currentIndex = pipelineHistory.firstIndex(
+            where: { $0.id == id }
+        ) else {
+            throw MeetingSummaryError.sourceChanged
+        }
+        let currentItem = pipelineHistory[currentIndex]
+        guard meetingSummarySource(for: currentItem).fingerprint
+                == source.fingerprint else {
+            throw MeetingSummaryError.sourceChanged
+        }
+
+        let envelope = MeetingSummaryEnvelope(
+            schemaVersion: MeetingSummaryEnvelope.currentSchemaVersion,
+            promptVersion: result.promptVersion,
+            generatedAt: Date(),
+            sourceFingerprint: source.fingerprint,
+            modelID: result.modelID,
+            backendKind: result.backendKind,
+            content: result.draft.materialized()
+        ).preservingCompletion(from: currentItem.meetingSummary)
+        let updated = currentItem.withMeetingSummary(envelope)
+        try pipelineHistoryStore.update(updated)
+        pipelineHistory[currentIndex] = updated
+        meetingSummaryPendingRevealNoteIDs.insert(id)
+    }
+
+    @MainActor
+    func consumeMeetingSummaryPendingReveal(id: UUID) -> Bool {
+        meetingSummaryPendingRevealNoteIDs.remove(id) != nil
+    }
+
+    @MainActor
+    func setMeetingSummaryActionCompleted(
+        noteID: UUID,
+        actionID: UUID,
+        isCompleted: Bool
+    ) throws {
+        guard let noteIndex = pipelineHistory.firstIndex(
+            where: { $0.id == noteID }
+        ), var envelope = pipelineHistory[noteIndex].meetingSummary,
+        let actionIndex = envelope.content.actionItems.firstIndex(
+            where: { $0.id == actionID }
+        ) else {
+            throw MeetingSummaryError.invalidInput
+        }
+
+        envelope.content.actionItems[actionIndex].isCompleted = isCompleted
+        let updated = pipelineHistory[noteIndex].withMeetingSummary(envelope)
+        try pipelineHistoryStore.update(updated)
+        pipelineHistory[noteIndex] = updated
+    }
+
+    @MainActor
+    func deleteMeetingSummary(noteID: UUID) throws {
+        guard let noteIndex = pipelineHistory.firstIndex(
+            where: { $0.id == noteID }
+        ), pipelineHistory[noteIndex].meetingSummary != nil else {
+            throw MeetingSummaryError.invalidInput
+        }
+        let updated = pipelineHistory[noteIndex].withMeetingSummary(nil)
+        try pipelineHistoryStore.update(updated)
+        pipelineHistory[noteIndex] = updated
+    }
+
     func updateTranscript(id: UUID, text: String) {
         guard let item = pipelineHistory.first(where: { $0.id == id }) else { return }
         // 파일에도 동기화해서 앱 재시작 후 폴백 로딩 시에도 일관성 유지
@@ -5441,7 +5806,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             contextAppName: item.contextAppName,
             contextBundleIdentifier: item.contextBundleIdentifier,
             contextWindowTitle: item.contextWindowTitle,
-            customTitle: item.customTitle
+            customTitle: item.customTitle,
+            meetingSummaryJSON: item.meetingSummaryJSON
         )
         do {
             try pipelineHistoryStore.update(updated)
@@ -6054,7 +6420,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             contextAppName: snapshot.item.contextAppName,
             contextBundleIdentifier: snapshot.item.contextBundleIdentifier,
             contextWindowTitle: snapshot.item.contextWindowTitle,
-            customTitle: snapshot.item.customTitle
+            customTitle: snapshot.item.customTitle,
+            meetingSummaryJSON: snapshot.item.meetingSummaryJSON
         )
     }
 
@@ -9438,7 +9805,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             contextAppName: existing.contextAppName,
             contextBundleIdentifier: existing.contextBundleIdentifier,
             contextWindowTitle: existing.contextWindowTitle,
-            customTitle: existing.customTitle
+            customTitle: existing.customTitle,
+            meetingSummaryJSON: existing.meetingSummaryJSON
         )
         // DB write 없이 메모리만 업데이트 — partial 결과는 최종 저장 시 반영됨
         pipelineHistory[index] = updated
@@ -9854,7 +10222,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             contextAppName: context.appName,
             contextBundleIdentifier: context.bundleIdentifier,
             contextWindowTitle: context.windowTitle,
-            customTitle: existingEntry?.customTitle
+            customTitle: existingEntry?.customTitle,
+            meetingSummaryJSON: existingEntry?.meetingSummaryJSON
         )
         var historySaved = false
         do {

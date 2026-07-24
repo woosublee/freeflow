@@ -29,7 +29,22 @@ struct NoteListRowDisplayDataTests {
         testCloudProgressCopyLocalizesInKorean()
         testRetryingItemHidesExistingPreview()
         testAudioOnlyRowUsesBlueStateAndNotTranscribedPreview()
+        testHasMeetingSummaryReflectsStoredSummaryPresence()
         print("NoteListRowDisplayDataTests passed")
+    }
+
+    private static func testHasMeetingSummaryReflectsStoredSummaryPresence() {
+        let withSummary = historyItem(
+            transcript: "Decision: ship Friday.",
+            meetingSummaryJSON: Data("{}".utf8)
+        )
+        let withoutSummary = historyItem(transcript: "Decision: ship Friday.")
+
+        let withSummaryData = NoteListRowDisplayData(item: withSummary, retryingIDs: [])
+        let withoutSummaryData = NoteListRowDisplayData(item: withoutSummary, retryingIDs: [])
+
+        assert(withSummaryData.hasMeetingSummary, "Row with a stored summary reports hasMeetingSummary")
+        assert(!withoutSummaryData.hasMeetingSummary, "Row without a stored summary reports no summary")
     }
 
     private static func testFormatsRowDate() {
@@ -471,7 +486,8 @@ struct NoteListRowDisplayDataTests {
         recordingEndedAt: Date? = nil,
         transcript: String,
         postProcessingStatus: String = "Post-processing succeeded",
-        customTitle: String? = nil
+        customTitle: String? = nil,
+        meetingSummaryJSON: Data? = nil
     ) -> PipelineHistoryItem {
         PipelineHistoryItem(
             id: id,
@@ -488,7 +504,8 @@ struct NoteListRowDisplayDataTests {
             postProcessingStatus: postProcessingStatus,
             debugStatus: "Done",
             customVocabulary: "",
-            customTitle: customTitle
+            customTitle: customTitle,
+            meetingSummaryJSON: meetingSummaryJSON
         )
     }
 

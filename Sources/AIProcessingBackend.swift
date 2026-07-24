@@ -7,6 +7,7 @@ import Darwin
 enum AIProcessingFeature: String, CaseIterable, Hashable, Sendable {
     case postProcessing
     case context
+    case meetingSummary
 }
 
 enum AIProcessingBackendChoice: Codable, Hashable, Sendable {

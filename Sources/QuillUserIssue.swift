@@ -27,6 +27,8 @@ enum QuillUserIssueCode: String, Codable, CaseIterable, Sendable {
     case localAIStartFailed = "local-ai-start-failed"
     case localAIProcessExited = "local-ai-process-exited"
     case contextUnavailable = "context-unavailable"
+    case meetingSummaryUnavailable = "meeting-summary-unavailable"
+    case meetingSummaryInvalidResponse = "meeting-summary-invalid-response"
     case unknown
     case legacy
 }
@@ -135,7 +137,8 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
             return .openSpeechRecognitionSettings
         case .screenRecordingPermissionDenied:
             return .openScreenRecordingSettings
-        case .postProcessingGuardFallback, .contextUnavailable:
+        case .postProcessingGuardFallback, .contextUnavailable,
+             .meetingSummaryUnavailable, .meetingSummaryInvalidResponse:
             return .none
         case .networkUnavailable, .requestTimedOut, .rateLimited,
              .providerUnavailable, .audioFileTooLarge,
@@ -371,7 +374,8 @@ private extension QuillUserIssueCode {
         case .postProcessingFailed, .postProcessingRateLimited,
              .postProcessingGuardFallback, .localAIModelUnavailable,
              .localAIStartFailed, .localAIProcessExited,
-             .contextUnavailable:
+             .contextUnavailable, .meetingSummaryUnavailable,
+             .meetingSummaryInvalidResponse:
             return .warning
         default:
             return .error
@@ -535,6 +539,18 @@ private extension QuillUserIssueCode {
                 titleKey: "Context wasn't available",
                 bodyKey: "Continued with text-only post-processing.",
                 suggestionKey: "No action needed. Context capture will be attempted again next time."
+            )
+        case .meetingSummaryUnavailable:
+            return QuillUserIssueCopy(
+                titleKey: "Summary service unavailable",
+                bodyKey: "The selected provider could not create a meeting summary right now.",
+                suggestionKey: "Try Regenerate again later, or choose another configured model in Meeting Summary settings."
+            )
+        case .meetingSummaryInvalidResponse:
+            return QuillUserIssueCopy(
+                titleKey: "Summary response could not be read",
+                bodyKey: "The provider returned a response Quill could not use for the summary.",
+                suggestionKey: "Try Regenerate again. If it continues, check the provider configuration."
             )
         case .unknown:
             return QuillUserIssueCopy(
