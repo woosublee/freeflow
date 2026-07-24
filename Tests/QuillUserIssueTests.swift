@@ -45,7 +45,9 @@ struct QuillUserIssueTests {
             .localAIModelUnavailable,
             .localAIStartFailed,
             .localAIProcessExited,
-            .contextUnavailable
+            .contextUnavailable,
+            .meetingSummaryUnavailable,
+            .meetingSummaryInvalidResponse
         ]
 
         for code in QuillUserIssueCode.allCases {
@@ -90,6 +92,14 @@ struct QuillUserIssueTests {
         try expect(
             QuillUserIssueRecord(code: .speechRecognitionPermissionDenied).recoveryAction == .openSpeechRecognitionSettings,
             "speech denial opens speech settings"
+        )
+        try expect(
+            QuillUserIssueRecord(code: .meetingSummaryUnavailable).recoveryAction == .none,
+            "meeting summary unavailable has no recovery action"
+        )
+        try expect(
+            QuillUserIssueRecord(code: .meetingSummaryInvalidResponse).recoveryAction == .none,
+            "meeting summary invalid response has no recovery action"
         )
         try expect(
             QuillUserIssueRecord(code: .screenRecordingPermissionDenied).recoveryAction == .openScreenRecordingSettings,

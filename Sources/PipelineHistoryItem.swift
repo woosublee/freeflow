@@ -116,6 +116,7 @@ struct PipelineHistoryItem: Identifiable, Codable {
     let contextBundleIdentifier: String?
     let contextWindowTitle: String?
     let customTitle: String?
+    let meetingSummaryJSON: Data?
 
     init(
         intent: PipelineHistoryItemIntent = .dictation,
@@ -149,7 +150,8 @@ struct PipelineHistoryItem: Identifiable, Codable {
         contextAppName: String? = nil,
         contextBundleIdentifier: String? = nil,
         contextWindowTitle: String? = nil,
-        customTitle: String? = nil
+        customTitle: String? = nil,
+        meetingSummaryJSON: Data? = nil
     ) {
         self.intent = intent
         self.selectedText = selectedText
@@ -183,6 +185,7 @@ struct PipelineHistoryItem: Identifiable, Codable {
         self.contextBundleIdentifier = contextBundleIdentifier
         self.contextWindowTitle = contextWindowTitle
         self.customTitle = customTitle
+        self.meetingSummaryJSON = meetingSummaryJSON
     }
 
     static func transcriptionRecoveryPlaceholder(
@@ -303,6 +306,18 @@ struct PipelineHistoryItem: Identifiable, Codable {
     }
 
     func withCustomTitle(_ customTitle: String?) -> PipelineHistoryItem {
+        copying(
+            meetingSummaryJSON: meetingSummaryJSON,
+            customTitle: customTitle,
+            postProcessedTranscript: postProcessedTranscript
+        )
+    }
+
+    func copying(
+        meetingSummaryJSON: Data?,
+        customTitle: String?,
+        postProcessedTranscript: String
+    ) -> PipelineHistoryItem {
         PipelineHistoryItem(
             intent: intent,
             selectedText: selectedText,
@@ -335,7 +350,8 @@ struct PipelineHistoryItem: Identifiable, Codable {
             contextAppName: contextAppName,
             contextBundleIdentifier: contextBundleIdentifier,
             contextWindowTitle: contextWindowTitle,
-            customTitle: customTitle
+            customTitle: customTitle,
+            meetingSummaryJSON: meetingSummaryJSON
         )
     }
 
@@ -385,7 +401,8 @@ struct PipelineHistoryItem: Identifiable, Codable {
             contextAppName: contextAppName,
             contextBundleIdentifier: contextBundleIdentifier,
             contextWindowTitle: contextWindowTitle,
-            customTitle: customTitle
+            customTitle: customTitle,
+            meetingSummaryJSON: meetingSummaryJSON
         )
     }
 }

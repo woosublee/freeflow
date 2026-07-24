@@ -72,6 +72,7 @@ struct NoteListRowDisplayData: Equatable {
     let rowDate: String
     let displayTitle: String
     let preview: String
+    let hasMeetingSummary: Bool
 
     init(
         item: PipelineHistoryItem,
@@ -106,6 +107,7 @@ struct NoteListRowDisplayData: Equatable {
         self.status = status
         self.rowDate = NoteTimestampFormatter.rowTimestamp(for: item, locale: locale)
         self.displayTitle = displayTitle
+        self.hasMeetingSummary = item.meetingSummaryJSON != nil
         self.preview = Self.preview(
             for: item,
             status: status,

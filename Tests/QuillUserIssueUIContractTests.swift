@@ -185,7 +185,7 @@ struct QuillUserIssueUIContractTests {
         let warningBannerUsage = block(
             noteBrowser,
             from: "if let warningPresentation, !isWarningBannerDismissed {",
-            to: "NoteTextView(text: displayContent"
+            to: "NoteTextView("
         )
         try expect(warningBannerUsage.contains("style: .warningBanner"), "sanity: this is the warning banner usage")
         try expect(warningBannerUsage.contains("onDismiss:"), "warning banner usage wires a dismiss handler")

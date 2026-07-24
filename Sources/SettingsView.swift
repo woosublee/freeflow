@@ -1523,8 +1523,13 @@ struct ModelsSettingsView: View {
     @State private var contextEnabledDraft = false
     @State private var contextChoiceDraft: AIProcessingBackendChoice?
     @State private var contextModelDraft = ""
+    @State private var meetingSummaryEnabledDraft = false
+    @State private var meetingSummaryChoiceDraft: AIProcessingBackendChoice?
+    @State private var meetingSummaryModelDraft = ""
+    @State private var meetingSummaryFallbackModelDraft = ""
     @State private var retainedPostProcessingLocalModelID: String?
     @State private var retainedContextLocalModelID: String?
+    @State private var retainedMeetingSummaryLocalModelID: String?
     @FocusState private var isEditingAPIBaseURL: Bool
     @FocusState private var isEditingTranscriptionModel: Bool
     @FocusState private var isEditingRealtimeStreamingModel: Bool
@@ -1583,6 +1588,9 @@ struct ModelsSettingsView: View {
                 SettingsCard("Context", icon: "rectangle.and.text.magnifyingglass") {
                     contextFeatureSection
                 }
+                SettingsCard("Meeting Summary", icon: "text.document") {
+                    meetingSummaryFeatureSection
+                }
             }
             .padding(24)
         }
@@ -1602,6 +1610,12 @@ struct ModelsSettingsView: View {
             contextEnabledDraft = !appState.disableContextCapture
             contextChoiceDraft = appState.contextBackendChoice
             contextModelDraft = customAIProcessingModelDraft(for: appState.contextModel)
+            meetingSummaryEnabledDraft = !appState.disableMeetingSummary
+            meetingSummaryChoiceDraft = appState.meetingSummaryBackendChoice
+            meetingSummaryModelDraft = customAIProcessingModelDraft(
+                for: appState.meetingSummaryModel
+            )
+            meetingSummaryFallbackModelDraft = appState.meetingSummaryFallbackModel
             customVocabularyInput = appState.customVocabulary
             customSystemPromptInput = appState.customSystemPrompt.isEmpty
                 ? PostProcessingService.defaultSystemPrompt
@@ -1630,6 +1644,16 @@ struct ModelsSettingsView: View {
         .onChange(of: appState.disableContextCapture) { value in
             if contextEnabledDraft != !value { contextEnabledDraft = !value }
         }
+        .onChange(of: appState.meetingSummaryBackendChoice) { value in
+            if meetingSummaryChoiceDraft != value {
+                meetingSummaryChoiceDraft = value
+            }
+        }
+        .onChange(of: appState.disableMeetingSummary) { value in
+            if meetingSummaryEnabledDraft != !value {
+                meetingSummaryEnabledDraft = !value
+            }
+        }
         .onChange(of: appState.transcriptionAPIURL) { value in
             if transcriptionAPIURLInput != value { transcriptionAPIURLInput = value }
         }
@@ -1651,6 +1675,16 @@ struct ModelsSettingsView: View {
                 contextModelDraft = customAIProcessingModelDraft(for: value)
             }
         }
+        .onChange(of: appState.meetingSummaryModel) { value in
+            if focusedCustomAIProcessingFeature != .meetingSummary {
+                meetingSummaryModelDraft = customAIProcessingModelDraft(for: value)
+            }
+        }
+        .onChange(of: appState.meetingSummaryFallbackModel) { value in
+            if meetingSummaryFallbackModelDraft != value {
+                meetingSummaryFallbackModelDraft = value
+            }
+        }
         .onChange(of: managedLocalAIReconciliationInputs) { _ in
             reconcileRetainedLocalAIModels()
         }
@@ -1663,7 +1697,11 @@ struct ModelsSettingsView: View {
                     for: .postProcessing
                 ),
                 contextEnabled: contextEnabledDraft,
-                contextChoice: settingsAIProcessingChoice(for: .context)
+                contextChoice: settingsAIProcessingChoice(for: .context),
+                meetingSummaryEnabled: meetingSummaryEnabledDraft,
+                meetingSummaryChoice: settingsAIProcessingChoice(
+                    for: .meetingSummary
+                )
             )
         }
     }
@@ -1917,6 +1955,9 @@ struct ModelsSettingsView: View {
         case .context:
             contextChoiceDraft
                 ?? appState.currentAIProcessingChoice(for: feature)
+        case .meetingSummary:
+            meetingSummaryChoiceDraft
+                ?? appState.currentAIProcessingChoice(for: feature)
         }
     }
 
@@ -1929,6 +1970,8 @@ struct ModelsSettingsView: View {
             postProcessingChoiceDraft = choice
         case .context:
             contextChoiceDraft = choice
+        case .meetingSummary:
+            meetingSummaryChoiceDraft = choice
         }
     }
 
@@ -1950,6 +1993,8 @@ struct ModelsSettingsView: View {
             appState.disablePostProcessing = !isEnabled
         case .context:
             appState.disableContextCapture = !isEnabled
+        case .meetingSummary:
+            appState.disableMeetingSummary = !isEnabled
         }
     }
 
@@ -1994,6 +2039,9 @@ struct ModelsSettingsView: View {
         case .context:
             guard retainedContextLocalModelID != modelID else { return }
             retainedContextLocalModelID = modelID
+        case .meetingSummary:
+            guard retainedMeetingSummaryLocalModelID != modelID else { return }
+            retainedMeetingSummaryLocalModelID = modelID
         }
     }
 
@@ -2005,6 +2053,8 @@ struct ModelsSettingsView: View {
             retainedPostProcessingLocalModelID
         case .context:
             retainedContextLocalModelID
+        case .meetingSummary:
+            retainedMeetingSummaryLocalModelID
         }
     }
 
@@ -2017,7 +2067,9 @@ struct ModelsSettingsView: View {
             postProcessingModelDraft = customAIProcessingModelDraft(for: modelID)
         case .context where focusedCustomAIProcessingFeature != .context:
             contextModelDraft = customAIProcessingModelDraft(for: modelID)
-        case .postProcessing, .context:
+        case .meetingSummary where focusedCustomAIProcessingFeature != .meetingSummary:
+            meetingSummaryModelDraft = customAIProcessingModelDraft(for: modelID)
+        case .postProcessing, .context, .meetingSummary:
             break
         }
     }
@@ -2447,6 +2499,88 @@ struct ModelsSettingsView: View {
         }
     }
 
+    private var meetingSummaryEnabled: Binding<Bool> {
+        Binding(
+            get: { meetingSummaryEnabledDraft },
+            set: { newValue in
+                meetingSummaryEnabledDraft = newValue
+                guard newValue else {
+                    appState.disableMeetingSummary = true
+                    return
+                }
+                guard appState.isAIProcessingChoiceReady(
+                    settingsAIProcessingChoice(for: .meetingSummary)
+                ) else {
+                    return
+                }
+                appState.selectAIProcessingBackendChoice(
+                    settingsAIProcessingChoice(for: .meetingSummary),
+                    for: .meetingSummary
+                )
+                appState.disableMeetingSummary = false
+            }
+        )
+    }
+
+    private var meetingSummaryUsesCloud: Bool {
+        if case .cloud = settingsAIProcessingChoice(for: .meetingSummary) {
+            return true
+        }
+        return false
+    }
+
+    private var meetingSummaryUsesLocal: Bool {
+        !meetingSummaryUsesCloud
+    }
+
+    private var meetingSummaryFeatureSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Create a reviewable summary from completed transcripts.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Toggle("", isOn: meetingSummaryEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .accessibilityLabel("Meeting Summary")
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                aiProcessingChoicePicker(for: .meetingSummary)
+
+                if let model = managedLocalAIModel(for: .meetingSummary) {
+                    LocalAIModelRowView(
+                        feature: .meetingSummary,
+                        model: model,
+                        isSelected: settingsAIProcessingChoice(for: .meetingSummary)
+                            == .localAI(modelID: model.id)
+                    )
+                }
+
+                if meetingSummaryEnabledDraft && meetingSummaryUsesCloud
+                    && !hasConfiguredCloudAPIKey {
+                    providerConfigurationWarning(
+                        "Meeting Summary is on, but cloud summarization is unavailable until an API key is configured."
+                    )
+                }
+
+                if !meetingSummaryEnabledDraft {
+                    Text("Meeting Summary is off. Existing summaries are kept.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                DisclosureGroup("Details") {
+                    meetingSummaryDetails
+                        .padding(.top, 8)
+                }
+            }
+            .disabled(!meetingSummaryEnabledDraft)
+            .opacity(meetingSummaryEnabledDraft ? 1 : 0.45)
+        }
+    }
+
     private var postProcessingDetails: some View {
         VStack(alignment: .leading, spacing: 14) {
             customAIProcessingModelSetting(
@@ -2497,6 +2631,58 @@ struct ModelsSettingsView: View {
             )
             Divider()
             contextPromptSection
+        }
+    }
+
+    private var meetingSummaryDetails: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            customAIProcessingModelSetting(
+                draft: $meetingSummaryModelDraft,
+                feature: .meetingSummary
+            )
+            Divider()
+            meetingSummaryOutputLanguageSetting
+            Divider()
+            ModelDropdownView(
+                title: "Summary Fallback Model",
+                subtitle: "Used as the explicit retry model when cloud summary generation fails.",
+                predefinedModels: ModelConfiguration.llmModels,
+                defaultModel: AppState.defaultMeetingSummaryFallbackModel,
+                textDraft: $meetingSummaryFallbackModelDraft,
+                onCommit: commitMeetingSummaryFallbackModel,
+                onReset: {
+                    meetingSummaryFallbackModelDraft =
+                        AppState.defaultMeetingSummaryFallbackModel
+                    appState.meetingSummaryFallbackModel =
+                        AppState.defaultMeetingSummaryFallbackModel
+                }
+            )
+            .disabled(meetingSummaryUsesLocal)
+
+            if meetingSummaryUsesLocal {
+                Text("Cloud fallback is only used when Meeting Summary uses a cloud model.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var meetingSummaryOutputLanguageSetting: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker(
+                "Output Language",
+                selection: $appState.meetingSummaryOutputLanguage
+            ) {
+                ForEach(Self.outputLanguageOptions, id: \.value) { option in
+                    Text(option.label).tag(option.value)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(minWidth: 280, maxWidth: 320, alignment: .leading)
+
+            Text("Language used for generated meeting summaries.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -2799,6 +2985,19 @@ struct ModelsSettingsView: View {
         postProcessingFallbackModelDraft = resolved
         if appState.postProcessingFallbackModel != resolved {
             appState.postProcessingFallbackModel = resolved
+        }
+    }
+
+    private func commitMeetingSummaryFallbackModel() {
+        let trimmed = meetingSummaryFallbackModelDraft.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let resolved = trimmed.isEmpty
+            ? AppState.defaultMeetingSummaryFallbackModel
+            : trimmed
+        meetingSummaryFallbackModelDraft = resolved
+        if appState.meetingSummaryFallbackModel != resolved {
+            appState.meetingSummaryFallbackModel = resolved
         }
     }
 

@@ -55,12 +55,14 @@ FULL_SOURCE_TRANSCRIPTION_TESTS = \
 	Tests/TranscriptionServiceLocalIssueTests.swift \
 	Tests/PostProcessingUserIssueTests.swift \
 	Tests/PostProcessingBackendTests.swift \
-	Tests/AppContextBackendTests.swift
+	Tests/AppContextBackendTests.swift \
+	Tests/MeetingSummaryServiceTests.swift
 FULL_SOURCE_APP_STATE_TESTS = \
 	Tests/AudioImportFileCopyTests.swift \
 	Tests/LatestValueProgressCoalescerTests.swift \
 	Tests/AppStateTranscriptionConfigurationTests.swift \
-	Tests/AppStateAIProcessingBackendTests.swift
+	Tests/AppStateAIProcessingBackendTests.swift \
+	Tests/MeetingSummaryAppStateTests.swift
 GROUPED_TEST_SOURCES = $(FULL_SOURCE_TRANSCRIPTION_TESTS) $(FULL_SOURCE_APP_STATE_TESTS)
 GROUPED_RUNNER_SOURCES = Tests/FullSourceTranscriptionTestRunner.swift Tests/FullSourceAppStateTestRunner.swift
 FULL_SOURCE_TRANSCRIPTION_RUNNER = $(TEST_BUILD_DIR)/FullSourceTranscriptionTestRunner
@@ -382,6 +384,18 @@ check-test-wiring:
 $(TEST_BUILD_DIR):
 	@mkdir -p "$@"
 
+$(TEST_BUILD_DIR)/MeetingSummaryModelsTests: Sources/CalendarIntegrationModels.swift Sources/MeetingSummaryModels.swift Tests/MeetingSummaryModelsTests.swift | $(TEST_BUILD_DIR)
+	@swiftc -parse-as-library Sources/CalendarIntegrationModels.swift Sources/MeetingSummaryModels.swift Tests/MeetingSummaryModelsTests.swift -o "$@"
+
+$(TEST_BUILD_DIR)/MeetingSummaryTextChunkerTests: Sources/MeetingSummaryTextChunker.swift Tests/MeetingSummaryTextChunkerTests.swift | $(TEST_BUILD_DIR)
+	@swiftc -parse-as-library Sources/MeetingSummaryTextChunker.swift Tests/MeetingSummaryTextChunkerTests.swift -o "$@"
+
+$(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests: Sources/RecordingJournalFailure.swift Sources/RecoveredRecordingContext.swift Sources/RecoveredRecordingMode.swift Sources/RecordingJournalModels.swift Sources/LocalizedStringLookup.swift Sources/AppName.swift Sources/CalendarIntegrationModels.swift Sources/QuillUserIssue.swift Sources/MeetingSummaryModels.swift Sources/PipelineHistoryItem.swift Sources/PipelineHistoryItem+MeetingSummary.swift Sources/TranscriptionModel.swift Sources/PipelineHistoryStore.swift Tests/PipelineHistoryMeetingSummaryTests.swift | $(TEST_BUILD_DIR)
+	@swiftc -parse-as-library Sources/RecordingJournalFailure.swift Sources/RecoveredRecordingContext.swift Sources/RecoveredRecordingMode.swift Sources/RecordingJournalModels.swift Sources/LocalizedStringLookup.swift Sources/AppName.swift Sources/CalendarIntegrationModels.swift Sources/QuillUserIssue.swift Sources/MeetingSummaryModels.swift Sources/PipelineHistoryItem.swift Sources/PipelineHistoryItem+MeetingSummary.swift Sources/TranscriptionModel.swift Sources/PipelineHistoryStore.swift Tests/PipelineHistoryMeetingSummaryTests.swift -o "$@"
+
+$(TEST_BUILD_DIR)/MeetingSummaryUIContractTests: Tests/MeetingSummaryUIContractTests.swift | $(TEST_BUILD_DIR)
+	@swiftc -parse-as-library Tests/MeetingSummaryUIContractTests.swift -o "$@"
+
 $(TEST_BUILD_DIR)/LocalizationResourceTests: Tests/LocalizationResourceTests.swift | $(TEST_BUILD_DIR)
 	@swiftc -parse-as-library Tests/LocalizationResourceTests.swift -o "$@"
 
@@ -408,7 +422,10 @@ test: check-test-wiring
 	@$(call RUN_TIMED_TARGET,_test-recording,recording)
 	@$(call RUN_TIMED_TARGET,_test-transcription,transcription)
 
-_test-core: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(TEST_BUILD_DIR)/LocalizationResourceTests | $(TEST_BUILD_DIR)
+_test-core: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(TEST_BUILD_DIR)/LocalizationResourceTests $(TEST_BUILD_DIR)/MeetingSummaryModelsTests $(TEST_BUILD_DIR)/MeetingSummaryTextChunkerTests $(TEST_BUILD_DIR)/MeetingSummaryUIContractTests | $(TEST_BUILD_DIR)
+	@$(TEST_BUILD_DIR)/MeetingSummaryModelsTests
+	@$(TEST_BUILD_DIR)/MeetingSummaryTextChunkerTests
+	@$(TEST_BUILD_DIR)/MeetingSummaryUIContractTests
 	@swiftc -parse-as-library Sources/CalendarIntegrationModels.swift Sources/CalendarEventMatcher.swift Tests/CalendarEventMatcherTests.swift -o $(TEST_BUILD_DIR)/CalendarEventMatcherTests
 	@swiftc -parse-as-library Sources/AppName.swift Sources/ModifierKeyEventState.swift Sources/ShortcutCore/ShortcutModels.swift Sources/ShortcutCore/ShortcutMatcher.swift Sources/GlobalShortcutBackend.swift Sources/HotkeyManager.swift Tests/ShortcutMatcherTests.swift -o $(TEST_BUILD_DIR)/ShortcutMatcherTests
 	@swiftc -parse-as-library Sources/ShortcutCore/ShortcutModels.swift Sources/ShortcutBinding.swift Sources/ShortcutCaptureKeyHandling.swift Tests/ShortcutCaptureKeyHandlingTests.swift -o $(TEST_BUILD_DIR)/ShortcutCaptureKeyHandlingTests
@@ -537,7 +554,8 @@ _test-recording: | $(TEST_BUILD_DIR)
 	@$(TEST_BUILD_DIR)/AudioWaveformHeightsTests
 	@swiftc -parse-as-library Tests/SystemAudioAppStateRoutingTests.swift -o $(TEST_BUILD_DIR)/SystemAudioAppStateRoutingTests
 	@$(TEST_BUILD_DIR)/SystemAudioAppStateRoutingTests
-_test-transcription: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(FULL_SOURCE_TRANSCRIPTION_RUNNER) $(FULL_SOURCE_APP_STATE_RUNNER) | $(TEST_BUILD_DIR)
+_test-transcription: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(FULL_SOURCE_TRANSCRIPTION_RUNNER) $(FULL_SOURCE_APP_STATE_RUNNER) $(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests | $(TEST_BUILD_DIR)
+	@$(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests
 	@swiftc -parse-as-library Sources/RecordingJournalFailure.swift Sources/RecoveredRecordingContext.swift Sources/RecoveredRecordingMode.swift Sources/RecordingJournalModels.swift Sources/LocalizedStringLookup.swift Sources/AppName.swift Sources/CalendarIntegrationModels.swift Sources/QuillUserIssue.swift Sources/PipelineHistoryItem.swift Sources/TranscriptionModel.swift Sources/PipelineHistoryStore.swift Tests/PipelineHistoryCalendarMetadataTests.swift -o $(TEST_BUILD_DIR)/PipelineHistoryCalendarMetadataTests
 	@$(TEST_BUILD_DIR)/PipelineHistoryCalendarMetadataTests
 	@swiftc -parse-as-library Sources/CalendarIntegrationModels.swift Sources/GoogleCalendarTokenStore.swift Sources/GoogleCalendarAuthService.swift Sources/GoogleCalendarService.swift Tests/GoogleCalendarServiceTests.swift -o $(TEST_BUILD_DIR)/GoogleCalendarServiceTests

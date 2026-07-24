@@ -5,5 +5,6 @@ struct FullSourceAppStateTestRunner {
         try LatestValueProgressCoalescerTests.main()
         try await AppStateTranscriptionConfigurationTests.main()
         try await AppStateAIProcessingBackendTests.main()
+        try await MeetingSummaryAppStateTests.main()
     }
 }

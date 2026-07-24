@@ -26,6 +26,7 @@ struct ModelsSettingsUIContractTests {
         testReviewRegressionGuards(settings)
         testPostProcessingUsesExplicitSwitchAndExistingState(settings)
         testContextUsesExplicitSwitchAndExistingState(settings)
+        testMeetingSummaryUsesIndependentCardAndSharedModelUX(settings)
         testAIProcessingBackendPickersAndLocalRows(
             settings: settings,
             modelDropdown: modelDropdown,
@@ -479,6 +480,42 @@ struct ModelsSettingsUIContractTests {
         precondition(!context.contains("Text(contextEnabled.wrappedValue ? \"On\" : \"Off\")"))
     }
 
+    private static func testMeetingSummaryUsesIndependentCardAndSharedModelUX(
+        _ source: String
+    ) {
+        let models = block(
+            in: source,
+            from: "struct ModelsSettingsView",
+            to: "// MARK: - Shortcuts Settings"
+        )
+
+        precondition(
+            models.contains(
+                "SettingsCard(\"Meeting Summary\", icon: \"text.document\")"
+            )
+        )
+        precondition(models.contains("meetingSummaryFeatureSection"))
+        precondition(
+            models.contains("aiProcessingChoicePicker(for: .meetingSummary)")
+        )
+        precondition(
+            models.contains(
+                "meetingSummaryEnabledDraft && meetingSummaryUsesCloud"
+            )
+        )
+        precondition(
+            models.contains(
+                "Meeting Summary is on, but cloud summarization is unavailable until an API key is configured."
+            )
+        )
+        precondition(models.contains(".disabled(!meetingSummaryEnabledDraft)"))
+        precondition(
+            models.contains(
+                ".opacity(meetingSummaryEnabledDraft ? 1 : 0.45)"
+            )
+        )
+    }
+
     private static func testPostProcessingUsesExplicitSwitchAndExistingState(_ source: String) {
         let models = block(
             in: source,
@@ -554,7 +591,7 @@ struct ModelsSettingsUIContractTests {
         let contextDetails = block(
             in: models,
             from: "private var contextDetails: some View",
-            to: "\n    private func customAIProcessingModelSetting("
+            to: "\n    private var meetingSummaryDetails"
         )
         let customModelSetting = block(
             in: models,
