@@ -8,6 +8,16 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.28] - 2026-07-25
+
+### Added
+
+- Added in-app meeting summaries for completed notes, using the configured AI processing backend with retry and output-language controls.
+
+### Improved
+
+- Moved System Prompt, Instruction Guard, and Context Prompt editing and testing into a dedicated Prompts settings screen, keeping Models focused on providers, models, and context input settings.
+
 ## [0.1.27] - 2026-07-24
 
 ### Improved
