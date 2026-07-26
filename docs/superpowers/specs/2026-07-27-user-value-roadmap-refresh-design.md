@@ -249,7 +249,7 @@ Structure:
 | P1 | `Allow Record-only setup without unnecessary microphone permission` |
 | P1 | `Migrate provider credentials from settings JSON to Keychain` |
 | P1 | `Align README, website, privacy policy, and release notes with v0.1.28` |
-| P1, blocked by #240 | `Add a user-visible recovery center for recoverable recordings and notes` |
+| P1, blocked by #243 | `Add a user-visible recovery center for recoverable recordings and notes` |
 | Next | `Normalize large imported audio to the durable WAV transcription pipeline` |
 
 각 이슈는 다음 형식을 사용한다.
