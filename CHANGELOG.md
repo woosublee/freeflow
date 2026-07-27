@@ -8,6 +8,17 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.29] - 2026-07-27
+
+### Fixed
+
+- Kept a discovered update visible in Settings and the menu bar after Quill restarts, while clearing notices for installed, skipped, or no-longer-available updates.
+- Corrected the Sparkle setting used for the scheduled update-check interval.
+
+### Improved
+
+- Hardened official release publishing so stable display versions and build numbers must both move forward, with verification of the published latest appcast and Sparkle signature metadata.
+
 ## [0.1.28] - 2026-07-25
 
 ### Added
