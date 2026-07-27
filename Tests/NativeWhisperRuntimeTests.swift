@@ -6,6 +6,7 @@ struct NativeWhisperRuntimeTests {
         try await testRuntimeReturnsStdoutTranscript()
         try await testRuntimeReadsOutputJSONTextField()
         try await testRuntimeUsesTimestampDecodingKeepsGPUEnabledAndDisablesTextContext()
+        try await testRuntimePassesExplicitLanguage()
         try await testRuntimeRejectsMissingRunner()
         try await testRuntimeRejectsMissingModel()
         try await testRuntimeRejectsMissingAudio()
@@ -77,9 +78,41 @@ struct NativeWhisperRuntimeTests {
         assert(args.dropFirst(maxContextIndex! + 1).first == "0", "Expected native whisper runtime to disable previous text conditioning")
         assert(!args.contains("-nt"), "Expected native whisper runtime to keep timestamp decoding enabled")
         assert(!args.contains("--no-timestamps"), "Expected native whisper runtime to keep timestamp decoding enabled")
+        let languageIndex = args.firstIndex(of: "-l")
+        assert(languageIndex != nil, "Expected native whisper runtime to pass a language argument")
+        assert(
+            args.dropFirst(languageIndex! + 1).first == "auto",
+            "Expected Auto Detect to pass -l auto"
+        )
         assert(!args.contains("-ng"), "Expected Native Whisper to keep GPU enabled")
         assert(!args.contains("--no-gpu"), "Expected Native Whisper to keep GPU enabled")
         assert(!args.contains("-ngl"), "Expected whisper-cli GPU policy, not generic layer offload")
+    }
+
+    private static func testRuntimePassesExplicitLanguage() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let argsFile = root.appendingPathComponent("args.txt")
+        let helper = try writeHelper(root: root, body: """
+        #!/bin/sh
+        printf '%s\n' "$@" > "\(argsFile.path)"
+        echo "ok"
+        """)
+        let model = try writeFile(root.appendingPathComponent("model.bin"), data: Data([1]))
+        let audio = try writeFile(root.appendingPathComponent("audio.wav"), data: Data([2]))
+        let runtime = NativeWhisperRuntime(runnerURL: helper)
+
+        _ = try await runtime.transcribe(audioURL: audio, modelURL: model, languageCode: " ko ")
+
+        let args = try String(contentsOf: argsFile, encoding: .utf8)
+            .split(separator: "\n")
+            .map(String.init)
+        let languageIndex = args.firstIndex(of: "-l")
+        assert(languageIndex != nil, "Expected native whisper runtime to pass a language argument")
+        assert(
+            args.dropFirst(languageIndex! + 1).first == "ko",
+            "Expected native whisper runtime to trim and pass the explicit language"
+        )
     }
 
     private static func testRuntimeRejectsMissingRunner() async throws {
