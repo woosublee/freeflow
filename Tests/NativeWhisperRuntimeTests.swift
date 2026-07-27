@@ -5,7 +5,7 @@ struct NativeWhisperRuntimeTests {
     static func main() async throws {
         try await testRuntimeReturnsStdoutTranscript()
         try await testRuntimeReadsOutputJSONTextField()
-        try await testRuntimeKeepsGPUEnabledAndDisablesTextContext()
+        try await testRuntimeUsesTimestampDecodingKeepsGPUEnabledAndDisablesTextContext()
         try await testRuntimeRejectsMissingRunner()
         try await testRuntimeRejectsMissingModel()
         try await testRuntimeRejectsMissingAudio()
@@ -56,7 +56,7 @@ struct NativeWhisperRuntimeTests {
         assert(transcript == "json transcript")
     }
 
-    private static func testRuntimeKeepsGPUEnabledAndDisablesTextContext() async throws {
+    private static func testRuntimeUsesTimestampDecodingKeepsGPUEnabledAndDisablesTextContext() async throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let argsFile = root.appendingPathComponent("args.txt")
@@ -75,6 +75,8 @@ struct NativeWhisperRuntimeTests {
         let maxContextIndex = args.firstIndex(of: "-mc")
         assert(maxContextIndex != nil, "Expected native whisper runtime to set max context")
         assert(args.dropFirst(maxContextIndex! + 1).first == "0", "Expected native whisper runtime to disable previous text conditioning")
+        assert(!args.contains("-nt"), "Expected native whisper runtime to keep timestamp decoding enabled")
+        assert(!args.contains("--no-timestamps"), "Expected native whisper runtime to keep timestamp decoding enabled")
         assert(!args.contains("-ng"), "Expected Native Whisper to keep GPU enabled")
         assert(!args.contains("--no-gpu"), "Expected Native Whisper to keep GPU enabled")
         assert(!args.contains("-ngl"), "Expected whisper-cli GPU policy, not generic layer offload")
