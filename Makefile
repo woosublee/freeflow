@@ -384,6 +384,9 @@ check-test-wiring:
 $(TEST_BUILD_DIR):
 	@mkdir -p "$@"
 
+$(TEST_BUILD_DIR)/UpdateSnapshotStoreTests: Sources/UpdateSnapshotStore.swift Tests/UpdateSnapshotStoreTests.swift | $(TEST_BUILD_DIR)
+	@swiftc -parse-as-library Sources/UpdateSnapshotStore.swift Tests/UpdateSnapshotStoreTests.swift -o "$@"
+
 $(TEST_BUILD_DIR)/MeetingSummaryModelsTests: Sources/CalendarIntegrationModels.swift Sources/MeetingSummaryModels.swift Tests/MeetingSummaryModelsTests.swift | $(TEST_BUILD_DIR)
 	@swiftc -parse-as-library Sources/CalendarIntegrationModels.swift Sources/MeetingSummaryModels.swift Tests/MeetingSummaryModelsTests.swift -o "$@"
 
@@ -422,7 +425,10 @@ test: check-test-wiring
 	@$(call RUN_TIMED_TARGET,_test-recording,recording)
 	@$(call RUN_TIMED_TARGET,_test-transcription,transcription)
 
-_test-core: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(TEST_BUILD_DIR)/LocalizationResourceTests $(TEST_BUILD_DIR)/MeetingSummaryModelsTests $(TEST_BUILD_DIR)/MeetingSummaryTextChunkerTests $(TEST_BUILD_DIR)/MeetingSummaryUIContractTests | $(TEST_BUILD_DIR)
+_test-core: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(TEST_BUILD_DIR)/LocalizationResourceTests $(TEST_BUILD_DIR)/UpdateSnapshotStoreTests $(TEST_BUILD_DIR)/MeetingSummaryModelsTests $(TEST_BUILD_DIR)/MeetingSummaryTextChunkerTests $(TEST_BUILD_DIR)/MeetingSummaryUIContractTests | $(TEST_BUILD_DIR)
+	@$(TEST_BUILD_DIR)/UpdateSnapshotStoreTests
+	@python3 Tests/StableReleaseValidationTests.py
+	@bash Tests/SparkleKeyValidationTests.sh
 	@$(TEST_BUILD_DIR)/MeetingSummaryModelsTests
 	@$(TEST_BUILD_DIR)/MeetingSummaryTextChunkerTests
 	@$(TEST_BUILD_DIR)/MeetingSummaryUIContractTests
@@ -452,7 +458,7 @@ _test-core: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(TEST_BUILD_DIR)/Localizatio
 	@$(TEST_BUILD_DIR)/NativeWhisperBuildContractTests
 	@swiftc -parse-as-library Tests/LocalAIBuildContractTests.swift -o $(TEST_BUILD_DIR)/LocalAIBuildContractTests
 	@$(TEST_BUILD_DIR)/LocalAIBuildContractTests
-	@framework="$$(cat "$(SPARKLE_STAMP)")"; framework_parent="$$(dirname "$$framework")"; swiftc -parse-as-library -F "$$framework_parent" -framework Sparkle -Xlinker -rpath -Xlinker "$$framework_parent" Sources/LocalizedStringLookup.swift Sources/LocalizedUserMessage.swift Sources/UpdateManager.swift Tests/UpdateManagerSafetyTests.swift -o $(TEST_BUILD_DIR)/UpdateManagerSafetyTests
+	@framework="$$(cat "$(SPARKLE_STAMP)")"; framework_parent="$$(dirname "$$framework")"; swiftc -parse-as-library -F "$$framework_parent" -framework Sparkle -Xlinker -rpath -Xlinker "$$framework_parent" Sources/LocalizedStringLookup.swift Sources/LocalizedUserMessage.swift Sources/UpdateSnapshotStore.swift Sources/UpdateManager.swift Tests/UpdateManagerSafetyTests.swift -o $(TEST_BUILD_DIR)/UpdateManagerSafetyTests
 	@$(TEST_BUILD_DIR)/UpdateManagerSafetyTests
 	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Tests/LocalizedStringLookupTests.swift -o $(TEST_BUILD_DIR)/LocalizedStringLookupTests
 	@$(TEST_BUILD_DIR)/LocalizedStringLookupTests

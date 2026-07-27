@@ -19,8 +19,11 @@ on:
 permissions:
   contents: write
 
+# Manual prereleases share the stable-release lock because their bundle build
+# numbers become the lower bound for the next Sparkle stable release.
+# Dispatch Quill releases one at a time; GitHub keeps only one pending run.
 concurrency:
-  group: manual-release-${{ github.event.inputs.tag }}
+  group: quill-official-stable-release
   cancel-in-progress: false
 
 jobs:
@@ -38,7 +41,7 @@ jobs:
           INPUT_RELEASE_NAME: ${{ inputs.release_name }}
         run: |
           TAG="$INPUT_TAG"
-          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
+          if ! [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$ ]]; then
             echo "Release tags must look like v0.1.0 or v0.1.0-beta.1." >&2
             exit 1
           fi

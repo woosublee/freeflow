@@ -13,6 +13,9 @@ struct ManualReleaseWorkflowTests {
         assertContains(workflow, "name: Manual Release")
         assertContains(workflow, "workflow_dispatch:")
         assertContains(workflow, "tag:")
+        assertContains(workflow, "group: quill-official-stable-release")
+        assertContains(workflow, "cancel-in-progress: false")
+        assertDoesNotContain(workflow, "group: manual-release-${{ github.event.inputs.tag }}")
         assertDoesNotContain(workflow, "build_number:")
         assertContains(workflow, "APP_VERSION=\"$(make -s print-app-version)\"")
         assertContains(workflow, "BUILD_NUMBER=\"$(make -s print-build-number)\"")
@@ -31,6 +34,10 @@ struct ManualReleaseWorkflowTests {
         assertDoesNotContain(workflow, "IS_PRERELEASE=false")
         assertDoesNotContain(workflow, "MAKE_LATEST=true")
         assertContains(workflow, "VERSION=\"${TAG#v}\"")
+        assertContains(
+            workflow,
+            #"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$"#
+        )
         assertContains(workflow, "if ! [[ \"$BUILD_NUMBER\" =~ ^[1-9][0-9]*$ ]]")
         assertContains(workflow, "echo \"build_number=$BUILD_NUMBER\" >> \"$GITHUB_OUTPUT\"")
         assertContains(workflow, "RELEASE_NAME_DELIM=\"RELEASE_NAME_$(uuidgen)\"")

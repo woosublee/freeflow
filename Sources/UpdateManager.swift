@@ -52,6 +52,10 @@ final class UpdateManager: NSObject, ObservableObject {
 
     private let legacyAutoCheckPreferenceKey = "updateAutoCheckEnabled"
     private let legacyAutoCheckMigrationKey = "sparkleAutoCheckPreferenceMigrated"
+    private let sparkleSkippedVersionKey = "SUSkippedVersion"
+    private let sparkleSkippedMajorVersionKey = "SUSkippedMajorVersion"
+    private let sparkleSkippedMajorSubreleaseVersionKey = "SUSkippedMajorSubreleaseVersion"
+    private let updateSnapshotStore = UpdateSnapshotStore(userDefaults: .standard)
     private let postTranscriptionReminderInterval: TimeInterval = 24 * 60 * 60 // 1 day
     private var lastPostTranscriptionReminderVersion: String? {
         get { UserDefaults.standard.string(forKey: "updateLastPostTranscriptionReminderVersion") }
@@ -68,6 +72,7 @@ final class UpdateManager: NSObject, ObservableObject {
     private override init() {
         lastCheckDate = UserDefaults.standard.object(forKey: "updateLastCheckDate") as? Date
         super.init()
+        restorePersistedUpdateIfAvailable()
         migrateLegacyAutoCheckPreferenceIfNeeded()
         bridgeUpdaterChangesToSwiftUI()
     }
@@ -122,6 +127,16 @@ final class UpdateManager: NSObject, ObservableObject {
         }
 
         return true
+    }
+
+    nonisolated static func isCandidateBuildNewerForRestoration(
+        _ candidate: String,
+        than current: String
+    ) -> Bool {
+        SUStandardVersionComparator.default.compareVersion(
+            candidate,
+            toVersion: current
+        ) == .orderedDescending
     }
 
     // MARK: - Sparkle Lifecycle
@@ -207,6 +222,10 @@ final class UpdateManager: NSObject, ObservableObject {
         Bundle.main.object(forInfoDictionaryKey: "QuillBuildTag") as? String
     }
 
+    private var currentBuildVersion: String? {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+    }
+
     private func startUpdaterIfNeeded() {
         guard !hasStartedUpdater else { return }
         updaterController.startUpdater()
@@ -239,12 +258,42 @@ final class UpdateManager: NSObject, ObservableObject {
             .store(in: &updaterObservationCancellables)
     }
 
-    private func applyAvailableUpdate(_ item: SUAppcastItem) {
+    private func restorePersistedUpdateIfAvailable() {
+        guard Self.isReleaseBuildTagForAutomaticChecks(currentBuildTag) else { return }
+        let snapshot = updateSnapshotStore.restorableSnapshot(
+            currentBuildVersion: currentBuildVersion,
+            skippedUpdate: PersistedSkippedUpdate(
+                minorVersion: UserDefaults.standard.string(forKey: sparkleSkippedVersionKey),
+                majorVersion: UserDefaults.standard.string(forKey: sparkleSkippedMajorVersionKey),
+                majorSubreleaseVersion: UserDefaults.standard.string(
+                    forKey: sparkleSkippedMajorSubreleaseVersionKey
+                )
+            ),
+            isNewer: Self.isCandidateBuildNewerForRestoration
+        )
+        guard let snapshot else { return }
+        applyAvailableUpdate(snapshot)
+    }
+
+    private func applyAvailableUpdate(_ snapshot: PersistedUpdateSnapshot) {
         updateAvailable = true
-        latestReleaseVersion = item.displayVersionString
-        latestReleaseDate = item.date?.formatted(date: .abbreviated, time: .omitted) ?? ""
-        releaseNotesURL = item.releaseNotesURL ?? item.infoURL
+        latestReleaseVersion = snapshot.displayVersion
+        latestReleaseDate = snapshot.releaseDate?.formatted(date: .abbreviated, time: .omitted) ?? ""
+        releaseNotesURL = snapshot.releaseNotesURL
         updateStatus = .idle
+    }
+
+    private func applyAvailableUpdate(_ item: SUAppcastItem) {
+        let snapshot = PersistedUpdateSnapshot(
+            buildVersion: item.versionString,
+            displayVersion: item.displayVersionString,
+            releaseDate: item.date,
+            releaseNotesURL: item.releaseNotesURL ?? item.infoURL,
+            minimumAutoupdateVersion: item.minimumAutoupdateVersion,
+            ignoreSkippedUpgradesBelowVersion: item.ignoreSkippedUpgradesBelowVersion
+        )
+        applyAvailableUpdate(snapshot)
+        updateSnapshotStore.save(snapshot)
     }
 
     private func clearAvailableUpdate() {
@@ -254,6 +303,7 @@ final class UpdateManager: NSObject, ObservableObject {
         releaseNotesURL = nil
         downloadProgress = nil
         updateStatus = .idle
+        updateSnapshotStore.clear()
     }
 
     private func suppressPostTranscriptionReminder(for item: SUAppcastItem) {
@@ -288,8 +338,11 @@ extension UpdateManager: SPUUpdaterDelegate {
 
     func updater(_ updater: SPUUpdater, userDidMake choice: SPUUserUpdateChoice, forUpdate updateItem: SUAppcastItem, state: SPUUserUpdateState) {
         switch choice {
-        case .dismiss, .skip:
+        case .dismiss:
             suppressPostTranscriptionReminder(for: updateItem)
+        case .skip:
+            suppressPostTranscriptionReminder(for: updateItem)
+            clearAvailableUpdate()
         case .install:
             break
         @unknown default:
