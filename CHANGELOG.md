@@ -8,6 +8,13 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.30] - 2026-07-27
+
+### Fixed
+
+- Restored timestamp-based decoding in Native Whisper so local transcription follows detected speech boundaries instead of advancing in fixed 30-second windows.
+- Made Native Whisper's Auto Detect option explicitly request automatic language detection instead of falling back to English.
+
 ## [0.1.29] - 2026-07-27
 
 ### Fixed
