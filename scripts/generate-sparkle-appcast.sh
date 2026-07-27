@@ -84,9 +84,16 @@ xml_escape() {
 }
 
 SIGN_UPDATE="$(find_sign_update)"
-signature_output="$(sparkle_private_key | "$SIGN_UPDATE" "$DMG_PATH" --ed-key-file -)"
+expected_public_key="${SPARKLE_PUBLIC_KEY:-$(plutil -extract SUPublicEDKey raw -o - "$REPO_ROOT/Info.plist")}"
+private_key="$(sparkle_private_key)"
+printf '%s\n' "$private_key" |
+  xcrun swift "$SCRIPT_DIR/validate-sparkle-key.swift" "$expected_public_key"
+
+signature_output="$(printf '%s\n' "$private_key" | "$SIGN_UPDATE" "$DMG_PATH" --ed-key-file -)"
 ed_signature="$(printf '%s\n' "$signature_output" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' | sed -n '1p')"
 [[ -n "$ed_signature" ]] || fail "Unable to parse sparkle:edSignature from sign_update output"
+printf '%s\n' "$private_key" |
+  "$SIGN_UPDATE" --verify --ed-key-file - "$DMG_PATH" "$ed_signature" >/dev/null
 
 length="$(wc -c < "$DMG_PATH" | tr -d '[:space:]')"
 pub_date="$(date -u '+%a, %d %b %Y %H:%M:%S +0000')"

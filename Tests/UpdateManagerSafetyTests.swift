@@ -4,7 +4,9 @@ import Foundation
 struct UpdateManagerSafetyTests {
     static func main() throws {
         testReleaseBuildTagEligibility()
+        testUpdateBuildComparison()
         try testUpdateManagerUsesSparkleFacade()
+        try testUpdateManagerPersistsAvailableUpdate()
         try testUpdateManagerRemovedSelfInstallPipeline()
         try testAppDelegateStartsPeriodicUpdateChecks()
         try testSettingsShowsUpdatesCard()
@@ -26,6 +28,13 @@ struct UpdateManagerSafetyTests {
         precondition(!UpdateManager.isReleaseBuildTagForAutomaticChecks("v1.2.3-"))
     }
 
+    private static func testUpdateBuildComparison() {
+        precondition(UpdateManager.isCandidateBuildNewerForRestoration("32", than: "31"))
+        precondition(UpdateManager.isCandidateBuildNewerForRestoration("1.10", than: "1.9"))
+        precondition(!UpdateManager.isCandidateBuildNewerForRestoration("31", than: "31"))
+        precondition(!UpdateManager.isCandidateBuildNewerForRestoration("30", than: "31"))
+    }
+
     private static func testUpdateManagerUsesSparkleFacade() throws {
         let source = try String(contentsOfFile: "Sources/UpdateManager.swift", encoding: .utf8)
 
@@ -41,6 +50,39 @@ struct UpdateManagerSafetyTests {
         assertContains(source, "extension UpdateManager: SPUUpdaterDelegate")
         assertContains(source, "updateLastPostTranscriptionReminderVersion")
         assertContains(source, "updateLastPostTranscriptionReminderDate")
+    }
+
+    private static func testUpdateManagerPersistsAvailableUpdate() throws {
+        let source = try String(contentsOfFile: "Sources/UpdateManager.swift", encoding: .utf8)
+
+        assertContains(source, "UpdateSnapshotStore(userDefaults: .standard)")
+        assertContains(source, "restorePersistedUpdateIfAvailable()")
+        assertContains(source, "item.versionString")
+        assertContains(source, "SUSkippedVersion")
+        assertContains(source, "SUSkippedMajorVersion")
+        assertContains(source, "SUSkippedMajorSubreleaseVersion")
+        assertContains(source, "guard Self.isReleaseBuildTagForAutomaticChecks(currentBuildTag) else { return }")
+        assertContains(source, "SUStandardVersionComparator.default")
+        assertContains(source, "updateSnapshotStore.save(snapshot)")
+        assertContains(source, "updateSnapshotStore.clear()")
+        assertContains(source, "case .skip:")
+
+        let noUpdateCallback = extract(
+            source,
+            from: "func updaterDidNotFindUpdate",
+            to: "func updater(_ updater: SPUUpdater, userDidMake"
+        )
+        let abortCallback = extract(
+            source,
+            from: "func updater(_ updater: SPUUpdater, didAbortWithError",
+            to: "func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor"
+        )
+        assertContains(noUpdateCallback, "clearAvailableUpdate()")
+        assertDoesNotContain(abortCallback, "clearAvailableUpdate()")
+        assertContains(
+            source,
+            "if nsError.domain == SUSparkleErrorDomain, nsError.code == SUError.noUpdateError.rawValue {\n                clearAvailableUpdate()\n            } else if updateStatus == .idle {"
+        )
     }
 
     private static func testUpdateManagerRemovedSelfInstallPipeline() throws {

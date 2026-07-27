@@ -15,6 +15,13 @@ on:
 permissions:
   contents: write
 
+# GitHub keeps at most one running and one pending job per concurrency group.
+# Dispatch official stable releases one at a time; the shared group prevents
+# two workflows from racing to update the GitHub latest pointer.
+concurrency:
+  group: quill-official-stable-release
+  cancel-in-progress: false
+
 jobs:
   build-and-release:
     runs-on: macos-latest
@@ -34,7 +41,7 @@ jobs:
           BUILD_TAG="$(make -s print-build-tag)"
           VERSION="${TAG#v}"
 
-          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if ! [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "Release tags must use semantic versioning, for example v0.1.0." >&2
             exit 1
           fi
@@ -62,6 +69,15 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Validate stable release ordering
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/validate_stable_release.py preflight \
+            --repository "${{ github.repository }}" \
+            --candidate-version "${{ steps.version.outputs.version }}" \
+            --candidate-build "${{ steps.version.outputs.build_number }}"
 
       - name: Stamp app version
         run: |
@@ -191,6 +207,18 @@ jobs:
           files: |
             Quill.dmg
             appcast.xml
+
+      - name: Verify published latest release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/validate_stable_release.py verify-latest \
+            --repository "${{ github.repository }}" \
+            --expected-tag "${{ steps.version.outputs.tag }}" \
+            --expected-version "${{ steps.version.outputs.version }}" \
+            --expected-build "${{ steps.version.outputs.build_number }}" \
+            --attempts 12 \
+            --retry-delay 10
 
       - name: Cleanup signing artifacts
         if: always()

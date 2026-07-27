@@ -19,7 +19,9 @@ struct BuildMetadataTests {
         try testMakefileCreatesDmgWithoutFinderMetadata()
         try testSparkleEntitlementsAllowFrameworkLoading()
         try testSparkleMetadataAndBuildIntegration()
+        try testSparkleAppcastGeneratorValidatesSigningKey()
         try testReleaseWorkflowsPassBuildMetadataToMake()
+        try testStableReleaseWorkflowsEnforceMonotonicUpdates()
         try testNotarizedReleaseWorkflowIsManualByDefault()
         try testSettingsSeparatesVersionBuildAndReleaseTag()
         print("BuildMetadataTests passed")
@@ -213,8 +215,9 @@ struct BuildMetadataTests {
         assertContains(infoPlist, "CnlcVsnQ8m/2VyZD7xL4ovP/ukAJtDJY19aVlfOSoOg=")
         assertContains(infoPlist, "<key>SUEnableAutomaticChecks</key>")
         assertContains(infoPlist, "<key>SUAutomaticallyUpdate</key>")
-        assertContains(infoPlist, "<key>SUUpdateCheckInterval</key>")
+        assertContains(infoPlist, "<key>SUScheduledCheckInterval</key>")
         assertContains(infoPlist, "<integer>86400</integer>")
+        assertDoesNotContain(infoPlist, "<key>SUUpdateCheckInterval</key>")
 
         assertContains(makefile, "SPARKLE_VERSION ?= 2.9.2")
         assertContains(makefile, "swift build --product SparkleResolver")
@@ -225,6 +228,15 @@ struct BuildMetadataTests {
         assertContains(makefile, "Versions/Current/XPCServices")
         assertContains(makefile, "Versions/Current/Updater.app")
         assertContains(makefile, "Versions/Current/Autoupdate")
+    }
+
+    private static func testSparkleAppcastGeneratorValidatesSigningKey() throws {
+        let generator = try String(contentsOfFile: "scripts/generate-sparkle-appcast.sh", encoding: .utf8)
+
+        assertContains(generator, "validate-sparkle-key.swift")
+        assertContains(generator, "SUPublicEDKey")
+        assertContains(generator, "--verify --ed-key-file -")
+        assertContains(generator, #"printf '%s\n' "$private_key" |"#)
     }
 
     private static func testReleaseWorkflowsPassBuildMetadataToMake() throws {
@@ -263,6 +275,41 @@ struct BuildMetadataTests {
         assertContains(releaseWorkflow, "appcast.xml")
         assertContains(releaseWorkflow, "Quill.dmg")
         assertDoesNotContain(devReleaseWorkflow, "plutil -replace FreeFlowBuildTag")
+    }
+
+    private static func testStableReleaseWorkflowsEnforceMonotonicUpdates() throws {
+        let stableWorkflows = [
+            try String(contentsOfFile: ".github/workflows/self-signed-release.yml", encoding: .utf8),
+            try String(contentsOfFile: ".github/workflows/release.yml", encoding: .utf8),
+        ]
+        let manualWorkflow = try String(contentsOfFile: ".github/workflows/manual-release.yml", encoding: .utf8)
+        let devWorkflow = try String(contentsOfFile: ".github/workflows/dev-release.yml", encoding: .utf8)
+
+        for workflow in stableWorkflows {
+            assertContains(workflow, "group: quill-official-stable-release")
+            assertContains(workflow, "cancel-in-progress: false")
+            assertContains(workflow, "Validate stable release ordering")
+            assertContains(workflow, "scripts/validate_stable_release.py preflight")
+            assertContains(workflow, "Verify published latest release")
+            assertContains(workflow, "scripts/validate_stable_release.py verify-latest")
+            assertContains(workflow, "--attempts 12")
+            assertContains(workflow, "--retry-delay 10")
+            assertContains(workflow, #"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"#)
+            assertContains(workflow, "GITHUB_TOKEN: ${{ github.token }}")
+            assertAppearsInOrder(
+                workflow,
+                [
+                    "Validate stable release ordering",
+                    "Stamp app version",
+                    "Create tag",
+                    "Create Release",
+                    "Verify published latest release",
+                ]
+            )
+        }
+
+        assertDoesNotContain(manualWorkflow, "validate_stable_release.py")
+        assertDoesNotContain(devWorkflow, "validate_stable_release.py")
     }
 
     private static func testNotarizedReleaseWorkflowIsManualByDefault() throws {
@@ -306,6 +353,16 @@ struct BuildMetadataTests {
         }
 
         return metadata
+    }
+
+    private static func assertAppearsInOrder(_ text: String, _ markers: [String]) {
+        var searchStart = text.startIndex
+        for marker in markers {
+            guard let range = text[searchStart...].range(of: marker) else {
+                preconditionFailure("Expected content to contain \(marker) after previous markers")
+            }
+            searchStart = range.upperBound
+        }
     }
 
     private static func assertContains(_ text: String, _ expected: String) {
