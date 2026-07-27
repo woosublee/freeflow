@@ -104,14 +104,16 @@ struct NativeWhisperRuntime {
             var arguments = [
                 "-m", modelURL.path,
                 "-f", audioURL.path,
-                "-nt",
                 "-mc", "0",
                 "-oj",
                 "-of", outputBase.path
             ]
-            if let languageCode, !languageCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                arguments += ["-l", languageCode]
-            }
+            let normalizedLanguage = languageCode?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let whisperLanguage = normalizedLanguage.flatMap { language in
+                language.isEmpty ? nil : language
+            } ?? "auto"
+            arguments += ["-l", whisperLanguage]
             process.arguments = arguments
             process.environment = [
                 "PATH": "/usr/bin:/bin",
