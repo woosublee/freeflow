@@ -560,7 +560,7 @@ _test-recording: | $(TEST_BUILD_DIR)
 	@$(TEST_BUILD_DIR)/AudioImportConversionServiceTests
 	@swiftc -parse-as-library Sources/AudioWaveformHeights.swift Tests/AudioWaveformHeightsTests.swift -o $(TEST_BUILD_DIR)/AudioWaveformHeightsTests
 	@$(TEST_BUILD_DIR)/AudioWaveformHeightsTests
-	@swiftc -parse-as-library Tests/SystemAudioAppStateRoutingTests.swift -o $(TEST_BUILD_DIR)/SystemAudioAppStateRoutingTests
+	@swiftc -parse-as-library Sources/AudioInputDevice.swift Tests/SystemAudioAppStateRoutingTests.swift -o $(TEST_BUILD_DIR)/SystemAudioAppStateRoutingTests
 	@$(TEST_BUILD_DIR)/SystemAudioAppStateRoutingTests
 _test-transcription: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(FULL_SOURCE_TRANSCRIPTION_RUNNER) $(FULL_SOURCE_APP_STATE_RUNNER) $(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests | $(TEST_BUILD_DIR)
 	@$(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests

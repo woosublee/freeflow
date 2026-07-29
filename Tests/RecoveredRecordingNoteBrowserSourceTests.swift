@@ -79,14 +79,14 @@ struct RecoveredRecordingNoteBrowserSourceTests {
             from: "private var inputPickerMenu: some View {",
             to: "private var sidebarPanel: some View {"
         )
-        precondition(inputPickerMenu.contains("appState.switchActiveRecordingInput(to: newInputID)"))
-        precondition(inputPickerMenu.contains("appState.selectedMicrophoneID = newInputID"))
-        precondition(
-            inputPickerMenu.contains(
-                "disabledSourceIDs: appState.isAudioInputSelectable("
-            )
-        )
-        precondition(!inputPickerMenu.contains("if !appState.isRecording {"))
+        precondition(inputPickerMenu.contains("InputMenuCatcher(configuration:"))
+        precondition(inputPickerMenu.contains("AudioRecordingSource.allCases.map"))
+        precondition(inputPickerMenu.contains("onSelectSource: appState.selectAudioSource(withID:)"))
+        precondition(inputPickerMenu.contains("onSelectMicrophone: appState.selectMicrophoneDevice"))
+        precondition(inputPickerMenu.contains("selectedSourceID: appState.selectedAudioSourceID"))
+        precondition(inputPickerMenu.contains("selectedMicrophoneID: appState.selectedMicrophoneDeviceID"))
+        precondition(inputPickerMenu.contains("microphoneSelectionEnabled: !appState.isRecording"))
+        precondition(inputPickerMenu.contains("filter { !appState.isAudioSourceSelectable($0) }"))
     }
 
     private static func testInputMenuCatcherDisablesAndLocalizesSources(
@@ -95,16 +95,18 @@ struct RecoveredRecordingNoteBrowserSourceTests {
         let catcher = block(
             source,
             from: "final class CatcherView: NSView {",
-            to: "@objc private func pick("
+            to: "@objc private func pickSource("
         )
         // NSMenu defaults to auto-enabling every item with a valid target/action,
         // which would mask our disabled source; turn that off so isEnabled sticks.
         precondition(catcher.contains("menu.autoenablesItems = false"))
-        precondition(catcher.contains("item.isEnabled = !disabledSourceIDs.contains(option.id)"))
-        // Quill-authored source labels must be localized; real device names verbatim.
-        precondition(
-            catcher.contains("isStaticQuillName ? String(localized: String.LocalizationValue(option.name)) : option.name")
-        )
+        precondition(catcher.contains("private var configuration: AudioInputMenuConfiguration?"))
+        precondition(catcher.contains("item.isEnabled = !configuration.disabledSourceIDs.contains(option.id)"))
+        precondition(catcher.contains("item.isEnabled = configuration.microphoneSelectionEnabled"))
+        // Quill-authored labels must be localized; real device names stay verbatim.
+        precondition(catcher.contains("option.isStaticQuillName"))
+        precondition(catcher.contains("localizedCatalogString(option.name)"))
+        precondition(catcher.contains(": option.name"))
     }
 
     private static func testAudioOnlyNoteUsesDedicatedNormalState() throws {

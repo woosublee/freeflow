@@ -333,45 +333,44 @@ struct MenuBarView: View {
                 }
             }
 
-            Menu("Microphone") {
-                Button {
-                    appState.selectedMicrophoneID = AudioInputDevice.defaultMicrophoneID
-                } label: {
-                    if appState.selectedMicrophoneID == AudioInputDevice.defaultMicrophoneID || appState.selectedMicrophoneID.isEmpty {
-                        Text("✓ System Default")
-                    } else {
-                        Text("  System Default")
+            Menu("Audio Input") {
+                Menu("Audio Source") {
+                    ForEach(AudioRecordingSource.allCases) { source in
+                        Button {
+                            appState.selectAudioSource(source)
+                        } label: {
+                            let prefix = appState.selectedAudioSource == source
+                                ? "✓ "
+                                : "  "
+                            Text(verbatim: prefix + localizedCatalogString(source.titleKey))
+                        }
+                        .disabled(!appState.isAudioSourceSelectable(source))
                     }
                 }
-                Button {
-                    appState.selectedMicrophoneID = AudioInputDevice.systemAudioID
-                } label: {
-                    if appState.selectedMicrophoneID == AudioInputDevice.systemAudioID {
-                        Text("✓ System Audio")
-                    } else {
-                        Text("  System Audio")
-                    }
-                }
-                Button {
-                    appState.selectedMicrophoneID = AudioInputDevice.systemDefaultAndSystemAudioID
-                } label: {
-                    if appState.selectedMicrophoneID == AudioInputDevice.systemDefaultAndSystemAudioID {
-                        Text("✓ System Default + System Audio")
-                    } else {
-                        Text("  System Default + System Audio")
-                    }
-                }
-                ForEach(appState.availableMicrophones) { device in
+
+                Menu("Microphone") {
                     Button {
-                        appState.selectedMicrophoneID = device.uid
+                        appState.selectMicrophoneDevice(AudioInputDevice.defaultMicrophoneID)
                     } label: {
-                        if appState.selectedMicrophoneID == device.uid {
-                            Text("✓ \(device.name)")
+                        if appState.selectedMicrophoneDeviceID == AudioInputDevice.defaultMicrophoneID {
+                            Text("✓ System Default")
                         } else {
-                            Text("  \(device.name)")
+                            Text("  System Default")
+                        }
+                    }
+                    ForEach(appState.availableMicrophones) { device in
+                        Button {
+                            appState.selectMicrophoneDevice(device.uid)
+                        } label: {
+                            if appState.selectedMicrophoneDeviceID == device.uid {
+                                Text("✓ \(device.name)")
+                            } else {
+                                Text("  \(device.name)")
+                            }
                         }
                     }
                 }
+                .disabled(appState.isRecording)
             }
 
             Button("Re-run Setup...") {

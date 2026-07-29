@@ -2289,6 +2289,182 @@
         }
       }
     },
+    "Audio Input": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio Input"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "오디오 입력"
+          }
+        }
+      }
+    },
+    "Audio Source": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio Source"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "오디오 소스"
+          }
+        }
+      }
+    },
+    "Choose what Quill records.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose what Quill records."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill이 녹음할 대상을 선택하세요."
+          }
+        }
+      }
+    },
+    "Microphone + System Audio": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Microphone + System Audio"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "마이크 + 시스템 오디오"
+          }
+        }
+      }
+    },
+    "%@ + System Audio": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ + System Audio"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ + 시스템 오디오"
+          }
+        }
+      }
+    },
+    "Selected Microphone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Selected Microphone"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "선택한 마이크"
+          }
+        }
+      }
+    },
+    "Used for Microphone and Microphone + System Audio.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Used for Microphone and Microphone + System Audio."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "마이크 및 마이크 + 시스템 오디오에 사용됩니다."
+          }
+        }
+      }
+    },
+    "  Microphone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "  Microphone"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "  마이크"
+          }
+        }
+      }
+    },
+    "  Microphone + System Audio": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "  Microphone + System Audio"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "  마이크 + 시스템 오디오"
+          }
+        }
+      }
+    },
+    "✓ Microphone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "✓ Microphone"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "✓ 마이크"
+          }
+        }
+      }
+    },
+    "✓ Microphone + System Audio": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "✓ Microphone + System Audio"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "✓ 마이크 + 시스템 오디오"
+          }
+        }
+      }
+    },
     "Microphone Access": {
       "localizations": {
         "en": {
@@ -6415,34 +6591,34 @@
         }
       }
     },
-    "Apple Live is unavailable with System Default + System Audio": {
+    "Apple Live is unavailable with Microphone + System Audio": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Apple Live is unavailable with System Default + System Audio"
+            "value": "Apple Live is unavailable with Microphone + System Audio"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Apple 라이브는 시스템 기본값 + 시스템 오디오에서 사용할 수 없습니다"
+            "value": "Apple 라이브는 마이크 + 시스템 오디오에서 사용할 수 없습니다"
           }
         }
       }
     },
-    "Realtime is unavailable with System Default + System Audio": {
+    "Realtime is unavailable with Microphone + System Audio": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Realtime is unavailable with System Default + System Audio"
+            "value": "Realtime is unavailable with Microphone + System Audio"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "실시간은 시스템 기본값 + 시스템 오디오에서 사용할 수 없습니다"
+            "value": "실시간은 마이크 + 시스템 오디오에서 사용할 수 없습니다"
           }
         }
       }
@@ -7999,34 +8175,34 @@
         }
       }
     },
-    "System Default + System Audio recording needs Microphone and Screen & System Audio Recording access. Enable both in System Settings > Privacy & Security.": {
+    "Microphone + System Audio recording needs Microphone and Screen & System Audio Recording access. Enable both in System Settings > Privacy & Security.": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "System Default + System Audio recording needs Microphone and Screen & System Audio Recording access. Enable both in System Settings > Privacy & Security."
+            "value": "Microphone + System Audio recording needs Microphone and Screen & System Audio Recording access. Enable both in System Settings > Privacy & Security."
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "시스템 기본값 + 시스템 오디오 녹음에는 마이크 및 화면 및 시스템 오디오 녹음 접근 권한이 필요합니다. 시스템 설정 > 개인정보 보호 및 보안에서 두 권한을 모두 활성화하세요."
+            "value": "마이크 + 시스템 오디오 녹음에는 마이크 및 화면 및 시스템 오디오 녹음 접근 권한이 필요합니다. 시스템 설정 > 개인정보 보호 및 보안에서 두 권한을 모두 활성화하세요."
           }
         }
       }
     },
-    "System Default + System Audio Required": {
+    "Microphone + System Audio Required": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "System Default + System Audio Required"
+            "value": "Microphone + System Audio Required"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "시스템 기본값 + 시스템 오디오 필요"
+            "value": "마이크 + 시스템 오디오 필요"
           }
         }
       }

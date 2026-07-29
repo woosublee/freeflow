@@ -5,6 +5,7 @@ import os
 struct CombinedRecordingStartResult: Equatable {
     let microphoneStarted: Bool
     let systemAudioStarted: Bool
+    let microphoneUsedSystemDefaultFallback: Bool
 }
 
 struct CombinedStoppedRecordingSources: Equatable {
@@ -65,7 +66,7 @@ final class SystemDefaultAndSystemAudioRecorder: ObservableObject {
         subscribeToAudioLevelsIfNeeded()
     }
 
-    func startRecording() async throws -> CombinedRecordingStartResult {
+    func startRecording(microphoneDeviceUID: String) async throws -> CombinedRecordingStartResult {
         configureChildCallbacks()
         subscribeToAudioLevelsIfNeeded()
 
@@ -74,9 +75,13 @@ final class SystemDefaultAndSystemAudioRecorder: ObservableObject {
         }
 
         var startErrors: [Error] = []
+        var microphoneUsedSystemDefaultFallback = false
 
         do {
-            try microphoneRecorder.startRecording(deviceUID: AudioInputDevice.defaultMicrophoneID)
+            let result = try microphoneRecorder.startRecording(
+                deviceUID: microphoneDeviceUID
+            )
+            microphoneUsedSystemDefaultFallback = result.usedSystemDefaultFallback
             stateLock.withLock { state in
                 state.microphoneStarted = true
                 state.activeSources.insert(.microphone)
@@ -103,7 +108,8 @@ final class SystemDefaultAndSystemAudioRecorder: ObservableObject {
         }
         return CombinedRecordingStartResult(
             microphoneStarted: microphoneStarted,
-            systemAudioStarted: systemStarted
+            systemAudioStarted: systemStarted,
+            microphoneUsedSystemDefaultFallback: microphoneUsedSystemDefaultFallback
         )
     }
 
@@ -312,7 +318,7 @@ enum SystemDefaultAndSystemAudioRecorderError: LocalizedError {
         switch self {
         case .failedToStartAnyRecorder(let errors):
             let details = errors.map(\.localizedDescription).joined(separator: "; ")
-            return details.isEmpty ? "Could not start System Default + System Audio recording." : "Could not start System Default + System Audio recording: \(details)"
+            return details.isEmpty ? "Could not start Microphone + System Audio recording." : "Could not start Microphone + System Audio recording: \(details)"
         }
     }
 }

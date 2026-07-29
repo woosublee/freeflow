@@ -56,7 +56,8 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         let startBody = try functionBody(named: "startSelectedAudioRecorder", in: source)
         precondition(startBody.contains("makeActiveSegmentedJournalController(inputID: inputID)"))
         precondition(startBody.contains("attachSegmentedJournalSinks("))
-        precondition(startBody.contains("startPhysicalAudioRecorder(inputID: inputID)"))
+        precondition(startBody.contains("startPhysicalAudioRecorder(selection: selection)"))
+        precondition(startBody.contains("let inputID = selection.inputID"))
         precondition(startBody.contains("controller.startCheckpointing"))
         precondition(!startBody.contains("SingleSourceRecordingJournalController"))
         precondition(!startBody.contains("CombinedRecordingJournalController"))
@@ -187,7 +188,7 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         precondition(readinessGuardRange.lowerBound < switchTokenRange.lowerBound)
         let stopRange = try requiredRange(of: "stopPhysicalAudioRecorder(", in: switchBody)
         let switchRange = try requiredRange(of: "controller.switchSegment(", in: switchBody)
-        let startRange = try requiredRange(of: "startPhysicalAudioRecorder(inputID: newInputID)", in: switchBody)
+        let startRange = try requiredRange(of: "startPhysicalAudioRecorder(selection: newSelection)", in: switchBody)
         precondition(stopRange.lowerBound < switchRange.lowerBound)
         precondition(switchRange.lowerBound < startRange.lowerBound)
 
@@ -201,11 +202,11 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         precondition(offMainTeardownBody.contains("DispatchQueue.global"))
         precondition(offMainTeardownBody.contains("transcriber.cancel()"))
 
-        precondition(source.contains("func isAudioInputSelectable(_ inputID: String) -> Bool"))
-        let selectableBody = try functionBody(named: "isAudioInputSelectable", in: source)
-        precondition(selectableBody.contains("AudioInputDevice.isSystemDefaultAndSystemAudio(inputID)"))
+        precondition(source.contains("func isAudioSourceSelectable(_ source: AudioRecordingSource) -> Bool"))
+        let selectableBody = try functionBody(named: "isAudioSourceSelectable", in: source)
+        precondition(selectableBody.contains("source == .microphoneAndSystemAudio"))
+        precondition(selectableBody.contains("isRecording"))
         precondition(selectableBody.contains("isActiveRecordingUsingLiveOnlyTranscription"))
-        precondition(selectableBody.contains("transcriptionEnabled && currentNoteBrowserTranscriptionChoiceIsLiveOnly"))
         let liveOnlyBody = try body(
             startingWith: "private var isActiveRecordingUsingLiveOnlyTranscription: Bool",
             in: source
@@ -219,11 +220,10 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         precondition(choiceLiveOnlyBody.contains("return true"))
 
         let overlayOptionsBody = try functionBody(named: "recordingOverlayInputOptions", in: source)
-        precondition(
-            overlayOptionsBody.contains(
-                "isEnabled: isAudioInputSelectable(AudioInputDevice.systemDefaultAndSystemAudioID)"
-            )
-        )
+        precondition(overlayOptionsBody.contains("AudioRecordingSource.allCases.map"))
+        precondition(overlayOptionsBody.contains("isEnabled: isAudioSourceSelectable(source)"))
+        let overlayRefreshBody = try functionBody(named: "refreshOverlayInputOptions", in: source)
+        precondition(overlayRefreshBody.contains("selectedID: selectedAudioSourceID"))
         precondition(switchBody.contains("controller.terminalPersistenceFailure"))
         precondition(switchBody.contains("activeRecordingStorageFailureID == controller.recordingID"))
         precondition(switchBody.contains("finishRecordingAfterJournalPersistenceFailure("))
@@ -455,7 +455,7 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
         let begin = try body(startingWith: "private func beginRecording(", in: source)
 
-        assert(begin.contains("try await self.startSelectedAudioRecorder(inputID: audioInputID)"))
+        assert(begin.contains("try await self.startSelectedAudioRecorder(selection: audioSelection)"))
         assert(begin.contains("self.audioLevelCancellable = self.activeRecorderAudioLevelPublisher"))
     }
 

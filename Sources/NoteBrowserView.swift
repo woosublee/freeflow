@@ -552,27 +552,38 @@ struct NoteBrowserView: View {
             .contentShape(Rectangle())
             .padding(.leading, -2)
             .overlay {
-                InputMenuCatcher(
-                    sources: [
-                        (AudioInputDevice.defaultMicrophoneID, "System Default"),
-                        (AudioInputDevice.systemAudioID, "System Audio"),
-                        (AudioInputDevice.systemDefaultAndSystemAudioID, "System Default + System Audio")
-                    ],
-                    disabledSourceIDs: appState.isAudioInputSelectable(
-                        AudioInputDevice.systemDefaultAndSystemAudioID
-                    ) ? [] : [AudioInputDevice.systemDefaultAndSystemAudioID],
-                    mics: appState.isRecording
-                        ? []
-                        : appState.availableMicrophones.map { ($0.uid, $0.name) },
-                    selectedID: appState.selectedMicrophoneID,
-                    onSelect: { newInputID in
-                        if appState.isRecording {
-                            appState.switchActiveRecordingInput(to: newInputID)
-                        } else {
-                            appState.selectedMicrophoneID = newInputID
-                        }
-                    }
-                )
+                InputMenuCatcher(configuration: AudioInputMenuConfiguration(
+                    sources: AudioRecordingSource.allCases.map {
+                        AudioInputMenuOption(
+                            id: $0.id,
+                            name: $0.titleKey,
+                            isStaticQuillName: true
+                        )
+                    },
+                    disabledSourceIDs: Set(
+                        AudioRecordingSource.allCases
+                            .filter { !appState.isAudioSourceSelectable($0) }
+                            .map(\.id)
+                    ),
+                    microphones: [
+                        AudioInputMenuOption(
+                            id: AudioInputDevice.defaultMicrophoneID,
+                            name: "System Default",
+                            isStaticQuillName: true
+                        )
+                    ] + appState.availableMicrophones.map {
+                        AudioInputMenuOption(
+                            id: $0.uid,
+                            name: $0.name,
+                            isStaticQuillName: false
+                        )
+                    },
+                    selectedSourceID: appState.selectedAudioSourceID,
+                    selectedMicrophoneID: appState.selectedMicrophoneDeviceID,
+                    microphoneSelectionEnabled: !appState.isRecording,
+                    onSelectSource: appState.selectAudioSource(withID:),
+                    onSelectMicrophone: appState.selectMicrophoneDevice
+                ))
             }
             .help(
                 appState.isRecording
@@ -3026,65 +3037,77 @@ private struct LiveRecordingBadge: View {
     }
 }
 
+private struct AudioInputMenuOption {
+    let id: String
+    let name: String
+    let isStaticQuillName: Bool
+}
+
+private struct AudioInputMenuConfiguration {
+    let sources: [AudioInputMenuOption]
+    let disabledSourceIDs: Set<String>
+    let microphones: [AudioInputMenuOption]
+    let selectedSourceID: String
+    let selectedMicrophoneID: String
+    let microphoneSelectionEnabled: Bool
+    let onSelectSource: (String) -> Void
+    let onSelectMicrophone: (String) -> Void
+}
+
 /// Transparent click target that pops up a native NSMenu of audio inputs.
 /// Used so the Note Browser's chevron glyph is fully custom and the current
-/// input shows a native checkmark.
+/// source and microphone show native checkmarks.
 private struct InputMenuCatcher: NSViewRepresentable {
-    let sources: [(id: String, name: String)]
-    let disabledSourceIDs: Set<String>
-    let mics: [(id: String, name: String)]
-    let selectedID: String
-    let onSelect: (String) -> Void
+    let configuration: AudioInputMenuConfiguration
 
     func makeNSView(context: Context) -> CatcherView {
         let view = CatcherView()
-        view.apply(sources: sources, disabledSourceIDs: disabledSourceIDs, mics: mics, selectedID: selectedID, onSelect: onSelect)
+        view.apply(configuration)
         return view
     }
 
     func updateNSView(_ nsView: CatcherView, context: Context) {
-        nsView.apply(sources: sources, disabledSourceIDs: disabledSourceIDs, mics: mics, selectedID: selectedID, onSelect: onSelect)
+        nsView.apply(configuration)
     }
 
     final class CatcherView: NSView {
-        private var sources: [(id: String, name: String)] = []
-        private var disabledSourceIDs: Set<String> = []
-        private var mics: [(id: String, name: String)] = []
-        private var selectedID = ""
-        private var onSelect: ((String) -> Void)?
+        private var configuration: AudioInputMenuConfiguration?
 
         override var isFlipped: Bool { true }
         // Open the menu on the first click even when the window is in the background.
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-        func apply(
-            sources: [(id: String, name: String)],
-            disabledSourceIDs: Set<String>,
-            mics: [(id: String, name: String)],
-            selectedID: String,
-            onSelect: @escaping (String) -> Void
-        ) {
-            self.sources = sources
-            self.disabledSourceIDs = disabledSourceIDs
-            self.mics = mics
-            self.selectedID = selectedID
-            self.onSelect = onSelect
+        func apply(_ configuration: AudioInputMenuConfiguration) {
+            self.configuration = configuration
         }
 
         override func mouseDown(with event: NSEvent) {
+            guard let configuration else { return }
             let menu = NSMenu()
             // Honor our per-item isEnabled; otherwise AppKit auto-enables every
             // item whose target responds to the action, masking the disabled state.
             menu.autoenablesItems = false
-            for option in sources {
-                let item = makeItem(option, isStaticQuillName: true)
-                item.isEnabled = !disabledSourceIDs.contains(option.id)
+            menu.addItem(sectionHeader("Audio Source"))
+            for option in configuration.sources {
+                let item = makeItem(
+                    option,
+                    selectedID: configuration.selectedSourceID,
+                    action: #selector(pickSource(_:))
+                )
+                item.isEnabled = !configuration.disabledSourceIDs.contains(option.id)
                 menu.addItem(item)
             }
-            if !mics.isEmpty {
+            if !configuration.microphones.isEmpty {
                 menu.addItem(.separator())
-                for option in mics {
-                    menu.addItem(makeItem(option, isStaticQuillName: false))
+                menu.addItem(sectionHeader("Microphone"))
+                for option in configuration.microphones {
+                    let item = makeItem(
+                        option,
+                        selectedID: configuration.selectedMicrophoneID,
+                        action: #selector(pickMicrophone(_:))
+                    )
+                    item.isEnabled = configuration.microphoneSelectionEnabled
+                    menu.addItem(item)
                 }
             }
             // Flipped view: y == bounds.height is the bottom edge, so the menu
@@ -3092,21 +3115,41 @@ private struct InputMenuCatcher: NSViewRepresentable {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height + 2), in: self)
         }
 
-        // `sources` entries are Quill-authored labels ("System Default", etc.)
-        // and need localizing; `mics` entries are real device names from the
-        // system and must be shown verbatim.
-        private func makeItem(_ option: (id: String, name: String), isStaticQuillName: Bool) -> NSMenuItem {
-            let title = isStaticQuillName ? String(localized: String.LocalizationValue(option.name)) : option.name
-            let item = NSMenuItem(title: title, action: #selector(pick(_:)), keyEquivalent: "")
+        private func sectionHeader(_ title: String) -> NSMenuItem {
+            let item = NSMenuItem(
+                title: localizedCatalogString(title),
+                action: nil,
+                keyEquivalent: ""
+            )
+            item.isEnabled = false
+            return item
+        }
+
+        private func makeItem(
+            _ option: AudioInputMenuOption,
+            selectedID: String,
+            action: Selector
+        ) -> NSMenuItem {
+            let title = option.isStaticQuillName
+                ? localizedCatalogString(option.name)
+                : option.name
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
             item.representedObject = option.id
             item.state = AudioInputDevice.isSameInput(option.id, selectedID) ? .on : .off
             return item
         }
 
-        @objc private func pick(_ sender: NSMenuItem) {
-            guard let id = sender.representedObject as? String else { return }
-            onSelect?(id)
+        @objc private func pickSource(_ sender: NSMenuItem) {
+            guard let configuration,
+                  let id = sender.representedObject as? String else { return }
+            configuration.onSelectSource(id)
+        }
+
+        @objc private func pickMicrophone(_ sender: NSMenuItem) {
+            guard let configuration,
+                  let id = sender.representedObject as? String else { return }
+            configuration.onSelectMicrophone(id)
         }
     }
 }

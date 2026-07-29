@@ -6,9 +6,9 @@ import Speech
 private let speechLog = OSLog(subsystem: "com.woosublee.quill", category: "AppleSpeech")
 
 // 실시간 전사를 지원하는 모든 백엔드가 따르는 프로토콜
-protocol LiveTranscriber: AnyObject {
-    var onPartialResult: ((String) -> Void)? { get set }
-    var onAudioLevel: ((Float) -> Void)? { get set }
+protocol LiveTranscriber: AnyObject, Sendable {
+    var onPartialResult: (@Sendable (String) -> Void)? { get set }
+    var onAudioLevel: (@Sendable (Float) -> Void)? { get set }
     /// true이면 이 트랜스크라이버가 마이크 캡처와 파일 저장을 직접 처리 (AudioRecorder 불필요)
     var handlesRecording: Bool { get }
     /// finalize() 후 저장된 오디오 파일 URL (handlesRecording == true일 때만 유효)
@@ -29,27 +29,36 @@ extension TranscriptionModel {
 
 // MARK: - Apple Speech
 
-final class AppleSpeechLiveTranscriber: LiveTranscriber {
-    var onPartialResult: ((String) -> Void)?
-    var onAudioLevel: ((Float) -> Void)?
-    let handlesRecording = false
-    private(set) var recordedAudioURL: URL?
-
-    private struct CachedPCMBufferState {
-        var format: AVAudioFormat?
-        var buffer: AVAudioPCMBuffer?
+final class AppleSpeechLiveTranscriber: LiveTranscriber, @unchecked Sendable {
+    private struct State {
+        var onPartialResult: (@Sendable (String) -> Void)?
+        var onAudioLevel: (@Sendable (Float) -> Void)?
+        var recognizer: SFSpeechRecognizer?
+        var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+        var recognitionTask: SFSpeechRecognitionTask?
+        var cachedPCMFormat: AVAudioFormat?
+        var cachedPCMBuffer: AVAudioPCMBuffer?
+        var finalizeContinuation: CheckedContinuation<String, Error>?
+        var finalResult: Result<String, Error>?
+        var latestTranscript = ""
+        var cancelled = false
     }
 
-    private var recognizer: SFSpeechRecognizer?
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var recognitionTask: SFSpeechRecognitionTask?
-    private var cachedPCMBufferState = CachedPCMBufferState()
+    var onPartialResult: (@Sendable (String) -> Void)? {
+        get { stateLock.withLock { $0.onPartialResult } }
+        set { stateLock.withLock { $0.onPartialResult = newValue } }
+    }
 
-    private let lock = OSAllocatedUnfairLock(initialState: ())
+    var onAudioLevel: (@Sendable (Float) -> Void)? {
+        get { stateLock.withLock { $0.onAudioLevel } }
+        set { stateLock.withLock { $0.onAudioLevel = newValue } }
+    }
+
+    let handlesRecording = false
+    var recordedAudioURL: URL? { nil }
+
+    private let stateLock = OSAllocatedUnfairLock(initialState: State())
     private let levelNormalizerLock = OSAllocatedUnfairLock(initialState: LiveAudioLevelNormalizer())
-    private var finalizeContinuation: CheckedContinuation<String, Error>?
-    private var finalResult: Result<String, Error>?
-    private var latestTranscript: String = ""
 
     // endAudio() 후 결과가 돌아오지 않을 때 대기하는 최대 시간
     private static let finalizeTimeoutSeconds: TimeInterval = 10
@@ -67,40 +76,67 @@ final class AppleSpeechLiveTranscriber: LiveTranscriber {
             os_log(.default, log: speechLog, "recognizer not available locale=%{public}@", locale.identifier)
             throw AppleSpeechError.notAvailable(locale.identifier)
         }
-        self.recognizer = recognizer
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.addsPunctuation = true
         request.shouldReportPartialResults = true
-        self.recognitionRequest = request
+
+        let shouldStart = stateLock.withLock { state -> Bool in
+            guard !state.cancelled else { return false }
+            state.recognizer = recognizer
+            state.recognitionRequest = request
+            return true
+        }
+        guard shouldStart else { return }
 
         os_log(.default, log: speechLog,
                "recognition task starting locale=%{public}@ supportsOnDevice=%d",
                locale.identifier, recognizer.supportsOnDeviceRecognition)
-        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+        let task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             self?.handleTaskResult(result, error: error)
+        }
+
+        let shouldKeepTask = stateLock.withLock { state -> Bool in
+            guard !state.cancelled,
+                  state.recognitionRequest === request else {
+                return false
+            }
+            state.recognitionTask = task
+            return true
+        }
+        if !shouldKeepTask {
+            task.cancel()
         }
     }
 
     func appendPCM16(_ data: Data) {
-        guard let pcmBuffer = pcmBuffer(fromPCM16: data) else { return }
-        let didAppend = lock.withLock { () -> Bool in
-            guard let recognitionRequest else { return false }
+        let appendResult = stateLock.withLock { state -> (level: Float, callback: (@Sendable (Float) -> Void)?)? in
+            guard let recognitionRequest = state.recognitionRequest,
+                  let pcmBuffer = Self.fillPCMBuffer(
+                    fromPCM16: data,
+                    state: &state
+                  ) else {
+                return nil
+            }
             recognitionRequest.append(pcmBuffer)
-            return true
+            return (
+                normalizedLevel(from: pcmBuffer),
+                state.onAudioLevel
+            )
         }
-        guard didAppend else { return }
-        onAudioLevel?(normalizedLevel(from: pcmBuffer))
+        guard let appendResult else { return }
+        appendResult.callback?(appendResult.level)
     }
 
     func finalize() async throws -> String {
         os_log(.default, log: speechLog, "finalize() called")
-        lock.withLock {
-            recognitionRequest?.endAudio()
-            recognitionRequest = nil
+        let request = stateLock.withLock { state -> SFSpeechAudioBufferRecognitionRequest? in
+            defer { state.recognitionRequest = nil }
+            return state.recognitionRequest
         }
+        request?.endAudio()
 
-        if let existing = lock.withLock({ finalResult }) {
+        if let existing = stateLock.withLock({ $0.finalResult }) {
             return try existing.get()
         }
 
@@ -108,25 +144,28 @@ final class AppleSpeechLiveTranscriber: LiveTranscriber {
         return try await withThrowingTaskGroup(of: String.self) { group in
             group.addTask {
                 try await withCheckedThrowingContinuation { continuation in
-                    self.lock.withLock {
-                        if let result = self.finalResult {
-                            continuation.resume(with: result)
-                        } else {
-                            self.finalizeContinuation = continuation
+                    let result = self.stateLock.withLock { state -> Result<String, Error>? in
+                        if let result = state.finalResult {
+                            return result
                         }
+                        state.finalizeContinuation = continuation
+                        return nil
+                    }
+                    if let result {
+                        continuation.resume(with: result)
                     }
                 }
             }
             group.addTask { [weak self] in
                 try await Task.sleep(nanoseconds: UInt64(Self.finalizeTimeoutSeconds * 1_000_000_000))
                 guard let self else { return "" }
-                let latest = self.lock.withLock { self.latestTranscript }
+                let latest = self.stateLock.withLock { $0.latestTranscript }
                 os_log(.default, log: speechLog, "finalize timeout — returning latestTranscript=%{public}@", latest)
                 self.resumeAll(with: .success(latest))
                 return latest
             }
             guard let result = try await group.next() else {
-                return lock.withLock { latestTranscript }
+                return stateLock.withLock { $0.latestTranscript }
             }
             group.cancelAll()
             return result
@@ -134,16 +173,27 @@ final class AppleSpeechLiveTranscriber: LiveTranscriber {
     }
 
     func cancel() {
-        onAudioLevel?(0)
-        recognitionTask?.cancel()
-        let latest = lock.withLock { () -> String in
-            recognitionRequest = nil
-            cachedPCMBufferState.buffer = nil
-            cachedPCMBufferState.format = nil
-            return latestTranscript
+        let cancellation = stateLock.withLock { state -> (
+            task: SFSpeechRecognitionTask?,
+            callback: (@Sendable (Float) -> Void)?,
+            latestTranscript: String
+        ) in
+            state.cancelled = true
+            let result = (
+                state.recognitionTask,
+                state.onAudioLevel,
+                state.latestTranscript
+            )
+            state.recognizer = nil
+            state.recognitionRequest = nil
+            state.recognitionTask = nil
+            state.cachedPCMBuffer = nil
+            state.cachedPCMFormat = nil
+            return result
         }
-        recordedAudioURL = nil
-        resumeAll(with: .success(latest))
+        cancellation.callback?(0)
+        cancellation.task?.cancel()
+        resumeAll(with: .success(cancellation.latestTranscript))
     }
 
     private func normalizedLevel(from buffer: AVAudioPCMBuffer) -> Float {
@@ -168,36 +218,42 @@ final class AppleSpeechLiveTranscriber: LiveTranscriber {
         }
     }
 
-    private func pcmBuffer(fromPCM16 data: Data) -> AVAudioPCMBuffer? {
+    private static func fillPCMBuffer(
+        fromPCM16 data: Data,
+        state: inout State
+    ) -> AVAudioPCMBuffer? {
         let bytesPerFrame = MemoryLayout<Int16>.size
         guard !data.isEmpty, data.count % bytesPerFrame == 0 else { return nil }
         let frameCount = AVAudioFrameCount(data.count / bytesPerFrame)
         guard frameCount > 0 else { return nil }
 
-        let pcmBuffer: AVAudioPCMBuffer? = lock.withLock {
-            let sampleFormat = AVAudioFormat(
+        if state.cachedPCMFormat == nil {
+            state.cachedPCMFormat = AVAudioFormat(
                 commonFormat: .pcmFormatInt16,
                 sampleRate: 24_000,
                 channels: 1,
                 interleaved: true
             )
-            guard let sampleFormat else { return nil }
-            if cachedPCMBufferState.format == nil {
-                cachedPCMBufferState.format = sampleFormat
-            }
-            if cachedPCMBufferState.buffer == nil || cachedPCMBufferState.buffer?.frameCapacity ?? 0 < frameCount {
-                cachedPCMBufferState.buffer = AVAudioPCMBuffer(pcmFormat: sampleFormat, frameCapacity: frameCount)
-            }
-            cachedPCMBufferState.buffer?.frameLength = frameCount
-            return cachedPCMBufferState.buffer
         }
-
-        guard let pcmBuffer, let channelData = pcmBuffer.int16ChannelData?[0] else {
+        guard let format = state.cachedPCMFormat else { return nil }
+        if state.cachedPCMBuffer == nil
+            || state.cachedPCMBuffer?.frameCapacity ?? 0 < frameCount {
+            state.cachedPCMBuffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: frameCount
+            )
+        }
+        guard let pcmBuffer = state.cachedPCMBuffer,
+              let channelData = pcmBuffer.int16ChannelData?[0] else {
             return nil
         }
+        pcmBuffer.frameLength = frameCount
         data.withUnsafeBytes { rawBuffer in
             guard let baseAddress = rawBuffer.baseAddress else { return }
-            channelData.update(from: baseAddress.assumingMemoryBound(to: Int16.self), count: Int(frameCount))
+            channelData.update(
+                from: baseAddress.assumingMemoryBound(to: Int16.self),
+                count: Int(frameCount)
+            )
         }
         return pcmBuffer
     }
@@ -205,9 +261,12 @@ final class AppleSpeechLiveTranscriber: LiveTranscriber {
     private func handleTaskResult(_ result: SFSpeechRecognitionResult?, error: Error?) {
         if let result {
             let text = result.bestTranscription.formattedString
-            lock.withLock { latestTranscript = text }
+            let callback = stateLock.withLock { state -> (@Sendable (String) -> Void)? in
+                state.latestTranscript = text
+                return state.onPartialResult
+            }
             os_log(.default, log: speechLog, "result isFinal=%d text=%{public}@", result.isFinal, text)
-            onPartialResult?(text)
+            callback?(text)
             if result.isFinal {
                 resumeAll(with: .success(text))
             }
@@ -219,22 +278,22 @@ final class AppleSpeechLiveTranscriber: LiveTranscriber {
             let assistantRetryStoppedErrorCode = 203
             if nsError.code == assistantNoSpeechErrorCode || nsError.code == assistantRetryStoppedErrorCode {
                 os_log(.default, log: speechLog, "handled Apple Speech non-fatal error code=%ld", nsError.code)
-                resumeAll(with: .success(lock.withLock { latestTranscript }))
+                resumeAll(with: .success(stateLock.withLock { $0.latestTranscript }))
             } else {
                 resumeAll(with: .failure(error))
             }
         } else {
             os_log(.default, log: speechLog, "task completed with no result/error")
-            resumeAll(with: .success(lock.withLock { latestTranscript }))
+            resumeAll(with: .success(stateLock.withLock { $0.latestTranscript }))
         }
     }
 
     private func resumeAll(with result: Result<String, Error>) {
-        let continuation = lock.withLock { () -> CheckedContinuation<String, Error>? in
-            guard finalResult == nil else { return nil }
-            finalResult = result
-            defer { finalizeContinuation = nil }
-            return finalizeContinuation
+        let continuation = stateLock.withLock { state -> CheckedContinuation<String, Error>? in
+            guard state.finalResult == nil else { return nil }
+            state.finalResult = result
+            defer { state.finalizeContinuation = nil }
+            return state.finalizeContinuation
         }
         continuation?.resume(with: result)
     }

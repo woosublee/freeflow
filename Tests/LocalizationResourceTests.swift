@@ -181,7 +181,15 @@ struct LocalizationResourceTests {
         assert(settingsSource.contains("verbatimName: device.name,"))
         assert(settingsSource.contains("init(title: LocalizedStringKey"))
         assert(settingsSource.contains("init(verbatimName: String"))
-        for key in ["Auto Detect", "System Default", "System Audio", "System Default + System Audio"] {
+        assert(settingsSource.contains("SettingsCard(\"Audio Source\""))
+        assert(settingsSource.contains("ForEach(AudioRecordingSource.allCases)"))
+        assert(settingsSource.contains("catalogKey: source.titleKey"))
+        for key in [
+            "Auto Detect", "Audio Input", "Audio Source", "Microphone",
+            "System Default", "System Audio", "Microphone + System Audio",
+            "%@ + System Audio", "Choose what Quill records.",
+            "Used for Microphone and Microphone + System Audio."
+        ] {
             let localizations = (strings[key] as? [String: Any])?["localizations"] as? [String: Any]
             for language in ["en", "ko"] {
                 assert(!(((localizations?[language] as? [String: Any])?["stringUnit"] as? [String: Any])?["value"] as? String ?? "").isEmpty, "Missing \(language) input localization for \(key)")

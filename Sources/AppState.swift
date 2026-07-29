@@ -437,6 +437,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case muted(previouslyMuted: Bool)
     }
 
+    private struct RecordingAudioSelection: Equatable {
+        let inputID: String
+        let microphoneDeviceID: String
+    }
+
+    private struct PendingRecordingPermissionContext {
+        let triggerMode: RecordingTriggerMode
+        let selectionSnapshot: AppSelectionSnapshot?
+        let manualCommandRequested: Bool?
+    }
+
     private let apiKeyStorageKey = "groq_api_key"
     private let apiBaseURLStorageKey = "api_base_url"
     private let transcriptionEnabledStorageKey = "transcription_enabled"
@@ -463,6 +474,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let savedCopyAgainCustomShortcutStorageKey = "saved_copy_again_custom_shortcut"
     private let customVocabularyStorageKey = "custom_vocabulary"
     private let selectedMicrophoneStorageKey = "selected_microphone_id"
+    private let selectedMicrophoneDeviceStorageKey = "selected_microphone_device_id"
     private let customSystemPromptStorageKey = "custom_system_prompt"
     private let customContextPromptStorageKey = "custom_context_prompt"
     private let instructionExecutionGuardEnabledStorageKey = "instruction_execution_guard_enabled"
@@ -1155,7 +1167,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             let modelLabel = resolvedModelID ?? "Provider default"
             let unavailableReason = AudioInputDevice
                 .isSystemDefaultAndSystemAudio(selectedMicrophoneID)
-                ? "Realtime is unavailable with System Default + System Audio"
+                ? "Realtime is unavailable with Microphone + System Audio"
                 : nil
             return TranscriptionChoiceDisplay(
                 choice: .apiRealtime(modelID: resolvedModelID),
@@ -1193,7 +1205,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             )
         case .appleLive:
             let unavailableReason = AudioInputDevice.isSystemDefaultAndSystemAudio(selectedMicrophoneID)
-                ? "Apple Live is unavailable with System Default + System Audio"
+                ? "Apple Live is unavailable with Microphone + System Audio"
                 : nil
             return TranscriptionChoiceDisplay(
                 choice: .appleLive,
@@ -2066,10 +2078,26 @@ final class AppState: ObservableObject, @unchecked Sendable {
         didSet { setLaunchAtLogin(launchAtLogin) }
     }
 
+    /// Effective recorder route kept in the legacy storage shape for backward
+    /// compatibility: a microphone device id or one of the special source ids.
     @Published var selectedMicrophoneID: String {
         didSet {
             UserDefaults.standard.set(selectedMicrophoneID, forKey: selectedMicrophoneStorageKey)
+            if AudioInputDevice.isMicrophoneOnly(selectedMicrophoneID) {
+                let deviceID = AudioInputDevice.normalizedMicrophoneDeviceID(selectedMicrophoneID)
+                if selectedMicrophoneDeviceID != deviceID {
+                    selectedMicrophoneDeviceID = deviceID
+                }
+            }
             scheduleNoteBrowserTranscriptionModeNormalizationForSelectedInput()
+        }
+    }
+    @Published private(set) var selectedMicrophoneDeviceID: String {
+        didSet {
+            UserDefaults.standard.set(
+                selectedMicrophoneDeviceID,
+                forKey: selectedMicrophoneDeviceStorageKey
+            )
         }
     }
     @Published var availableMicrophones: [AudioDevice] = []
@@ -2146,12 +2174,87 @@ final class AppState: ObservableObject, @unchecked Sendable {
     /// transcription choice to turn off. Used by both the recording
     /// overlay's input switcher and the Note Browser's input picker.
     @MainActor
-    func isAudioInputSelectable(_ inputID: String) -> Bool {
-        guard AudioInputDevice.isSystemDefaultAndSystemAudio(inputID) else { return true }
-        if isRecording {
-            return !isActiveRecordingUsingLiveOnlyTranscription
+    func isAudioSourceSelectable(_ source: AudioRecordingSource) -> Bool {
+        guard source == .microphoneAndSystemAudio, isRecording else {
+            return true
         }
-        return !(transcriptionEnabled && currentNoteBrowserTranscriptionChoiceIsLiveOnly)
+        return !isActiveRecordingUsingLiveOnlyTranscription
+    }
+
+    @MainActor
+    func isAudioInputSelectable(_ inputID: String) -> Bool {
+        isAudioSourceSelectable(AudioRecordingSource(inputID: inputID))
+    }
+
+    @MainActor
+    var selectedAudioSource: AudioRecordingSource {
+        AudioRecordingSource(inputID: activeAudioInputID ?? selectedMicrophoneID)
+    }
+
+    @MainActor
+    var selectedAudioSourceID: String {
+        selectedAudioSource.id
+    }
+
+    @MainActor
+    func selectAudioSource(_ source: AudioRecordingSource) {
+        guard isAudioSourceSelectable(source) else { return }
+
+        let inputID = source == .microphone
+            ? selectedMicrophoneDeviceID
+            : source.id
+        if isRecording {
+            switchActiveRecordingInput(to: inputID)
+        } else {
+            selectedMicrophoneID = inputID
+        }
+    }
+
+    @MainActor
+    func selectAudioSource(withID sourceID: String) {
+        selectAudioSource(AudioRecordingSource(inputID: sourceID))
+    }
+
+    @MainActor
+    func selectMicrophoneDevice(_ deviceID: String) {
+        guard !isRecording else { return }
+        let normalizedID = AudioInputDevice.normalizedMicrophoneDeviceID(deviceID)
+        selectedMicrophoneDeviceID = normalizedID
+        if AudioInputDevice.audioSourceID(for: selectedMicrophoneID)
+            == AudioInputDevice.defaultMicrophoneID {
+            selectedMicrophoneID = normalizedID
+        }
+    }
+
+    @MainActor
+    func selectedMicrophoneDisplayName() -> String {
+        if selectedMicrophoneDeviceID == AudioInputDevice.defaultMicrophoneID {
+            return localizedCatalogString("System Default")
+        }
+        return availableMicrophones.first(where: {
+            $0.uid == selectedMicrophoneDeviceID
+        })?.name ?? localizedCatalogString("Selected Microphone")
+    }
+
+    @MainActor
+    private func currentRecordingAudioSelection() -> RecordingAudioSelection {
+        RecordingAudioSelection(
+            inputID: selectedMicrophoneID,
+            microphoneDeviceID: selectedMicrophoneDeviceID
+        )
+    }
+
+    @MainActor
+    private func accessibleCurrentRecordingAudioSelection() async -> RecordingAudioSelection? {
+        while true {
+            let selection = currentRecordingAudioSelection()
+            guard await ensureRecordingInputAccess(for: selection) else {
+                return nil
+            }
+            if selection == currentRecordingAudioSelection() {
+                return selection
+            }
+        }
     }
 
     private var activeAudioInputID: String?
@@ -2299,12 +2402,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var isCapturingShortcut = false
     private var isAwaitingMicrophonePermission = false
     private var isAwaitingSpeechRecognitionPermission = false
-    private var pendingMicrophonePermissionTriggerMode: RecordingTriggerMode?
-    private var pendingMicrophonePermissionSelectionSnapshot: AppSelectionSnapshot?
-    private var pendingMicrophonePermissionManualCommandRequested: Bool?
-    private var pendingSpeechPermissionTriggerMode: RecordingTriggerMode?
-    private var pendingSpeechPermissionSelectionSnapshot: AppSelectionSnapshot?
-    private var pendingSpeechPermissionManualCommandRequested: Bool?
+    private var pendingMicrophonePermissionContext: PendingRecordingPermissionContext?
+    private var pendingSpeechPermissionContext: PendingRecordingPermissionContext?
     private let postTranscriptionUpdateReminderDuration: TimeInterval = 7
 
     init() {
@@ -2662,7 +2761,19 @@ final class AppState: ObservableObject, @unchecked Sendable {
             )
         }
 
-        let selectedMicrophoneID = UserDefaults.standard.string(forKey: selectedMicrophoneStorageKey) ?? "default"
+        let storedInputID = AudioInputDevice.normalized(
+            UserDefaults.standard.string(forKey: selectedMicrophoneStorageKey) ?? ""
+        )
+        let storedMicrophoneDeviceID = UserDefaults.standard.string(
+            forKey: selectedMicrophoneDeviceStorageKey
+        )
+        let selectedMicrophoneDeviceID = AudioInputDevice.normalizedMicrophoneDeviceID(
+            storedMicrophoneDeviceID
+                ?? (AudioInputDevice.isMicrophoneOnly(storedInputID) ? storedInputID : nil)
+        )
+        let selectedMicrophoneID = AudioInputDevice.isSpecialInput(storedInputID)
+            ? storedInputID
+            : selectedMicrophoneDeviceID
         let shouldRestoreMutedAudio = UserDefaults.standard.bool(forKey: pendingMutedAudioRestoreStorageKey)
 
         self.localAIServerManager = localAIServerManager
@@ -2745,7 +2856,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.hasAccessibility = initialAccessibility
         self.hasScreenRecordingPermission = initialScreenCapturePermission
         self.launchAtLogin = SMAppService.mainApp.status == .enabled
+        self.selectedMicrophoneDeviceID = selectedMicrophoneDeviceID
         self.selectedMicrophoneID = selectedMicrophoneID
+        UserDefaults.standard.set(
+            selectedMicrophoneDeviceID,
+            forKey: selectedMicrophoneDeviceStorageKey
+        )
         scheduleNoteBrowserTranscriptionModeNormalizationForSelectedInput()
         self.precomputeMacros()
         Task { @MainActor [weak self] in
@@ -2791,9 +2907,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 self?.handleOverlayStopButtonPressed()
             }
         }
-        overlayManager.onSelectInput = { [weak self] inputID in
+        overlayManager.onSelectInput = { [weak self] sourceID in
             DispatchQueue.main.async {
-                self?.switchActiveRecordingInput(to: inputID)
+                self?.selectAudioSource(withID: sourceID)
             }
         }
         Task { @MainActor [weak self] in
@@ -4720,11 +4836,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func startSelectedAudioRecorder(inputID: String) async throws {
+    private func startSelectedAudioRecorder(
+        selection: RecordingAudioSelection
+    ) async throws {
+        let inputID = selection.inputID
         let controller = try makeActiveSegmentedJournalController(inputID: inputID)
         attachSegmentedJournalSinks(controller.activeSegment, inputID: inputID)
         do {
-            try await startPhysicalAudioRecorder(inputID: inputID)
+            try await startPhysicalAudioRecorder(selection: selection)
             controller.startCheckpointing { [weak self] error in
                 DispatchQueue.main.async {
                     self?.reportRecordingJournalCheckpointFailure(error)
@@ -4742,14 +4861,39 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func startPhysicalAudioRecorder(inputID: String) async throws {
-        if AudioInputDevice.isSystemDefaultAndSystemAudio(inputID) {
-            _ = try await systemDefaultAndSystemAudioRecorder.startRecording()
-        } else if AudioInputDevice.isSystemAudio(inputID) {
+    private func startPhysicalAudioRecorder(
+        selection: RecordingAudioSelection
+    ) async throws {
+        let inputID = selection.inputID
+        let microphoneUsedSystemDefaultFallback: Bool
+        switch AudioRecordingSource(inputID: inputID) {
+        case .microphone:
+            let result = try audioRecorder.startRecording(deviceUID: inputID)
+            microphoneUsedSystemDefaultFallback = result.usedSystemDefaultFallback
+        case .systemAudio:
             try await systemAudioRecorder.startRecording()
-        } else {
-            try audioRecorder.startRecording(deviceUID: inputID)
+            microphoneUsedSystemDefaultFallback = false
+        case .microphoneAndSystemAudio:
+            let result = try await systemDefaultAndSystemAudioRecorder.startRecording(
+                microphoneDeviceUID: selection.microphoneDeviceID
+            )
+            microphoneUsedSystemDefaultFallback =
+                result.microphoneUsedSystemDefaultFallback
         }
+
+        if microphoneUsedSystemDefaultFallback {
+            applySystemDefaultMicrophoneFallback(for: inputID)
+        }
+    }
+
+    @MainActor
+    private func applySystemDefaultMicrophoneFallback(for inputID: String) {
+        selectedMicrophoneDeviceID = AudioInputDevice.defaultMicrophoneID
+        if AudioInputDevice.isMicrophoneOnly(inputID) {
+            selectedMicrophoneID = AudioInputDevice.defaultMicrophoneID
+            activeAudioInputID = AudioInputDevice.defaultMicrophoneID
+        }
+        refreshOverlayInputOptions()
     }
 
     private func journalSourceRequests(
@@ -5377,6 +5521,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return
         }
 
+        let newSelection = RecordingAudioSelection(
+            inputID: newInputID,
+            microphoneDeviceID: selectedMicrophoneDeviceID
+        )
         let switchToken = UUID()
         activeInputSwitchToken = switchToken
         isActiveInputSwitchPhysicalStopInProgress = true
@@ -5437,7 +5585,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 Task { [weak self] in
                     guard let self else { return }
                     do {
-                        try await self.startPhysicalAudioRecorder(inputID: newInputID)
+                        try await self.startPhysicalAudioRecorder(selection: newSelection)
                         await MainActor.run {
                             guard self.activeInputSwitchToken == switchToken,
                                   self.isRecording else { return }
@@ -5514,7 +5662,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func recordingInputAccessErrorMessage(for inputID: String) -> String {
         let tail = "Recording continues on the current input."
         if AudioInputDevice.isSystemDefaultAndSystemAudio(inputID) {
-            return "Couldn't switch input: System Default + System Audio needs Microphone and Screen & System Audio Recording access (System Settings > Privacy & Security). \(tail)"
+            return "Couldn't switch input: Microphone + System Audio needs Microphone and Screen & System Audio Recording access (System Settings > Privacy & Security). \(tail)"
         }
         if AudioInputDevice.isSystemAudio(inputID) {
             return "Couldn't switch input: System Audio needs Screen & System Audio Recording access (System Settings > Privacy & Security). \(tail)"
@@ -5539,23 +5687,42 @@ final class AppState: ObservableObject, @unchecked Sendable {
     /// than the full hardware microphone list.
     @MainActor
     private func recordingOverlayInputOptions() -> [RecordingOverlayInputOption] {
-        [
-            RecordingOverlayInputOption(id: AudioInputDevice.defaultMicrophoneID, name: "System Default", isStaticQuillName: true),
-            RecordingOverlayInputOption(id: AudioInputDevice.systemAudioID, name: "System Audio", isStaticQuillName: true),
-            RecordingOverlayInputOption(
-                id: AudioInputDevice.systemDefaultAndSystemAudioID,
-                name: "System Default + System Audio",
-                isStaticQuillName: true,
-                isEnabled: isAudioInputSelectable(AudioInputDevice.systemDefaultAndSystemAudioID)
+        let usesSystemDefault = selectedMicrophoneDeviceID
+            == AudioInputDevice.defaultMicrophoneID
+        let microphoneName = usesSystemDefault
+            ? "Microphone"
+            : selectedMicrophoneDisplayName()
+        let combinedName = usesSystemDefault
+            ? AudioRecordingSource.microphoneAndSystemAudio.titleKey
+            : localizedCatalogFormat("%@ + System Audio", microphoneName)
+        return AudioRecordingSource.allCases.map { source in
+            let name: String
+            let isStaticQuillName: Bool
+            switch source {
+            case .microphone:
+                name = microphoneName
+                isStaticQuillName = usesSystemDefault
+            case .systemAudio:
+                name = source.titleKey
+                isStaticQuillName = true
+            case .microphoneAndSystemAudio:
+                name = combinedName
+                isStaticQuillName = usesSystemDefault
+            }
+            return RecordingOverlayInputOption(
+                id: source.id,
+                name: name,
+                isStaticQuillName: isStaticQuillName,
+                isEnabled: isAudioSourceSelectable(source)
             )
-        ]
+        }
     }
 
     @MainActor
     private func refreshOverlayInputOptions() {
         overlayManager.updateInputOptions(
             recordingOverlayInputOptions(),
-            selectedID: activeAudioInputID ?? selectedMicrophoneID
+            selectedID: selectedAudioSourceID
         )
     }
 
@@ -7487,18 +7654,21 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 activeRecordingCalendarSnapshot = nil
                 return
             }
-            let audioInputID = selectedMicrophoneID
-            guard await ensureRecordingInputAccess(for: audioInputID) else {
+            guard let audioSelection = await accessibleCurrentRecordingAudioSelection() else {
                 if !isAwaitingMicrophonePermission {
                     activeRecordingCalendarSnapshot = nil
                 }
                 return
             }
             os_log(.info, log: recordingLog, "audio input access check passed: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
-            if AudioInputDevice.isMicrophoneOnly(audioInputID) {
+            if AudioInputDevice.isMicrophoneOnly(audioSelection.inputID) {
                 applyAudioInterruptionIfNeeded()
             }
-            beginRecording(triggerMode: triggerMode, onStarted: onStarted)
+            beginRecording(
+                triggerMode: triggerMode,
+                audioSelection: audioSelection,
+                onStarted: onStarted
+            )
             os_log(.info, log: recordingLog, "startRecording() finished: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
         }
     }
@@ -7650,9 +7820,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         manualCommandRequested: Bool?
     ) {
         isAwaitingSpeechRecognitionPermission = true
-        pendingSpeechPermissionTriggerMode = triggerMode
-        pendingSpeechPermissionSelectionSnapshot = selectionSnapshot
-        pendingSpeechPermissionManualCommandRequested = manualCommandRequested
+        pendingSpeechPermissionContext = PendingRecordingPermissionContext(
+            triggerMode: triggerMode,
+            selectionSnapshot: selectionSnapshot,
+            manualCommandRequested: manualCommandRequested
+        )
         hotkeyManager.stop()
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
@@ -7683,14 +7855,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func ensureRecordingInputAccess(for inputID: String) async -> Bool {
-        if AudioInputDevice.isSystemDefaultAndSystemAudio(inputID) {
+    private func ensureRecordingInputAccess(
+        for selection: RecordingAudioSelection
+    ) async -> Bool {
+        switch AudioRecordingSource(inputID: selection.inputID) {
+        case .microphone:
+            return ensureMicrophoneAccess()
+        case .systemAudio:
+            return await ensureSystemAudioAccess()
+        case .microphoneAndSystemAudio:
             return await ensureSystemDefaultAndSystemAudioAccess()
         }
-        if AudioInputDevice.isSystemAudio(inputID) {
-            return await ensureSystemAudioAccess()
-        }
-        return ensureMicrophoneAccess()
     }
 
     @MainActor
@@ -7720,9 +7895,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func showSystemDefaultAndSystemAudioAccessError() {
-        let message = localizedCatalogString("System Default + System Audio recording needs Microphone and Screen & System Audio Recording access. Enable both in System Settings > Privacy & Security.")
+        let message = localizedCatalogString("Microphone + System Audio recording needs Microphone and Screen & System Audio Recording access. Enable both in System Settings > Privacy & Security.")
         errorMessage = message
-        statusText = localizedCatalogString("System Default + System Audio Required")
+        statusText = localizedCatalogString("Microphone + System Audio Required")
         activeRecordingTriggerMode = nil
         currentSessionIntent = .dictation
         shortcutSessionController.reset()
@@ -7766,33 +7941,31 @@ final class AppState: ObservableObject, @unchecked Sendable {
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
                     guard let strongSelf = self else { return }
-                    let pendingTriggerMode = strongSelf.pendingMicrophonePermissionTriggerMode
-                    let pendingSelectionSnapshot = strongSelf.pendingMicrophonePermissionSelectionSnapshot
-                    let pendingManualCommandRequested = strongSelf.pendingMicrophonePermissionManualCommandRequested
-                    strongSelf.pendingMicrophonePermissionTriggerMode = nil
-                    strongSelf.pendingMicrophonePermissionSelectionSnapshot = nil
-                    strongSelf.pendingMicrophonePermissionManualCommandRequested = nil
+                    let pendingContext = strongSelf.pendingMicrophonePermissionContext
+                    strongSelf.pendingMicrophonePermissionContext = nil
                     strongSelf.isAwaitingMicrophonePermission = false
                     strongSelf.restartHotkeyMonitoring()
 
-                    guard let triggerMode = pendingTriggerMode else { return }
+                    guard let pendingContext else { return }
                     if granted {
                         strongSelf.errorMessage = nil
-                        if triggerMode == .toggle {
+                        if pendingContext.triggerMode == .toggle {
                             Task { [weak strongSelf] in
                                 guard let strongSelf else { return }
                                 guard await strongSelf.prepareRecordingStart(
                                     triggerMode: .toggle,
-                                    selectionSnapshot: pendingSelectionSnapshot,
-                                    manualCommandRequested: pendingManualCommandRequested
+                                    selectionSnapshot: pendingContext.selectionSnapshot,
+                                    manualCommandRequested: pendingContext.manualCommandRequested
                                 ) else { return }
-                                let audioInputID = strongSelf.selectedMicrophoneID
-                                guard await strongSelf.ensureRecordingInputAccess(for: audioInputID) else { return }
+                                guard let audioSelection = await strongSelf.accessibleCurrentRecordingAudioSelection() else { return }
                                 strongSelf.shortcutSessionController.beginManual(mode: .toggle)
-                                if AudioInputDevice.isMicrophoneOnly(audioInputID) {
+                                if AudioInputDevice.isMicrophoneOnly(audioSelection.inputID) {
                                     strongSelf.applyAudioInterruptionIfNeeded()
                                 }
-                                strongSelf.beginRecording(triggerMode: .toggle)
+                                strongSelf.beginRecording(
+                                    triggerMode: .toggle,
+                                    audioSelection: audioSelection
+                                )
                             }
                         } else {
                             strongSelf.currentSessionIntent = .dictation
@@ -7832,9 +8005,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         manualCommandRequested: Bool?
     ) {
         isAwaitingMicrophonePermission = true
-        pendingMicrophonePermissionTriggerMode = triggerMode
-        pendingMicrophonePermissionSelectionSnapshot = selectionSnapshot
-        pendingMicrophonePermissionManualCommandRequested = manualCommandRequested
+        pendingMicrophonePermissionContext = PendingRecordingPermissionContext(
+            triggerMode: triggerMode,
+            selectionSnapshot: selectionSnapshot,
+            manualCommandRequested: manualCommandRequested
+        )
         hotkeyManager.stop()
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
@@ -7878,17 +8053,23 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func beginRecording(triggerMode: RecordingTriggerMode, onStarted: (@MainActor () -> Void)? = nil) {
+    private func beginRecording(
+        triggerMode: RecordingTriggerMode,
+        audioSelection: RecordingAudioSelection,
+        onStarted: (@MainActor () -> Void)? = nil
+    ) {
         os_log(.info, log: recordingLog, "beginRecording() entered")
         clearPendingOverlayDismissToken()
         overlayTranscriptionID = UUID()
         errorMessage = nil
-        let audioInputID = selectedMicrophoneID
+        let audioInputID = audioSelection.inputID
         activeRecordingID = AudioInputDevice.isSingleSource(audioInputID)
                 || AudioInputDevice.isSystemDefaultAndSystemAudio(audioInputID)
             ? UUID()
             : nil
-        let supportsLiveTranscription = !AudioInputDevice.isSystemDefaultAndSystemAudio(audioInputID)
+        let supportsLiveTranscription = AudioRecordingSource(
+            inputID: audioInputID
+        ).supportsLiveTranscription
         activeRecordingTranscriptionEnabled = transcriptionEnabled
         let shouldTranscribe = shouldTranscribeActiveRecording
 
@@ -7912,32 +8093,32 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 )
                 requestSpeechRecognitionAccess { [weak self] granted in
                     guard let self else { return }
-                    let pendingTriggerMode = self.pendingSpeechPermissionTriggerMode
-                    let pendingSelectionSnapshot = self.pendingSpeechPermissionSelectionSnapshot
-                    let pendingManualCommandRequested = self.pendingSpeechPermissionManualCommandRequested
-                    self.pendingSpeechPermissionTriggerMode = nil
-                    self.pendingSpeechPermissionSelectionSnapshot = nil
-                    self.pendingSpeechPermissionManualCommandRequested = nil
+                    let pendingContext = self.pendingSpeechPermissionContext
+                    self.pendingSpeechPermissionContext = nil
                     self.isAwaitingSpeechRecognitionPermission = false
                     self.restartHotkeyMonitoring()
 
-                    guard let resumedTriggerMode = pendingTriggerMode else { return }
+                    guard let pendingContext else { return }
                     if granted {
                         self.errorMessage = nil
-                        if resumedTriggerMode == .toggle {
+                        if pendingContext.triggerMode == .toggle {
                             Task { @MainActor [weak self] in
                                 guard let self else { return }
                                 guard await self.prepareRecordingStart(
                                     triggerMode: .toggle,
-                                    selectionSnapshot: pendingSelectionSnapshot,
-                                    manualCommandRequested: pendingManualCommandRequested
+                                    selectionSnapshot: pendingContext.selectionSnapshot,
+                                    manualCommandRequested: pendingContext.manualCommandRequested
                                 ) else { return }
-                                let audioInputID = self.selectedMicrophoneID
+                                guard let audioSelection = await self.accessibleCurrentRecordingAudioSelection() else { return }
                                 self.shortcutSessionController.beginManual(mode: .toggle)
-                                if AudioInputDevice.isMicrophoneOnly(audioInputID) {
+                                if AudioInputDevice.isMicrophoneOnly(audioSelection.inputID) {
                                     self.applyAudioInterruptionIfNeeded()
                                 }
-                                self.beginRecording(triggerMode: .toggle, onStarted: onStarted)
+                                self.beginRecording(
+                                    triggerMode: .toggle,
+                                    audioSelection: audioSelection,
+                                    onStarted: onStarted
+                                )
                             }
                         } else {
                             self.currentSessionIntent = .dictation
@@ -8091,7 +8272,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         }
                         self.audioRecorder.onRecordingReady?()
                     } else {
-                        try await self.startSelectedAudioRecorder(inputID: audioInputID)
+                        try await self.startSelectedAudioRecorder(selection: audioSelection)
                         let actualRecordingStartedAt = Date()
                         await MainActor.run {
                             self.markRecordingStarted(actualRecordingStartedAt)
@@ -8127,7 +8308,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 guard let self else { return }
                 let t0 = CFAbsoluteTimeGetCurrent()
                 do {
-                    try await self.startSelectedAudioRecorder(inputID: audioInputID)
+                    try await self.startSelectedAudioRecorder(selection: audioSelection)
                     let actualRecordingStartedAt = Date()
                     os_log(.info, log: recordingLog, "selected audio recorder start done: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
                     await MainActor.run {

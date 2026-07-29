@@ -3820,6 +3820,9 @@ struct InputSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 20) {
+                SettingsCard("Audio Source", icon: "waveform") {
+                    audioSourceSection
+                }
                 SettingsCard("Microphone", icon: "mic.fill") {
                     microphoneSection
                 }
@@ -3831,36 +3834,49 @@ struct InputSettingsView: View {
         }
     }
 
+    private var audioSourceSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Choose what Quill records.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            VStack(spacing: 6) {
+                ForEach(AudioRecordingSource.allCases) { source in
+                    let isEnabled = appState.isAudioSourceSelectable(source)
+                    MicrophoneOptionRow(
+                        catalogKey: source.titleKey,
+                        isSelected: appState.selectedAudioSource == source,
+                        action: { appState.selectAudioSource(source) }
+                    )
+                    .disabled(!isEnabled)
+                    .opacity(isEnabled ? 1 : 0.5)
+                }
+            }
+        }
+    }
+
     private var microphoneSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Select which audio input to use for recording.")
+            Text("Used for Microphone and Microphone + System Audio.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             VStack(spacing: 6) {
                 MicrophoneOptionRow(
                     title: "System Default",
-                    isSelected: appState.selectedMicrophoneID == AudioInputDevice.defaultMicrophoneID || appState.selectedMicrophoneID.isEmpty,
-                    action: { appState.selectedMicrophoneID = AudioInputDevice.defaultMicrophoneID }
-                )
-                MicrophoneOptionRow(
-                    title: "System Audio",
-                    isSelected: appState.selectedMicrophoneID == AudioInputDevice.systemAudioID,
-                    action: { appState.selectedMicrophoneID = AudioInputDevice.systemAudioID }
-                )
-                MicrophoneOptionRow(
-                    title: "System Default + System Audio",
-                    isSelected: appState.selectedMicrophoneID == AudioInputDevice.systemDefaultAndSystemAudioID,
-                    action: { appState.selectedMicrophoneID = AudioInputDevice.systemDefaultAndSystemAudioID }
+                    isSelected: appState.selectedMicrophoneDeviceID == AudioInputDevice.defaultMicrophoneID,
+                    action: { appState.selectMicrophoneDevice(AudioInputDevice.defaultMicrophoneID) }
                 )
                 ForEach(appState.availableMicrophones) { device in
                     MicrophoneOptionRow(
                         verbatimName: device.name,
-                        isSelected: appState.selectedMicrophoneID == device.uid,
-                        action: { appState.selectedMicrophoneID = device.uid }
+                        isSelected: appState.selectedMicrophoneDeviceID == device.uid,
+                        action: { appState.selectMicrophoneDevice(device.uid) }
                     )
                 }
             }
+            .disabled(appState.isRecording)
+            .opacity(appState.isRecording ? 0.5 : 1)
         }
         .onAppear {
             appState.refreshAvailableMicrophones()
@@ -4057,12 +4073,22 @@ struct AboutSettingsView: View {
 
 struct MicrophoneOptionRow: View {
     private let title: LocalizedStringKey?
+    private let catalogKey: String?
     private let verbatimName: String?
     let isSelected: Bool
     let action: () -> Void
 
     init(title: LocalizedStringKey, isSelected: Bool, action: @escaping () -> Void) {
         self.title = title
+        self.catalogKey = nil
+        self.verbatimName = nil
+        self.isSelected = isSelected
+        self.action = action
+    }
+
+    init(catalogKey: String, isSelected: Bool, action: @escaping () -> Void) {
+        self.title = nil
+        self.catalogKey = catalogKey
         self.verbatimName = nil
         self.isSelected = isSelected
         self.action = action
@@ -4070,6 +4096,7 @@ struct MicrophoneOptionRow: View {
 
     init(verbatimName: String, isSelected: Bool, action: @escaping () -> Void) {
         self.title = nil
+        self.catalogKey = nil
         self.verbatimName = verbatimName
         self.isSelected = isSelected
         self.action = action
@@ -4082,6 +4109,9 @@ struct MicrophoneOptionRow: View {
                     .foregroundStyle(isSelected ? .blue : .secondary)
                 if let title {
                     Text(title)
+                        .foregroundStyle(.primary)
+                } else if let catalogKey {
+                    Text(verbatim: localizedCatalogString(catalogKey))
                         .foregroundStyle(.primary)
                 } else if let verbatimName {
                     Text(verbatim: verbatimName)

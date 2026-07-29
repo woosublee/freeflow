@@ -11,9 +11,32 @@ struct PipelineHistoryCalendarMetadataTests {
         try testCalendarMetadataPersistsThroughPipelineHistoryStore()
         try testAudioOnlyRoundTripPreservesRecordingMetadata()
         try testUpsertKeepsOneRowAndUpdatesAllFields()
+        try testMultipleInMemoryStoresRemainIsolated()
         try testDeletedAssetsIncludeHistoryIDForDeleteClearAndTrim()
         testGoogleCalendarConnectionMetadataBuildsConnectedState()
         print("PipelineHistoryCalendarMetadataTests passed")
+    }
+
+    private static func testMultipleInMemoryStoresRemainIsolated() throws {
+        let stores = (0..<3).map { _ in PipelineHistoryStore(inMemory: true) }
+        let items = (0..<stores.count).map { index in
+            historyItemForAssetTest(
+                id: UUID(),
+                timestamp: Date(timeIntervalSince1970: TimeInterval(index + 1)),
+                audioFileName: "isolated-\(index).wav",
+                transcriptFileName: nil
+            )
+        }
+
+        for (store, item) in zip(stores, items) {
+            _ = try store.append(item, maxCount: 10)
+        }
+
+        for (index, store) in stores.enumerated() {
+            let storedItems = store.loadAllHistory()
+            assert(storedItems.map(\.id) == [items[index].id])
+            assert(storedItems.first?.audioFileName == "isolated-\(index).wav")
+        }
     }
 
     private static func testDeletedAssetsIncludeHistoryIDForDeleteClearAndTrim() throws {
