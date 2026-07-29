@@ -301,10 +301,14 @@ struct SettingsLocalizationTests {
     private static func testCombinedAudioSourceUnavailableReasonsLocalize() throws {
         let bundle = try compiledLocalizationBundle()
         let expected: [String: String] = [
-            "Realtime is unavailable with System Default + System Audio":
-                "실시간은 시스템 기본값 + 시스템 오디오에서 사용할 수 없습니다",
-            "Apple Live is unavailable with System Default + System Audio":
-                "Apple 라이브는 시스템 기본값 + 시스템 오디오에서 사용할 수 없습니다"
+            "Realtime is unavailable with Microphone + System Audio":
+                "실시간은 마이크 + 시스템 오디오에서 사용할 수 없습니다",
+            "Apple Live is unavailable with Microphone + System Audio":
+                "Apple 라이브는 마이크 + 시스템 오디오에서 사용할 수 없습니다",
+            "Microphone + System Audio": "마이크 + 시스템 오디오",
+            "%@ + System Audio": "%@ + 시스템 오디오",
+            "Used for Microphone and Microphone + System Audio.":
+                "마이크 및 마이크 + 시스템 오디오에 사용됩니다."
         ]
 
         for (key, korean) in expected {

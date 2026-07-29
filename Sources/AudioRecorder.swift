@@ -42,6 +42,12 @@ struct AudioDevice: Identifiable {
     }
 }
 
+struct AudioRecorderStartResult: Equatable {
+    let requestedDeviceUID: String
+    let resolvedDeviceUID: String
+    let usedSystemDefaultFallback: Bool
+}
+
 enum AudioRecorderError: LocalizedError {
     case invalidInputFormat(String)
     case missingInputDevice
@@ -162,18 +168,20 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     private func preferredCaptureDevice(
         for requestedDeviceUID: String?,
         reason: String
-    ) throws -> AVCaptureDevice {
-        guard let requestedDeviceUID, !requestedDeviceUID.isEmpty, requestedDeviceUID != "default" else {
+    ) throws -> (device: AVCaptureDevice, usedSystemDefaultFallback: Bool) {
+        guard let requestedDeviceUID,
+              !requestedDeviceUID.isEmpty,
+              requestedDeviceUID != AudioInputDevice.defaultMicrophoneID else {
             guard let device = Self.defaultCaptureDevice() else {
                 throw AudioRecorderError.missingInputDevice
             }
             os_log(.info, log: recordingLog, "%{public}@ — using system default device: %{public}@", reason, device.localizedName)
-            return device
+            return (device, false)
         }
 
         if let device = Self.captureDevice(forUID: requestedDeviceUID) {
             os_log(.info, log: recordingLog, "%{public}@ — keeping selected device: %{public}@ [uid=%{public}@]", reason, device.localizedName, device.uniqueID)
-            return device
+            return (device, false)
         }
 
         guard let fallbackDevice = Self.defaultCaptureDevice() else {
@@ -189,7 +197,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             fallbackDevice.localizedName,
             fallbackDevice.uniqueID
         )
-        return fallbackDevice
+        return (fallbackDevice, true)
     }
 
     private func installSessionObservers(for session: AVCaptureSession) {
@@ -595,10 +603,17 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         return ConversionResult(buffer: outputBuffer, status: String(describing: status))
     }
 
-    private func makeSession(deviceUID: String?, outputURL: URL) throws {
+    private func makeSession(
+        deviceUID: String?,
+        outputURL: URL
+    ) throws -> AudioRecorderStartResult {
         teardownSessionLocked()
 
-        let device = try preferredCaptureDevice(for: deviceUID, reason: "initial start")
+        let resolvedDevice = try preferredCaptureDevice(
+            for: deviceUID,
+            reason: "initial start"
+        )
+        let device = resolvedDevice.device
 
         let session = AVCaptureSession()
         let dataOutput = AVCaptureAudioDataOutput()
@@ -667,9 +682,15 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
         os_log(.info, log: recordingLog, "capture session running with device %{public}@ [uid=%{public}@]", device.localizedName, device.uniqueID)
         tempFileURL = outputURL
+        return AudioRecorderStartResult(
+            requestedDeviceUID: AudioInputDevice.normalizedMicrophoneDeviceID(deviceUID),
+            resolvedDeviceUID: device.uniqueID,
+            usedSystemDefaultFallback: resolvedDevice.usedSystemDefaultFallback
+        )
     }
 
-    func startRecording(deviceUID: String? = nil) throws {
+    @discardableResult
+    func startRecording(deviceUID: String? = nil) throws -> AudioRecorderStartResult {
         let t0 = CFAbsoluteTimeGetCurrent()
         recordingStartTime = t0
         _bufferCount.withLock { $0 = 0 }
@@ -682,11 +703,16 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         let tempDir = FileManager.default.temporaryDirectory
         let outputURL = tempDir.appendingPathComponent(UUID().uuidString + ".wav")
 
+        let startResult: AudioRecorderStartResult
         do {
-            try sessionQueue.sync {
-                try self.makeSession(deviceUID: deviceUID, outputURL: outputURL)
+            startResult = try sessionQueue.sync {
+                let result = try self.makeSession(
+                    deviceUID: deviceUID,
+                    outputURL: outputURL
+                )
                 self._recording.withLock { $0 = true }
                 self.startBufferWatchdog()
+                return result
             }
         } catch {
             if DispatchQueue.getSpecific(key: Self.sessionQueueKey) != nil {
@@ -704,6 +730,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             self.audioLevel = 0.0
         }
         os_log(.info, log: recordingLog, "startRecording() complete: %.3fms total", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
+        return startResult
     }
 
     func stopRecording(completion: @escaping (URL?) -> Void) {

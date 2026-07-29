@@ -105,6 +105,8 @@ struct AppStateTranscriptionConfigurationTests {
         await testSystemDefaultAndSystemAudioTurnsOffWithoutReadyFallback()
         await testSystemDefaultAndSystemAudioRejectsLiveModeSelections()
         await testCombinedSourceDisabledWhenQueuedLiveOnlyChoiceNotRecording()
+        await testLegacyMicrophoneSelectionSeedsDevicePreference()
+        await testMicrophoneSelectionPersistsAcrossSourceChanges()
         await testSystemDefaultAndSystemAudioNormalizesStoredAPIRealtimeOnStartup()
         await testSystemDefaultAndSystemAudioStartupTurnsOffStoredRealtimeWithoutKey()
         await testSystemDefaultAndSystemAudioStartupTurnsOffStoredAppleLiveWithoutWhisper()
@@ -1931,23 +1933,64 @@ struct AppStateTranscriptionConfigurationTests {
             precondition(!appState.isRecording)
 
             precondition(
-                !appState.isAudioInputSelectable(AudioInputDevice.systemDefaultAndSystemAudioID),
-                "combined source must be disabled while queued for a live-only model, even before recording starts"
+                appState.isAudioSourceSelectable(.microphoneAndSystemAudio),
+                "idle combined selection must remain available so transcription can normalize"
             )
-            precondition(appState.isAudioInputSelectable(AudioInputDevice.defaultMicrophoneID))
-            precondition(appState.isAudioInputSelectable(AudioInputDevice.systemAudioID))
-
-            appState.setNoteBrowserTranscriptionMode(.apiStandard)
+            appState.selectAudioSource(.microphoneAndSystemAudio)
             precondition(
-                appState.isAudioInputSelectable(AudioInputDevice.systemDefaultAndSystemAudioID),
-                "combined source is selectable again once the queued model doesn't need live streaming"
+                appState.selectedMicrophoneID
+                    == AudioInputDevice.systemDefaultAndSystemAudioID
             )
+            precondition(appState.currentNoteBrowserTranscriptionMode == .apiStandard)
+            precondition(appState.isAudioSourceSelectable(.microphone))
+            precondition(appState.isAudioSourceSelectable(.systemAudio))
+        }
+    }
 
-            appState.setNoteBrowserTranscriptionMode(.apiRealtime)
+    private static func testLegacyMicrophoneSelectionSeedsDevicePreference() async {
+        resetDefaults()
+        let defaults = UserDefaults.standard
+        defaults.set("legacy-device-uid", forKey: "selected_microphone_id")
+
+        await MainActor.run {
+            let appState = AppState()
+            precondition(appState.selectedMicrophoneDeviceID == "legacy-device-uid")
+            precondition(appState.selectedMicrophoneID == "legacy-device-uid")
+            precondition(appState.selectedAudioSourceID == AudioInputDevice.defaultMicrophoneID)
+            precondition(
+                UserDefaults.standard.string(forKey: "selected_microphone_device_id")
+                    == "legacy-device-uid"
+            )
+        }
+    }
+
+    private static func testMicrophoneSelectionPersistsAcrossSourceChanges() async {
+        resetDefaults()
+
+        await MainActor.run {
+            let appState = AppState()
             appState.transcriptionEnabled = false
+            appState.selectMicrophoneDevice("external-device-uid")
+            precondition(appState.selectedMicrophoneDeviceID == "external-device-uid")
+            precondition(appState.selectedMicrophoneID == "external-device-uid")
+
+            appState.selectAudioSource(.systemAudio)
+            precondition(appState.selectedMicrophoneID == AudioInputDevice.systemAudioID)
+            precondition(appState.selectedMicrophoneDeviceID == "external-device-uid")
+
+            appState.selectAudioSource(.microphoneAndSystemAudio)
             precondition(
-                appState.isAudioInputSelectable(AudioInputDevice.systemDefaultAndSystemAudioID),
-                "combined source is selectable when transcription is off, regardless of the remembered model"
+                appState.selectedMicrophoneID
+                    == AudioInputDevice.systemDefaultAndSystemAudioID
+            )
+            precondition(appState.selectedMicrophoneDeviceID == "external-device-uid")
+
+            appState.selectAudioSource(.microphone)
+            precondition(appState.selectedMicrophoneID == "external-device-uid")
+            precondition(appState.selectedAudioSourceID == AudioInputDevice.defaultMicrophoneID)
+            precondition(
+                UserDefaults.standard.string(forKey: "selected_microphone_device_id")
+                    == "external-device-uid"
             )
         }
     }
@@ -2653,6 +2696,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.removeObject(forKey: "preserve_exact_wording")
         defaults.removeObject(forKey: "note_browser_enabled")
         defaults.removeObject(forKey: "selected_microphone_id")
+        defaults.removeObject(forKey: "selected_microphone_device_id")
         defaults.removeObject(forKey: "realtime_streaming_enabled")
         defaults.removeObject(forKey: "hold_shortcut")
         defaults.removeObject(forKey: "toggle_shortcut")

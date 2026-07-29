@@ -13,8 +13,9 @@ struct SystemDefaultAndSystemAudioRecorderSourceTests {
         precondition(source.contains("struct CombinedRecordingStartResult: Equatable"))
         precondition(source.contains("let microphoneStarted: Bool"))
         precondition(source.contains("let systemAudioStarted: Bool"))
+        precondition(source.contains("let microphoneUsedSystemDefaultFallback: Bool"))
         precondition(source.contains("struct CombinedStoppedRecordingSources: Equatable"))
-        precondition(source.contains("func startRecording() async throws -> CombinedRecordingStartResult"))
+        precondition(source.contains("func startRecording(microphoneDeviceUID: String) async throws -> CombinedRecordingStartResult"))
         precondition(source.contains("func stopRecordingSources("))
         precondition(source.contains("completion: @escaping (CombinedStoppedRecordingSources) -> Void"))
         precondition(source.contains("func stopRecording(completion: @escaping (URL?) -> Void)"))
@@ -25,7 +26,10 @@ struct SystemDefaultAndSystemAudioRecorderSourceTests {
         precondition(source.contains("let microphoneRecorder: AudioRecorder"))
         precondition(source.contains("let systemAudioRecorder: SystemAudioRecorder"))
         precondition(source.contains("let mixdownService: AudioMixdownService"))
-        precondition(source.contains("try microphoneRecorder.startRecording(deviceUID: AudioInputDevice.defaultMicrophoneID)"))
+        precondition(source.contains("let result = try microphoneRecorder.startRecording("))
+        precondition(source.contains("deviceUID: microphoneDeviceUID"))
+        precondition(source.contains("result.usedSystemDefaultFallback"))
+        precondition(!source.contains("deviceUID: AudioInputDevice.defaultMicrophoneID"))
         precondition(source.contains("try await systemAudioRecorder.startRecording()"))
         precondition(source.contains("guard microphoneStarted || systemStarted else"))
         precondition(source.contains("return CombinedRecordingStartResult("))
@@ -34,7 +38,7 @@ struct SystemDefaultAndSystemAudioRecorderSourceTests {
         precondition(!source.contains("self?.onRecordingFailure?(error)"), "Child recorder failures should not be forwarded directly as overall failures")
         precondition(source.contains("subscribeToAudioLevelsIfNeeded()"), "startRecording should be able to restore audio level subscriptions after cleanup")
 
-        guard let startRecordingRange = source.range(of: "func startRecording() async throws"),
+        guard let startRecordingRange = source.range(of: "func startRecording(microphoneDeviceUID: String) async throws"),
               let stopRecordingRange = source.range(of: "func stopRecording(completion: @escaping (URL?) -> Void)", range: startRecordingRange.upperBound..<source.endIndex) else {
             preconditionFailure("Could not locate startRecording body")
         }

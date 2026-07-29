@@ -13,6 +13,11 @@ enum PipelineHistoryStoreError: Error {
 }
 
 final class PipelineHistoryStore {
+    /// Built once and treated as immutable after static initialization. Sharing
+    /// the schema prevents multiple entity descriptions from claiming the same
+    /// NSManagedObject subclass when several in-memory stores coexist in tests.
+    nonisolated(unsafe) private static let managedObjectModel = makeModel()
+
     private let container: NSPersistentContainer
     private let isStoreLoaded: Bool
     private let isDurableStore: Bool
@@ -22,8 +27,10 @@ final class PipelineHistoryStore {
     }
 
     init(inMemory: Bool) {
-        let model = Self.makeModel()
-        container = NSPersistentContainer(name: "PipelineHistory", managedObjectModel: model)
+        container = NSPersistentContainer(
+            name: "PipelineHistory",
+            managedObjectModel: Self.managedObjectModel
+        )
 
         if inMemory {
             let description = NSPersistentStoreDescription()
