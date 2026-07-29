@@ -7,6 +7,10 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             contentsOfFile: "Sources/AppState.swift",
             encoding: .utf8
         )
+        let appleSpeechSource = try String(
+            contentsOfFile: "Sources/AppleSpeechLiveTranscriber.swift",
+            encoding: .utf8
+        )
 
         precondition(source.contains("private let recordingJournalStore: RecordingJournalStore"))
         precondition(source.contains("private var activeSegmentedJournalController: SegmentedRecordingJournalController?"))
@@ -201,6 +205,12 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         precondition(offMainTeardownBody.contains("liveTranscriber = nil"))
         precondition(offMainTeardownBody.contains("DispatchQueue.global"))
         precondition(offMainTeardownBody.contains("transcriber.cancel()"))
+        precondition(appleSpeechSource.contains("private struct State: @unchecked Sendable"))
+        precondition(appleSpeechSource.contains("var finalizeContinuations: [CheckedContinuation<String, Error>] = []"))
+        precondition(appleSpeechSource.contains("state.finalizeContinuations.append(continuation)"))
+        precondition(appleSpeechSource.contains("for continuation in continuations"))
+        precondition(!appleSpeechSource.contains("latestTranscript=%{public}@"))
+        precondition(!appleSpeechSource.contains("text=%{public}@"))
 
         precondition(source.contains("func isAudioSourceSelectable(_ source: AudioRecordingSource) -> Bool"))
         let selectableBody = try functionBody(named: "isAudioSourceSelectable", in: source)
@@ -433,6 +443,8 @@ struct AppStateRecordingJournalIntegrationSourceTests {
 
         assert(source.contains("private var activeRecordingTranscriptionEnabled: Bool?"))
         assert(begin.contains("activeRecordingTranscriptionEnabled = transcriptionEnabled"))
+        assert(begin.contains("activeRecordingID = UUID()"))
+        assert(!begin.contains("AudioInputDevice.isSingleSource(audioInputID)"))
         assert(begin.contains("if shouldTranscribe"))
         assert(begin.contains("startRealtimeStreamingIfEnabled()"))
         assert(begin.contains("startContextCapture()"))

@@ -7950,7 +7950,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     if granted {
                         strongSelf.errorMessage = nil
                         if pendingContext.triggerMode == .toggle {
-                            Task { [weak strongSelf] in
+                            Task { @MainActor [weak strongSelf] in
                                 guard let strongSelf else { return }
                                 guard await strongSelf.prepareRecordingStart(
                                     triggerMode: .toggle,
@@ -8063,10 +8063,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         overlayTranscriptionID = UUID()
         errorMessage = nil
         let audioInputID = audioSelection.inputID
-        activeRecordingID = AudioInputDevice.isSingleSource(audioInputID)
-                || AudioInputDevice.isSystemDefaultAndSystemAudio(audioInputID)
-            ? UUID()
-            : nil
+        activeRecordingID = UUID()
         let supportsLiveTranscription = AudioRecordingSource(
             inputID: audioInputID
         ).supportsLiveTranscription

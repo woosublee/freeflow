@@ -169,7 +169,9 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         for requestedDeviceUID: String?,
         reason: String
     ) throws -> (device: AVCaptureDevice, usedSystemDefaultFallback: Bool) {
-        guard let requestedDeviceUID, !requestedDeviceUID.isEmpty, requestedDeviceUID != "default" else {
+        guard let requestedDeviceUID,
+              !requestedDeviceUID.isEmpty,
+              requestedDeviceUID != AudioInputDevice.defaultMicrophoneID else {
             guard let device = Self.defaultCaptureDevice() else {
                 throw AudioRecorderError.missingInputDevice
             }

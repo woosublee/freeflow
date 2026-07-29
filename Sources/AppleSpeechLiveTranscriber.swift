@@ -30,7 +30,7 @@ extension TranscriptionModel {
 // MARK: - Apple Speech
 
 final class AppleSpeechLiveTranscriber: LiveTranscriber, @unchecked Sendable {
-    private struct State {
+    private struct State: @unchecked Sendable {
         var onPartialResult: (@Sendable (String) -> Void)?
         var onAudioLevel: (@Sendable (Float) -> Void)?
         var recognizer: SFSpeechRecognizer?
@@ -38,7 +38,7 @@ final class AppleSpeechLiveTranscriber: LiveTranscriber, @unchecked Sendable {
         var recognitionTask: SFSpeechRecognitionTask?
         var cachedPCMFormat: AVAudioFormat?
         var cachedPCMBuffer: AVAudioPCMBuffer?
-        var finalizeContinuation: CheckedContinuation<String, Error>?
+        var finalizeContinuations: [CheckedContinuation<String, Error>] = []
         var finalResult: Result<String, Error>?
         var latestTranscript = ""
         var cancelled = false
@@ -148,7 +148,7 @@ final class AppleSpeechLiveTranscriber: LiveTranscriber, @unchecked Sendable {
                         if let result = state.finalResult {
                             return result
                         }
-                        state.finalizeContinuation = continuation
+                        state.finalizeContinuations.append(continuation)
                         return nil
                     }
                     if let result {
@@ -160,7 +160,7 @@ final class AppleSpeechLiveTranscriber: LiveTranscriber, @unchecked Sendable {
                 try await Task.sleep(nanoseconds: UInt64(Self.finalizeTimeoutSeconds * 1_000_000_000))
                 guard let self else { return "" }
                 let latest = self.stateLock.withLock { $0.latestTranscript }
-                os_log(.default, log: speechLog, "finalize timeout — returning latestTranscript=%{public}@", latest)
+                os_log(.default, log: speechLog, "finalize timeout — returning latestTranscript=%{private}@", latest)
                 self.resumeAll(with: .success(latest))
                 return latest
             }
@@ -265,7 +265,7 @@ final class AppleSpeechLiveTranscriber: LiveTranscriber, @unchecked Sendable {
                 state.latestTranscript = text
                 return state.onPartialResult
             }
-            os_log(.default, log: speechLog, "result isFinal=%d text=%{public}@", result.isFinal, text)
+            os_log(.default, log: speechLog, "result isFinal=%d text=%{private}@", result.isFinal, text)
             callback?(text)
             if result.isFinal {
                 resumeAll(with: .success(text))
@@ -289,13 +289,15 @@ final class AppleSpeechLiveTranscriber: LiveTranscriber, @unchecked Sendable {
     }
 
     private func resumeAll(with result: Result<String, Error>) {
-        let continuation = stateLock.withLock { state -> CheckedContinuation<String, Error>? in
-            guard state.finalResult == nil else { return nil }
+        let continuations = stateLock.withLock { state -> [CheckedContinuation<String, Error>] in
+            guard state.finalResult == nil else { return [] }
             state.finalResult = result
-            defer { state.finalizeContinuation = nil }
-            return state.finalizeContinuation
+            defer { state.finalizeContinuations.removeAll() }
+            return state.finalizeContinuations
         }
-        continuation?.resume(with: result)
+        for continuation in continuations {
+            continuation.resume(with: result)
+        }
     }
 }
 

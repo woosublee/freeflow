@@ -28,6 +28,8 @@ struct AudioRecorderJournalIntegrationSourceTests {
         precondition(!canonicalWriteBody.contains("manifest"))
         precondition(source.contains("struct AudioRecorderStartResult: Equatable"))
         precondition(source.contains("let usedSystemDefaultFallback: Bool"))
+        precondition(source.contains("requestedDeviceUID != AudioInputDevice.defaultMicrophoneID"))
+        precondition(!source.contains("requestedDeviceUID != \"default\""))
         precondition(source.contains("func startRecording(deviceUID: String? = nil) throws -> AudioRecorderStartResult"))
         precondition(source.contains("return AudioRecorderStartResult("))
         precondition(source.contains("func cancelRecording(completion: (() -> Void)?)"))

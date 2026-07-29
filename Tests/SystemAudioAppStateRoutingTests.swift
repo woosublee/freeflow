@@ -56,6 +56,7 @@ struct SystemAudioAppStateRoutingTests {
         precondition(source.contains("private struct PendingRecordingPermissionContext"))
         precondition(source.contains("pendingMicrophonePermissionContext"))
         precondition(source.contains("pendingSpeechPermissionContext"))
+        precondition(source.contains("Task { @MainActor [weak strongSelf] in"))
         precondition(!source.contains("pendingMicrophonePermissionAudioSelection"))
         precondition(!source.contains("pendingSpeechPermissionAudioSelection"))
 

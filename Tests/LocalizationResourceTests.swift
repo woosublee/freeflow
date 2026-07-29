@@ -184,6 +184,13 @@ struct LocalizationResourceTests {
         assert(settingsSource.contains("SettingsCard(\"Audio Source\""))
         assert(settingsSource.contains("ForEach(AudioRecordingSource.allCases)"))
         assert(settingsSource.contains("catalogKey: source.titleKey"))
+        for legacyKey in [
+            "System Default + System Audio",
+            "  System Default + System Audio",
+            "✓ System Default + System Audio"
+        ] {
+            assert(strings[legacyKey] == nil, "Unexpected legacy localization key: \(legacyKey)")
+        }
         for key in [
             "Auto Detect", "Audio Input", "Audio Source", "Microphone",
             "System Default", "System Audio", "Microphone + System Audio",

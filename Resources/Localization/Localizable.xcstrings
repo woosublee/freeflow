@@ -1569,22 +1569,6 @@
         }
       }
     },
-    "  System Default + System Audio": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "  System Default + System Audio"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "  시스템 기본값 + 시스템 오디오"
-          }
-        }
-      }
-    },
     "%@ to try again": {
       "localizations": {
         "en": {
@@ -3073,22 +3057,6 @@
         }
       }
     },
-    "System Default + System Audio": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "System Default + System Audio"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "시스템 기본값 + 시스템 오디오"
-          }
-        }
-      }
-    },
     "Tap %@": {
       "localizations": {
         "en": {
@@ -3453,22 +3421,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "✓ 시스템 기본값"
-          }
-        }
-      }
-    },
-    "✓ System Default + System Audio": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "✓ System Default + System Audio"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "✓ 시스템 기본값 + 시스템 오디오"
           }
         }
       }
