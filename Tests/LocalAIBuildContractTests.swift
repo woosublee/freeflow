@@ -6,6 +6,7 @@ struct LocalAIBuildContractTests {
         let buildScriptPath = "BuildSupport/LlamaRuntime/build-llama.cpp.sh"
         let verifierPath = "BuildSupport/LlamaRuntime/verify-llama-server.sh"
         let makefilePath = "Makefile"
+        let contextServicePath = "Sources/AppContextService.swift"
 
         let buildScript = try String(contentsOfFile: buildScriptPath, encoding: .utf8)
         try expect(
@@ -14,6 +15,7 @@ struct LocalAIBuildContractTests {
         )
         let verifier = try String(contentsOfFile: verifierPath, encoding: .utf8)
         let makefile = try String(contentsOfFile: makefilePath, encoding: .utf8)
+        let contextService = try String(contentsOfFile: contextServicePath, encoding: .utf8)
 
         try expect(buildScript.contains("-DGGML_METAL=ON"), "build explicitly enables Metal")
         try expect(buildScript.contains("-DGGML_METAL_EMBED_LIBRARY=ON"), "build explicitly embeds Metal kernels")
@@ -90,6 +92,26 @@ struct LocalAIBuildContractTests {
                     #"codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" "$$llama_helper""#
                 ),
             "staged llama-server receives its own runtime codesign invocation"
+        )
+        try expect(
+            makefile.contains("test-local-ai-integration: $(TEST_BUILD_DIR)/LocalAIIntegrationTests")
+                && makefile.contains("--ctx-size 16384")
+                && makefile.contains("LOCAL_AI_INTEGRATION_SHARD_ONE_SHA256")
+                && makefile.contains("LOCAL_AI_INTEGRATION_SHARD_TWO_SHA256")
+                && makefile.contains("[skip] Local AI integration prerequisite unavailable"),
+            "Makefile exposes a checksum-verified opt-in loopback integration target"
+        )
+        try expect(
+            makefile.contains("test-local-ai-integration > \"$$plan_file\"")
+                && makefile.contains("Tests/LocalAIIntegrationTests.swift"),
+            "test wiring plans the opt-in integration executable exactly once"
+        )
+        try expect(
+            contextService.contains("if endpoint.supportsImages")
+                && contextService.contains("\"type\": \"image_url\"")
+                && contextService.contains("\"image_url\": [\"url\": screenshotDataURL]")
+                && contextService.contains("\"text\": metadata"),
+            "Context keeps the compatible vision screenshot request shape"
         )
 
         print("LocalAIBuildContractTests passed")
