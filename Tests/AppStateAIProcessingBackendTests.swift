@@ -90,6 +90,11 @@ struct AppStateAIProcessingBackendTests {
         print("AppStateAIProcessingBackendTests passed")
     }
 
+    private static let successfulReadinessProbe: LocalAIServerManager.ReadinessProbe = { request in
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8), response)
+    }
+
     private static func testLegacyModelsMigrateToIndependentCloudChoices() async {
         resetAIProcessingDefaults()
         UserDefaults.standard.set("custom/post", forKey: "post_processing_model")
@@ -1132,6 +1137,7 @@ struct AppStateAIProcessingBackendTests {
             idleTimeout: 0,
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready },
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true }
@@ -1229,6 +1235,7 @@ struct AppStateAIProcessingBackendTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready },
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true }
@@ -1298,6 +1305,7 @@ struct AppStateAIProcessingBackendTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready },
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true }
@@ -1355,6 +1363,7 @@ struct AppStateAIProcessingBackendTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready },
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true }
@@ -2039,6 +2048,7 @@ struct AppStateAIProcessingBackendTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (TestLocalAIServerProcess(), port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready }
         )
         AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
@@ -2116,6 +2126,7 @@ struct AppStateAIProcessingBackendTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (TestLocalAIServerProcess(), port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready }
         )
         AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
@@ -2199,6 +2210,7 @@ struct AppStateAIProcessingBackendTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready },
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true },

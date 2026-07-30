@@ -15,6 +15,11 @@ struct PostProcessingBackendTests {
         print("PostProcessingBackendTests passed")
     }
 
+    private static let successfulReadinessProbe: LocalAIServerManager.ReadinessProbe = { request in
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8), response)
+    }
+
     private static func testLocalRequestUsesLoopbackWithoutAuthorization() async throws {
         let recorder = PostProcessingRequestRecorder()
         let service = makeLocalService { request in
@@ -159,6 +164,7 @@ struct PostProcessingBackendTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready }
         )
         return PostProcessingService(

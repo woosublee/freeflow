@@ -4,7 +4,11 @@ import Foundation
 @main
 struct LocalAIServerManagerTests {
     static func main() async throws {
-        try await testLazyStartForwardsPrimaryShardAndExactContextSize()
+        try await testLazyStartForwardsPrimaryShardAndModelContextWindow()
+        try await testQualityModelLaunchesWithDeclared16KContext()
+        try await testMissingContextWindowFallsBackTo8K()
+        try await testMalformedReadinessResponseTerminatesProcessWithoutPublishingRunning()
+        try await testEmptyReadinessContentTerminatesProcessWithoutPublishingRunning()
         try await testIncompletePackageRefusesLaunch()
         try await testCorruptPackageRefusesLaunch()
         try await testRuntimeValidationRecoversInterruptedReplacementBeforeLaunch()
@@ -41,7 +45,7 @@ struct LocalAIServerManagerTests {
         print("LocalAIServerManagerTests passed")
     }
 
-    private static func testLazyStartForwardsPrimaryShardAndExactContextSize() async throws {
+    private static func testLazyStartForwardsPrimaryShardAndModelContextWindow() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = LocalAIModelStore(rootDirectory: root)
@@ -51,7 +55,6 @@ struct LocalAIServerManagerTests {
         let manager = LocalAIServerManager(
             store: store,
             idleTimeout: 300,
-            contextSize: 12_345,
             launchProcess: { model, modelURL, port, contextSize in
                 launch.withValue { $0.append(LaunchRecord(modelID: model.id, modelURL: modelURL, port: port, contextSize: contextSize)) }
                 return (process, port)
@@ -60,6 +63,7 @@ struct LocalAIServerManagerTests {
                 healthChecks.withValue { $0 += 1 }
                 return true
             },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready },
             now: { Date(timeIntervalSince1970: 0) }
         )
@@ -69,10 +73,115 @@ struct LocalAIServerManagerTests {
         let records = launch.value
         try require(records.count == 1, "expected one launch")
         try require(records[0].modelURL == store.modelURL(for: multiArtifactModel), "manager must pass the store's primary-shard model URL")
-        try require(records[0].contextSize == 12_345, "configured context size was not forwarded exactly")
+        try require(records[0].contextSize == 16_384, "model capability context window was not forwarded exactly")
         try require(healthChecks.value == 1, "expected one health check")
         try require(baseURL.absoluteString.hasPrefix("http://127.0.0.1:"), "base URL must use loopback")
         try require(baseURL.absoluteString.hasSuffix("/v1"), "base URL must use the OpenAI-compatible /v1 path")
+    }
+
+    private static func testQualityModelLaunchesWithDeclared16KContext() async throws {
+        let process = FakeProcess()
+        let launch = LockedBox<[LaunchRecord]>([])
+        let manager = makeManager(
+            launchProcess: { model, modelURL, port, contextSize in
+                launch.withValue {
+                    $0.append(LaunchRecord(modelID: model.id, modelURL: modelURL, port: port, contextSize: contextSize))
+                }
+                return (process, port)
+            }
+        )
+
+        _ = try await manager.withBaseURL(for: LocalAIModelCatalog.quality) { $0 }
+
+        let records = launch.value
+        try require(records.count == 1, "quality model should launch once")
+        try require(records[0].contextSize == 16_384, "Quality Qwen launches with declared 16K context")
+    }
+
+    private static func testMissingContextWindowFallsBackTo8K() async throws {
+        let process = FakeProcess()
+        let launch = LockedBox<[LaunchRecord]>([])
+        let model = LocalAIModel(
+            id: "no-context-window",
+            displayName: "No context window",
+            description: "Test model",
+            artifacts: [
+                LocalAIModelArtifact(
+                    downloadURL: URL(string: "https://example.com/no-context-window.gguf")!,
+                    expectedFileName: "no-context-window.gguf",
+                    approximateBytes: 16,
+                    checksumSHA256: String(repeating: "0", count: 64)
+                )
+            ],
+            approximateResidentRAMBytes: 32,
+            capabilities: AIModelCapabilities(
+                features: [.postProcessing],
+                modalities: [.text],
+                recommendedContextWindow: nil
+            )
+        )
+        let manager = makeManager(
+            launchProcess: { selectedModel, modelURL, port, contextSize in
+                launch.withValue {
+                    $0.append(LaunchRecord(modelID: selectedModel.id, modelURL: modelURL, port: port, contextSize: contextSize))
+                }
+                return (process, port)
+            }
+        )
+
+        _ = try await manager.withBaseURL(for: model) { $0 }
+
+        try require(launch.value[0].contextSize == 8_192, "models without a declared context use the 8K fallback")
+    }
+
+    private static func testMalformedReadinessResponseTerminatesProcessWithoutPublishingRunning() async throws {
+        let process = FakeProcess()
+        let observedRequests = LockedBox<[URLRequest]>([])
+        let snapshots = LockedBox<[LocalAIServerManager.LifecycleSnapshot]>([])
+        let manager = makeManager(
+            launchProcess: { _, _, port, _ in (process, port) },
+            readinessProbe: { request in
+                observedRequests.withValue { $0.append(request) }
+                return (Data("not JSON".utf8), readinessResponse(for: request, statusCode: 200))
+            },
+            observeLifecycle: { snapshot in
+                snapshots.withValue { $0.append(snapshot) }
+            }
+        )
+
+        let result = await resultTask { try await manager.withBaseURL(for: testModel) { $0 } }.value
+
+        try requireStartFailed(result, "malformed readiness output must fail startup")
+        try require(process.terminateCallCount == 1, "malformed readiness output must terminate the child")
+        try require(
+            !snapshots.value.contains(where: { $0.phase == .running }),
+            "malformed readiness output must not publish a running lifecycle snapshot"
+        )
+        try assertFixedSourceFreeReadinessRequest(observedRequests.value)
+    }
+
+    private static func testEmptyReadinessContentTerminatesProcessWithoutPublishingRunning() async throws {
+        let process = FakeProcess()
+        let snapshots = LockedBox<[LocalAIServerManager.LifecycleSnapshot]>([])
+        let manager = makeManager(
+            launchProcess: { _, _, port, _ in (process, port) },
+            readinessProbe: { request in
+                let body = Data("{\"choices\":[{\"message\":{\"content\":\"\"}}]}".utf8)
+                return (body, readinessResponse(for: request, statusCode: 200))
+            },
+            observeLifecycle: { snapshot in
+                snapshots.withValue { $0.append(snapshot) }
+            }
+        )
+
+        let result = await resultTask { try await manager.withBaseURL(for: testModel) { $0 } }.value
+
+        try requireStartFailed(result, "empty readiness output must fail startup")
+        try require(process.terminateCallCount == 1, "empty readiness output must terminate the child")
+        try require(
+            !snapshots.value.contains(where: { $0.phase == .running }),
+            "empty readiness output must not publish a running lifecycle snapshot"
+        )
     }
 
     private static func testIncompletePackageRefusesLaunch() async throws {
@@ -141,7 +250,8 @@ struct LocalAIServerManagerTests {
                 launchCount.withValue { $0 += 1 }
                 return (FakeProcess(), port)
             },
-            pollHealth: { _ in true }
+            pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe
         )
 
         _ = try await manager.withBaseURL(for: model) { $0 }
@@ -1019,9 +1129,12 @@ struct LocalAIServerManagerTests {
 
     private static func makeManager(
         idleTimeout: TimeInterval = 300,
-        contextSize: Int = 8192,
         launchProcess: @escaping LocalAIServerManager.LaunchProcess,
         pollHealth: @escaping LocalAIServerManager.PollHealth = { _ in true },
+        readinessProbe: @escaping LocalAIServerManager.ReadinessProbe = { request in
+            let body = Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8)
+            return (body, readinessResponse(for: request, statusCode: 200))
+        },
         validateModel: @escaping LocalAIServerManager.ValidateModel = { _ in .ready },
         terminationGracePeriod: TimeInterval = 2,
         waitForProcessExit: @escaping LocalAIServerManager.WaitForProcessExit = { process, _ in
@@ -1036,15 +1149,59 @@ struct LocalAIServerManagerTests {
         LocalAIServerManager(
             store: LocalAIModelStore(rootDirectory: temporaryRoot()),
             idleTimeout: idleTimeout,
-            contextSize: contextSize,
             launchProcess: launchProcess,
             pollHealth: pollHealth,
+            readinessProbe: readinessProbe,
             validateModel: validateModel,
             terminationGracePeriod: terminationGracePeriod,
             waitForProcessExit: waitForProcessExit,
             now: now,
             observeLifecycle: observeLifecycle
         )
+    }
+
+    private static let successfulReadinessProbe: LocalAIServerManager.ReadinessProbe = { request in
+        let body = Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8)
+        return (body, Self.readinessResponse(for: request, statusCode: 200))
+    }
+
+    private static func readinessResponse(for request: URLRequest, statusCode: Int) -> HTTPURLResponse {
+        HTTPURLResponse(
+            url: request.url!,
+            statusCode: statusCode,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+    }
+
+    private static func assertFixedSourceFreeReadinessRequest(
+        _ requests: [URLRequest]
+    ) throws {
+        try require(requests.count == 1, "startup must perform exactly one readiness probe")
+        let request = requests[0]
+        try require(request.url?.scheme == "http", "readiness probe must use loopback HTTP")
+        try require(request.url?.host == "127.0.0.1", "readiness probe must target loopback")
+        try require(request.url?.path == "/v1/chat/completions", "readiness probe must use chat completions")
+        try require(request.httpMethod == "POST", "readiness probe must use POST")
+        try require(request.value(forHTTPHeaderField: "Authorization") == nil, "readiness probe must not send authorization")
+        guard let body = request.httpBody,
+              let payload = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let messages = payload["messages"] as? [[String: String]] else {
+            throw TestFailure("readiness probe must encode the fixed JSON request")
+        }
+        try require(payload["model"] as? String == "local", "readiness probe model must be local")
+        try require((payload["temperature"] as? NSNumber)?.intValue == 0, "readiness probe temperature must be zero")
+        try require((payload["max_completion_tokens"] as? NSNumber)?.intValue == 8, "readiness probe completion limit must be eight")
+        try require(
+            messages == [
+                ["role": "system", "content": "Reply with OK."],
+                ["role": "user", "content": "ready"]
+            ],
+            "readiness probe must contain only the fixed messages"
+        )
+        let readinessProbeContainsUserData = String(decoding: body, as: UTF8.self).contains("/Users/private")
+            || String(decoding: body, as: UTF8.self).contains("PRIVATE_TRANSCRIPT")
+        try require(!readinessProbeContainsUserData, "readiness probe contains no source data")
     }
 
     private static func resultTask(
@@ -1332,6 +1489,10 @@ private final class FakeProcess: LocalAIServerProcess, @unchecked Sendable {
         return storedTerminateCallCount
     }
 
+    func recentDiagnostics() -> LocalAIDiagnostics {
+        LocalAIDiagnostics(category: .none, trailingLines: [])
+    }
+
     func terminate() {
         let handler: (() -> Void)?
         lock.lock()
@@ -1405,6 +1566,10 @@ private final class DelayedExitProcess: LocalAIServerProcess, @unchecked Sendabl
         lock.lock()
         defer { lock.unlock() }
         return storedForceTerminateCallCount
+    }
+
+    func recentDiagnostics() -> LocalAIDiagnostics {
+        LocalAIDiagnostics(category: .none, trailingLines: [])
     }
 
     func terminate() {

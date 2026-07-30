@@ -8,6 +8,7 @@ struct QuillUserIssueTests {
         try testSeverityAndRecoveryActions()
         try testVersionedPersistenceRoundTripAndRejection()
         try testPersistedPayloadExcludesPrivateDiagnostics()
+        try testLocalIssueUsesBoundedDiagnosticCategoryAndExcerpt()
         try testMissingProviderAPIKeyFactory()
         try testCompactMessageAndSafeDetailsAreDeterministic(bundle: bundle)
         print("QuillUserIssueTests passed")
@@ -183,6 +184,28 @@ struct QuillUserIssueTests {
         let localPayload = try decodedPayloadString(localIssue.record.encodedStatus())
         try expect(!localPayload.contains("/Users/private"), "local path is private")
         try expect(!localPayload.contains("STDERR_SECRET"), "local stderr is private")
+    }
+
+    private static func testLocalIssueUsesBoundedDiagnosticCategoryAndExcerpt() throws {
+        let diagnostics = LocalAIDiagnostics(
+            category: .serverOutput,
+            trailingLines: (0..<16).map { "safe diagnostic \($0)" }
+        )
+        let issue = QuillUserIssueError.local(
+            code: .localAIStartFailed,
+            backend: "Local AI",
+            modelID: "qwen2.5-7b-instruct",
+            diagnosticCategory: diagnostics.category.rawValue,
+            diagnosticExcerpt: diagnostics.boundedExcerpt()
+        )
+
+        try expect(issue.privateDiagnostic.contains("server-output"), "local diagnostics retain their safe category")
+        try expect(issue.privateDiagnostic.contains("safe diagnostic 15"), "local diagnostics retain a trailing excerpt")
+        try expect(!issue.privateDiagnostic.contains("safe diagnostic 0"), "local diagnostics omit lines outside the bounded excerpt")
+        try expect(issue.privateDiagnostic.count <= QuillUserIssueError.diagnosticCharacterLimit, "local diagnostic excerpt is bounded")
+        let payload = try decodedPayloadString(issue.record.encodedStatus())
+        try expect(!payload.contains("server-output"), "local diagnostic category is not persisted")
+        try expect(!payload.contains("safe diagnostic 15"), "local diagnostic excerpt is not persisted")
     }
 
     private static func testMissingProviderAPIKeyFactory() throws {

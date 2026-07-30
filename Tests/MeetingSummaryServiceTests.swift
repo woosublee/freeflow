@@ -16,6 +16,11 @@ struct MeetingSummaryServiceTests {
         print("MeetingSummaryServiceTests passed")
     }
 
+    private static let successfulReadinessProbe: LocalAIServerManager.ReadinessProbe = { request in
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8), response)
+    }
+
     private static func testUserIssueMapsToSummaryDomainCodes() throws {
         let unavailableCases: [MeetingSummaryError] = [
             .requestFailed(statusCode: 500, providerCode: nil),
@@ -115,6 +120,7 @@ struct MeetingSummaryServiceTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready }
         )
         let service = MeetingSummaryService(

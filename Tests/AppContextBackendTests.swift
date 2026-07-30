@@ -23,6 +23,11 @@ struct AppContextBackendTests {
         print("AppContextBackendTests passed")
     }
 
+    private static let successfulReadinessProbe: LocalAIServerManager.ReadinessProbe = { request in
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8), response)
+    }
+
     private static func testLocalContextOmitsScreenshotAndAuthorization() async throws {
         let recorder = ContextRequestRecorder()
         let service = AppContextService(
@@ -601,6 +606,7 @@ struct AppContextBackendTests {
         LocalAIServerManager(
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready }
         )
     }

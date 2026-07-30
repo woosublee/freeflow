@@ -13,6 +13,11 @@ struct AIProcessingBackendTests {
         print("AIProcessingBackendTests passed")
     }
 
+    private static let successfulReadinessProbe: LocalAIServerManager.ReadinessProbe = { request in
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8), response)
+    }
+
     private static func testChoiceStorageRoundTripAndFallback() throws {
         let suite = "quill-ai-processing-choice-tests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -122,6 +127,7 @@ struct AIProcessingBackendTests {
                 return (process, port)
             },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready }
         )
         let executor = AIProcessingBackendExecutor(

@@ -366,6 +366,27 @@ struct QuillUserIssueError: Error, Sendable {
             privateDiagnostic: diagnostic
         )
     }
+
+    static func local(
+        code: QuillUserIssueCode,
+        backend: String,
+        modelID: String? = nil,
+        processExitCode: Int32? = nil,
+        diagnosticCategory: String,
+        diagnosticExcerpt: String
+    ) -> Self {
+        let category = "[\(diagnosticCategory)]"
+        let maximumExcerptLength = max(0, diagnosticCharacterLimit - category.count - 1)
+        let excerpt = String(diagnosticExcerpt.suffix(maximumExcerptLength))
+        let diagnostic = excerpt.isEmpty ? category : "\(category) \(excerpt)"
+        return local(
+            code: code,
+            backend: backend,
+            modelID: modelID,
+            processExitCode: processExitCode,
+            diagnostic: diagnostic
+        )
+    }
 }
 
 private extension QuillUserIssueCode {

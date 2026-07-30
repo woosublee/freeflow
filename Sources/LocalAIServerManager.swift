@@ -97,6 +97,7 @@ actor LocalAIServerManager {
         _ contextSize: Int
     ) throws -> (LocalAIServerProcess, UInt16)
     typealias PollHealth = @Sendable (_ port: UInt16) async -> Bool
+    typealias ReadinessProbe = @Sendable (URLRequest) async throws -> (Data, URLResponse)
     typealias ValidateModel = @Sendable (_ model: LocalAIModel) throws -> LocalAIInstallStatus
     typealias WaitForProcessExit = @Sendable (_ process: LocalAIServerProcess, _ timeout: TimeInterval) async -> Bool
     typealias ObserveLifecycle = @Sendable (_ snapshot: LifecycleSnapshot) -> Void
@@ -172,9 +173,9 @@ actor LocalAIServerManager {
 
     private let store: LocalAIModelStore
     private let idleTimeout: TimeInterval
-    private let contextSize: Int
     private let launchProcess: LaunchProcess
     private let pollHealth: PollHealth
+    private let readinessProbe: ReadinessProbe
     private let validateModel: ValidateModel
     private let terminationGracePeriod: TimeInterval
     private let waitForProcessExit: WaitForProcessExit
@@ -191,7 +192,6 @@ actor LocalAIServerManager {
     init(
         store: LocalAIModelStore = LocalAIModelStore(),
         idleTimeout: TimeInterval = 300,
-        contextSize: Int = 8192,
         launchProcess: @escaping LaunchProcess = { model, modelURL, port, contextSize in
             try LocalAIServerManager.defaultLaunchProcess(
                 model: model,
@@ -203,6 +203,9 @@ actor LocalAIServerManager {
         pollHealth: @escaping PollHealth = { port in
             await LocalAIServerManager.defaultPollHealth(port: port)
         },
+        readinessProbe: @escaping ReadinessProbe = { request in
+            try await LLMAPITransport.data(for: request)
+        },
         validateModel: ValidateModel? = nil,
         terminationGracePeriod: TimeInterval = 2,
         waitForProcessExit: @escaping WaitForProcessExit = { process, timeout in
@@ -213,9 +216,9 @@ actor LocalAIServerManager {
     ) {
         self.store = store
         self.idleTimeout = idleTimeout
-        self.contextSize = contextSize
         self.launchProcess = launchProcess
         self.pollHealth = pollHealth
+        self.readinessProbe = readinessProbe
         self.validateModel = validateModel ?? { model in
             try store.recoverInterruptedReplacement(for: model)
             return store.installStatus(for: model)
@@ -605,6 +608,7 @@ actor LocalAIServerManager {
 
         let modelURL = store.modelURL(for: model)
         let reservedPort = try reserveEphemeralLoopbackPort()
+        let contextSize = model.capabilities.recommendedContextWindow ?? 8_192
         let (process, launchedPort) = try launchProcess(model, modelURL, reservedPort, contextSize)
         let exitSignal = ProcessExitSignal()
         process.setTerminationHandler {
@@ -612,9 +616,11 @@ actor LocalAIServerManager {
         }
 
         let pollHealth = self.pollHealth
+        let readinessProbe = self.readinessProbe
         let healthTask = Task {
-            let isHealthy = await pollHealth(launchedPort)
-            return isHealthy && !Task.isCancelled
+            guard await pollHealth(launchedPort), !Task.isCancelled else { return false }
+            return await Self.probeReadiness(port: launchedPort, using: readinessProbe)
+                && !Task.isCancelled
         }
         let launch = LaunchState(
             token: UUID(),
@@ -680,7 +686,11 @@ actor LocalAIServerManager {
             guard current.process.isRunning else {
                 lastRequestAt = nil
                 setState(.idle)
-                throw startFailed(for: modelID, reason: "Process exited after startup")
+                throw startFailed(
+                    for: modelID,
+                    reason: "Process exited after startup",
+                    diagnostics: current.process.recentDiagnostics()
+                )
             }
             try Task.checkCancellation()
             lastRequestAt = now()
@@ -697,7 +707,11 @@ actor LocalAIServerManager {
             }
             guard isHealthy, current.launch.process.isRunning else {
                 await stopStartup(current)
-                throw startFailed(for: current.launch.modelID, reason: "Health check did not succeed")
+                throw startFailed(
+                    for: current.launch.modelID,
+                    reason: "Readiness check did not succeed",
+                    diagnostics: current.launch.process.recentDiagnostics()
+                )
             }
             try Task.checkCancellation()
             setState(.running(current.launch))
@@ -846,16 +860,57 @@ actor LocalAIServerManager {
         }
     }
 
-    private func startFailed(for modelID: String, reason: String) -> LocalAIServerManagerError {
-        .startFailed("\(reason) for model \(modelID)")
+    private func startFailed(
+        for modelID: String,
+        reason: String,
+        diagnostics: LocalAIDiagnostics = LocalAIDiagnostics(category: .none, trailingLines: [])
+    ) -> LocalAIServerManagerError {
+        let detail = "\(reason) for model \(modelID)"
+        guard diagnostics.category != .none else {
+            return .startFailed(detail)
+        }
+        let excerpt = diagnostics.boundedExcerpt()
+        guard !excerpt.isEmpty else {
+            return .startFailed("\(detail) [\(diagnostics.category.rawValue)]")
+        }
+        return .startFailed("\(detail) [\(diagnostics.category.rawValue)] \(excerpt)")
     }
 
     private static func baseURL(port: UInt16) -> URL {
         URL(string: "http://127.0.0.1:\(port)/v1")!
     }
 
+    private static func probeReadiness(
+        port: UInt16,
+        using probe: ReadinessProbe
+    ) async -> Bool {
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+        )
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data(
+            #"{"model":"local","temperature":0,"max_completion_tokens":8,"messages":[{"role":"system","content":"Reply with OK."},{"role":"user","content":"ready"}]}"#.utf8
+        )
+        do {
+            let (data, response) = try await probe(request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode),
+                  let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = payload["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any],
+                  let content = message["content"] as? String else {
+                return false
+            }
+            return !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } catch {
+            return false
+        }
+    }
+
     private static func defaultLaunchProcess(
-        model _: LocalAIModel,
+        model: LocalAIModel,
         modelURL: URL,
         port: UInt16,
         contextSize: Int
@@ -865,6 +920,7 @@ actor LocalAIServerManager {
         }
         let process = try RealLocalAIServerProcess(
             runnerURL: runnerURL,
+            model: model,
             modelURL: modelURL,
             port: port,
             contextSize: contextSize
