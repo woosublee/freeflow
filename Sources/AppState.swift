@@ -3484,6 +3484,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         }
 
+        if preferred?.isLocal == true || (preferred == nil && currentChoice.isLocal) {
+            return nil
+        }
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
@@ -3608,7 +3611,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return
         }
         if let feature {
-            setPendingLocalAIModelID(model.id, for: feature)
+            let choice = AIProcessingBackendChoice.localAI(modelID: canonicalModel.id)
+            if isAIProcessingChoiceCompatible(choice, for: feature) {
+                setPendingLocalAIModelID(model.id, for: feature)
+            } else if feature == .context {
+                disableContextCapture = true
+                updateContextModelCapabilityWarning(for: choice)
+            }
         }
         guard hasCompletedLocalAIStatusRefresh else {
             localAIDeferredInstallModelIDs.insert(model.id)
@@ -3782,12 +3791,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
             localAIInstallStates[model.id] = state
             return
         }
+        let choice = AIProcessingBackendChoice.localAI(modelID: model.id)
         for feature in waitingFeatures(for: model) {
             setPendingLocalAIModelID(nil, for: feature)
-            applyAIProcessingChoice(
-                .localAI(modelID: model.id),
-                for: feature
-            )
+            guard isAIProcessingChoiceCompatible(choice, for: feature) else {
+                setAIProcessingFeatureEnabled(false, for: feature)
+                if feature == .context {
+                    updateContextModelCapabilityWarning(for: choice)
+                }
+                continue
+            }
+            applyAIProcessingChoice(choice, for: feature)
         }
     }
 
@@ -3870,7 +3884,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             if let preferred {
                 return .localAI(modelID: preferred.id)
             }
-            return .cloud(modelID: resolvedCloudModelID(for: feature))
+            return nil
         }
     }
 
@@ -3895,19 +3909,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 continue
             }
 
+            if current.isLocal {
+                setAIProcessingFeatureEnabled(false, for: feature)
+                continue
+            }
+
             let rememberedCloudModel = resolvedCloudModelID(for: feature)
             applyAIProcessingChoice(
                 .cloud(modelID: rememberedCloudModel),
                 for: feature
             )
-            switch feature {
-            case .postProcessing:
-                disablePostProcessing = true
-            case .context:
-                disableContextCapture = true
-            case .meetingSummary:
-                disableMeetingSummary = true
-            }
+            setAIProcessingFeatureEnabled(false, for: feature)
         }
     }
 
