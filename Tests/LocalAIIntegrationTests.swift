@@ -319,6 +319,7 @@ private final class LocalQwenClient: @unchecked Sendable {
             "model": "local",
             "temperature": 0,
             "max_completion_tokens": maxCompletionTokens,
+            "max_tokens": maxCompletionTokens,
             "messages": [
                 ["role": "system", "content": system],
                 ["role": "user", "content": user]

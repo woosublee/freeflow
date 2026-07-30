@@ -1192,6 +1192,7 @@ struct LocalAIServerManagerTests {
         try require(payload["model"] as? String == "local", "readiness probe model must be local")
         try require((payload["temperature"] as? NSNumber)?.intValue == 0, "readiness probe temperature must be zero")
         try require((payload["max_completion_tokens"] as? NSNumber)?.intValue == 8, "readiness probe completion limit must be eight")
+        try require((payload["max_tokens"] as? NSNumber)?.intValue == 8, "readiness probe legacy completion limit must be eight")
         try require(
             messages == [
                 ["role": "system", "content": "Reply with OK."],

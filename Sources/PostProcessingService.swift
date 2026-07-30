@@ -878,7 +878,8 @@ Behavior:
                 endpoint: endpoint,
                 customVocabulary: customVocabulary,
                 customSystemPrompt: customSystemPrompt,
-                outputLanguage: outputLanguage
+                outputLanguage: outputLanguage,
+                localCompletionCeiling: endpoint.kind == .local ? budget.maxCompletionTokens : nil
             )
             if !result.transcript.isEmpty {
                 cleanedChunks.append(result.transcript)
@@ -910,7 +911,8 @@ Behavior:
         endpoint: AIProcessingEndpoint,
         customVocabulary: [String],
         customSystemPrompt: String = "",
-        outputLanguage: String = ""
+        outputLanguage: String = "",
+        localCompletionCeiling: Int?
     ) async throws -> PostProcessingResult {
         let url = endpoint.baseURL
             .appendingPathComponent("chat")
@@ -960,11 +962,17 @@ Model: \(model)
             ]
         ]
         let config = ModelConfiguration.config(for: model)
-        if let maxTokens = config.maxCompletionTokens {
-            payload["max_completion_tokens"] = maxTokens
-        } else if model == defaultModel {
-            payload["max_completion_tokens"] = postProcessingMaxCompletionTokens
+        if let configuredCompletionCeiling = completionCeiling(
+            for: config,
+            model: model
+        ) {
+            payload["max_completion_tokens"] = configuredCompletionCeiling
         }
+        applyLocalCompletionCompatibility(
+            to: &payload,
+            endpoint: endpoint,
+            ceiling: localCompletionCeiling
+        )
         if let effort = config.reasoningEffort {
             payload["reasoning_effort"] = effort
         } else if model == defaultModel {
@@ -1043,6 +1051,25 @@ Model: \(model)
             transcript: acceptedTranscript,
             prompt: promptForDisplay
         )
+    }
+
+    private func completionCeiling(
+        for config: ModelConfig,
+        model: String
+    ) -> Int? {
+        config.maxCompletionTokens
+            ?? (model == defaultModel ? postProcessingMaxCompletionTokens : nil)
+    }
+
+    private func applyLocalCompletionCompatibility(
+        to payload: inout [String: Any],
+        endpoint: AIProcessingEndpoint,
+        ceiling: Int?
+    ) {
+        guard endpoint.kind == .local else { return }
+        let safeCeiling = ceiling ?? postProcessingMaxCompletionTokens
+        payload["max_completion_tokens"] = safeCeiling
+        payload["max_tokens"] = safeCeiling
     }
 
     /// Detects the model echoing this service's own RAW_TRANSCRIPTION prompt
@@ -1158,11 +1185,18 @@ Model: \(model)
             ]
         ]
         let config = ModelConfiguration.config(for: model)
-        if let maxTokens = config.maxCompletionTokens {
-            payload["max_completion_tokens"] = maxTokens
-        } else if model == defaultModel {
-            payload["max_completion_tokens"] = postProcessingMaxCompletionTokens
+        let configuredCompletionCeiling = completionCeiling(
+            for: config,
+            model: model
+        )
+        if let configuredCompletionCeiling {
+            payload["max_completion_tokens"] = configuredCompletionCeiling
         }
+        applyLocalCompletionCompatibility(
+            to: &payload,
+            endpoint: endpoint,
+            ceiling: configuredCompletionCeiling
+        )
         if let effort = config.reasoningEffort {
             payload["reasoning_effort"] = effort
         } else if model == defaultModel {

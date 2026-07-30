@@ -6,6 +6,7 @@ import Foundation
 struct PostProcessingBackendTests {
     static func main() async throws {
         try await testLocalRequestUsesLoopbackWithoutAuthorization()
+        try await testCloudRequestOmitsLocalCompatibilityKey()
         try await testLocalFailureDoesNotInvokeCloudFallbackOrSetCooldown()
         try await testLocalCommandTransformUsesEndpointWithoutCloudFallback()
         try testLocalManagerErrorsMapToDedicatedIssues()
@@ -39,7 +40,44 @@ struct PostProcessingBackendTests {
         )
 
         try expect(result.transcript == "Cleaned local result.", "local result")
-        try assertLocalRequestContract(recorder, label: "cleanup")
+        try assertLocalRequestContract(
+            recorder,
+            label: "cleanup",
+            expectedCompletionCeiling: 6_144
+        )
+    }
+
+    private static func testCloudRequestOmitsLocalCompatibilityKey() async throws {
+        let recorder = PostProcessingRequestRecorder()
+        let service = PostProcessingService(
+            backendExecutor: AIProcessingBackendExecutor(
+                choice: .cloud(modelID: "primary/model"),
+                cloudBaseURL: "https://api.example.com/openai/v1",
+                cloudAPIKey: "cloud-secret"
+            ),
+            cloudFallbackModelID: nil,
+            instructionExecutionGuardEnabled: false,
+            transport: { request in
+                recorder.record(request)
+                return try successResponse(
+                    request: request,
+                    content: "Cleaned cloud result."
+                )
+            }
+        )
+
+        _ = try await service.postProcess(
+            transcript: "clean this",
+            context: testContext,
+            customVocabulary: ""
+        )
+
+        let request = try recorder.request()
+        guard let bodyData = request.httpBody,
+              let body = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
+            throw PostProcessingBackendTestFailure("cloud request body")
+        }
+        try expect(body["max_tokens"] == nil, "cloud cleanup omits the local legacy completion key")
     }
 
     private static func testLocalFailureDoesNotInvokeCloudFallbackOrSetCooldown() async throws {
@@ -53,7 +91,11 @@ struct PostProcessingBackendTests {
             )
         }
 
-        try await assertRateLimitedLocalScenario(scenario, label: "cleanup")
+        try await assertRateLimitedLocalScenario(
+            scenario,
+            label: "cleanup",
+            expectedCompletionCeiling: 6_144
+        )
     }
 
     private static func testLocalCommandTransformUsesEndpointWithoutCloudFallback() async throws {
@@ -68,7 +110,11 @@ struct PostProcessingBackendTests {
             )
         }
 
-        try await assertRateLimitedLocalScenario(scenario, label: "command")
+        try await assertRateLimitedLocalScenario(
+            scenario,
+            label: "command",
+            expectedCompletionCeiling: 4_096
+        )
     }
 
     private static func testLeakedRawTranscriptionTemplateIsTreatedAsFailure() async throws {
@@ -260,9 +306,14 @@ struct PostProcessingBackendTests {
 
     private static func assertRateLimitedLocalScenario(
         _ scenario: RateLimitedLocalScenario,
-        label: String
+        label: String,
+        expectedCompletionCeiling: Int
     ) async throws {
-        try assertLocalRequestContract(scenario.recorder, label: label)
+        try assertLocalRequestContract(
+            scenario.recorder,
+            label: label,
+            expectedCompletionCeiling: expectedCompletionCeiling
+        )
         try expect(scenario.recorder.count() == 1, "\(label) executes one local request")
         let createdCloudCooldown = await LLMCooldownManager.shared.isInCooldown(
             scenario.cooldownIdentity
@@ -272,7 +323,8 @@ struct PostProcessingBackendTests {
 
     private static func assertLocalRequestContract(
         _ recorder: PostProcessingRequestRecorder,
-        label: String
+        label: String,
+        expectedCompletionCeiling: Int
     ) throws {
         let request = try recorder.request()
         try expect(request.url?.host == "127.0.0.1", "\(label) local loopback host")
@@ -285,6 +337,14 @@ struct PostProcessingBackendTests {
             throw PostProcessingBackendTestFailure("\(label) request body")
         }
         try expect(body["model"] as? String == "local", "\(label) local request model")
+        try expect(
+            body["max_completion_tokens"] as? Int == expectedCompletionCeiling,
+            "\(label) preserves its completion ceiling"
+        )
+        try expect(
+            body["max_tokens"] as? Int == expectedCompletionCeiling,
+            "\(label) local request sends its legacy completion ceiling"
+        )
     }
 
     private static func expectFailure(

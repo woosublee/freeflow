@@ -891,7 +891,7 @@ actor LocalAIServerManager {
         request.timeoutInterval = 5
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data(
-            #"{"model":"local","temperature":0,"max_completion_tokens":8,"messages":[{"role":"system","content":"Reply with OK."},{"role":"user","content":"ready"}]}"#.utf8
+            #"{"model":"local","temperature":0,"max_completion_tokens":8,"max_tokens":8,"messages":[{"role":"system","content":"Reply with OK."},{"role":"user","content":"ready"}]}"#.utf8
         )
         do {
             let (data, response) = try await probe(request)

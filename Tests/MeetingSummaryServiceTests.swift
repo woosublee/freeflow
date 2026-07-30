@@ -113,6 +113,7 @@ struct MeetingSummaryServiceTests {
         try expect(system.contains("source quote"), "evidence contract")
         try expect(user.contains("\"feature\":\"meeting_summary_extraction\""), "summary source envelope")
         try expect(user.contains("Product Weekly"), "calendar is included in the source envelope")
+        try expect(body["max_tokens"] == nil, "cloud Summary omits the local legacy completion key")
     }
 
     private static func testLocalRequestUsesLoopbackWithoutAuthorization() async throws {
@@ -151,6 +152,14 @@ struct MeetingSummaryServiceTests {
             "local authorization omitted"
         )
         try expect(body["model"] as? String == "local", "local request model")
+        try expect(
+            body["max_completion_tokens"] as? Int == 1_024,
+            "local Summary retains the 1,024-token completion ceiling"
+        )
+        try expect(
+            body["max_tokens"] as? Int == 1_024,
+            "local Summary sends the legacy 1,024-token completion ceiling"
+        )
     }
 
     private static func testUnknownTopLevelKeyIsRejected() throws {

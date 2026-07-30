@@ -649,6 +649,9 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
                 ["role": "user", "content": prompt.user]
             ]
         ]
+        if endpoint.kind == .local {
+            payload["max_tokens"] = Self.completionCeiling
+        }
         if let effort = config.reasoningEffort {
             payload["reasoning_effort"] = effort
         }
