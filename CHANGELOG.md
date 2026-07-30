@@ -8,6 +8,16 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.31] - 2026-07-30
+
+### Added
+
+- Added independent microphone selection for Microphone and Microphone + System Audio recording, so a chosen microphone stays in use when recording alongside System Audio.
+
+### Improved
+
+- Microphone selectors now show the active macOS default input device alongside System Default, and update when the default input changes without delaying menus.
+
 ## [0.1.30] - 2026-07-27
 
 ### Fixed
