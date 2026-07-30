@@ -88,6 +88,7 @@ enum MeetingSummaryPromptFactory {
         Create a concise meeting summary draft.
         Return one JSON object and no markdown fences or commentary.
         Every overview, point, decision, action item, and question needs source evidence. Use exact source quotes; source quote text may remain in its original language.
+        Use no more than two source quotes for overview evidence. Do not repeat a source quote.
         Set owner and dueDate to null unless they are explicitly present in that action item's source quote.
         \(languageRule)
 

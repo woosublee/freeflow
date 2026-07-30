@@ -111,6 +111,10 @@ struct MeetingSummaryServiceTests {
             "cloud authorization"
         )
         try expect(system.contains("source quote"), "evidence contract")
+        try expect(
+            system.contains("Use no more than two source quotes for overview evidence."),
+            "overview evidence is bounded"
+        )
         try expect(user.contains("\"feature\":\"meeting_summary_extraction\""), "summary source envelope")
         try expect(user.contains("Product Weekly"), "calendar is included in the source envelope")
         try expect(body["max_tokens"] == nil, "cloud Summary omits the local legacy completion key")
@@ -234,7 +238,7 @@ struct MeetingSummaryServiceTests {
         let recorder = MeetingSummaryRequestRecorder()
         let tokenCounter = MeetingSummaryRecordingTokenCounter()
         let budgeter = LocalAITokenBudgeter(
-            contextWindow: 5_000,
+            contextWindow: 5_200,
             tokenCounter: tokenCounter
         )
         let service = makeCloudService(
@@ -271,7 +275,7 @@ struct MeetingSummaryServiceTests {
             let user = try string(try dictionary(messages[1])["content"])
             let rendered = "[System]\n\(system)\n\n[User]\n\(user)"
             try expect(
-                rendered.utf8.count + 1_024 + 512 <= 5_000,
+                rendered.utf8.count + 1_024 + 512 <= 5_200,
                 "every generated Summary request stays inside the injected context budget"
             )
         }
