@@ -55,6 +55,8 @@ FULL_SOURCE_TRANSCRIPTION_TESTS = \
 	Tests/TranscriptionServiceLocalIssueTests.swift \
 	Tests/PostProcessingUserIssueTests.swift \
 	Tests/PostProcessingBackendTests.swift \
+	Tests/PostProcessingOutputValidatorTests.swift \
+	Tests/PostProcessingChunkingTests.swift \
 	Tests/AppContextBackendTests.swift \
 	Tests/MeetingSummaryServiceTests.swift
 FULL_SOURCE_APP_STATE_TESTS = \

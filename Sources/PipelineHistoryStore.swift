@@ -284,6 +284,7 @@ final class PipelineHistoryStore {
         entity.contextScreenshotDataURL = item.contextScreenshotDataURL
         entity.contextScreenshotStatus = item.contextScreenshotStatus
         entity.postProcessingStatus = item.postProcessingStatus
+        entity.aiProcessingOutcome = item.aiProcessingOutcome
         entity.debugStatus = item.debugStatus
         entity.customVocabulary = item.customVocabulary
         entity.customSystemPrompt = item.customSystemPrompt
@@ -386,6 +387,7 @@ final class PipelineHistoryStore {
             contextScreenshotDataURL: entity.contextScreenshotDataURL,
             contextScreenshotStatus: entity.contextScreenshotStatus ?? "available (image)",
             postProcessingStatus: entity.postProcessingStatus ?? "",
+            aiProcessingOutcome: entity.aiProcessingOutcome ?? "succeeded",
             debugStatus: entity.debugStatus ?? "",
             customVocabulary: entity.customVocabulary ?? "",
             customSystemPrompt: entity.customSystemPrompt ?? "",
@@ -430,6 +432,7 @@ final class PipelineHistoryStore {
             makeAttribute(name: "contextScreenshotDataURL", type: .stringAttributeType, isOptional: true),
             makeAttribute(name: "contextScreenshotStatus", type: .stringAttributeType, isOptional: false),
             makeAttribute(name: "postProcessingStatus", type: .stringAttributeType, isOptional: false),
+            makeAttribute(name: "aiProcessingOutcome", type: .stringAttributeType, isOptional: true),
             makeAttribute(name: "debugStatus", type: .stringAttributeType, isOptional: false),
             makeAttribute(name: "customVocabulary", type: .stringAttributeType, isOptional: false),
             makeAttribute(name: "customSystemPrompt", type: .stringAttributeType, isOptional: false, defaultValue: ""),
@@ -486,6 +489,7 @@ final class PipelineHistoryEntry: NSManagedObject {
     @NSManaged var contextScreenshotDataURL: String?
     @NSManaged var contextScreenshotStatus: String?
     @NSManaged var postProcessingStatus: String?
+    @NSManaged var aiProcessingOutcome: String?
     @NSManaged var debugStatus: String?
     @NSManaged var customVocabulary: String?
     @NSManaged var customSystemPrompt: String?

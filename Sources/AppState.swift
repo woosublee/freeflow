@@ -258,6 +258,7 @@ struct StoppedTranscriptionCompletionSummary {
     let processingStatus: String
     let shouldPressEnterAfterPaste: Bool
     let shouldPersistRawDictationFallback: Bool
+    let aiProcessingOutcome: AIProcessingOutcome
 
     init(
         rawTranscript: String,
@@ -265,7 +266,8 @@ struct StoppedTranscriptionCompletionSummary {
         prompt: String,
         processingStatus: String,
         shouldPressEnterAfterPaste: Bool,
-        outcomeWasPostProcessingFailedFallback: Bool
+        outcomeWasPostProcessingFailedFallback: Bool,
+        aiProcessingOutcome: AIProcessingOutcome = .succeeded
     ) {
         self.rawTranscript = rawTranscript
         self.finalTranscript = finalTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -273,6 +275,7 @@ struct StoppedTranscriptionCompletionSummary {
         self.processingStatus = processingStatus
         self.shouldPressEnterAfterPaste = shouldPressEnterAfterPaste
         self.shouldPersistRawDictationFallback = outcomeWasPostProcessingFailedFallback && !self.finalTranscript.isEmpty
+        self.aiProcessingOutcome = aiProcessingOutcome
     }
 }
 
@@ -8687,6 +8690,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case postProcessingDisabled
         case postProcessingSucceeded
         case postProcessingSkippedCooldown
+        case postProcessingRawFallback(reason: AIValidationFailure)
         case postProcessingFailedFallback
         case commandModeSucceeded(invocation: CommandInvocation)
         case commandModeSkippedCooldown(invocation: CommandInvocation)
@@ -8704,6 +8708,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 return isRetry ? "Post-processing succeeded (retried)" : "Post-processing succeeded"
             case .postProcessingSkippedCooldown:
                 return "Post-processing skipped while configured models cool down"
+            case .postProcessingRawFallback:
+                return localizedCatalogString("Post-processing was not applied; the original transcript was kept.")
             case .postProcessingFailedFallback:
                 return isRetry
                     ? "Post-processing failed on retry, using raw transcript"
@@ -8731,12 +8737,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         finalTranscript: String,
         outcome: TranscriptProcessingOutcome,
         prompt: String,
-        userIssueRecord: QuillUserIssueRecord?
+        userIssueRecord: QuillUserIssueRecord?,
+        aiProcessingOutcome: AIProcessingOutcome
     ) {
         let trimmedRawTranscript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !trimmedRawTranscript.isEmpty else {
-            return ("", .skippedEmptyRawTranscript, "", nil)
+            return ("", .skippedEmptyRawTranscript, "", nil, .failed(reason: "empty-raw-transcript"))
         }
 
         if case .command(let invocation, let selectedText) = intent {
@@ -8751,7 +8758,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 let outcome: TranscriptProcessingOutcome = result.skippedDueToCooldown
                     ? .commandModeSkippedCooldown(invocation: invocation)
                     : .commandModeSucceeded(invocation: invocation)
-                return (result.transcript, outcome, result.prompt, nil)
+                return (result.transcript, outcome, result.prompt, nil, .succeeded)
             } catch {
                 let issue = postProcessingService.userIssue(for: error)
                 os_log(
@@ -8764,18 +8771,19 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     selectedText,
                     .commandModeFailedFallback(invocation: invocation),
                     "",
-                    issue.record
+                    issue.record,
+                    .failed(reason: "command-transform-failed")
                 )
             }
         }
 
         if let macro = findMatchingMacro(for: trimmedRawTranscript) {
             os_log(.info, log: recordingLog, "Voice macro triggered: %{public}@", macro.command)
-            return (macro.payload, .voiceMacro(command: macro.command), "", nil)
+            return (macro.payload, .voiceMacro(command: macro.command), "", nil, .succeeded)
         }
 
         if !postProcessingEnabled {
-            return (rawTranscript, .postProcessingDisabled, "", nil)
+            return (rawTranscript, .postProcessingDisabled, "", nil, .succeeded)
         }
 
         do {
@@ -8789,7 +8797,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             let outcome: TranscriptProcessingOutcome = result.skippedDueToCooldown
                 ? .postProcessingSkippedCooldown
                 : .postProcessingSucceeded
-            return (result.transcript, outcome, result.prompt, nil)
+            return (result.transcript, outcome, result.prompt, nil, .succeeded)
         } catch {
             let issue = postProcessingService.userIssue(for: error)
             os_log(
@@ -8798,11 +8806,30 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 "Post-processing failed: %{private}@",
                 issue.privateDiagnostic
             )
+            if case let .outputRejected(reason) = error as? PostProcessingError {
+                return (
+                    trimmedRawTranscript,
+                    .postProcessingRawFallback(reason: reason),
+                    "",
+                    issue.record,
+                    .rawFallback(reason: reason)
+                )
+            }
+            let failureReason: String
+            switch error as? PostProcessingError {
+            case .some(.requestTimedOut):
+                failureReason = "request-timed-out"
+            case .some(.emptyOutput):
+                failureReason = "empty-output"
+            default:
+                failureReason = "post-processing-failed"
+            }
             return (
                 trimmedRawTranscript,
                 .postProcessingFailedFallback,
                 "",
-                issue.record
+                issue.record,
+                .failed(reason: failureReason)
             )
         }
     }
@@ -8901,7 +8928,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             )
         let outcomeWasPostProcessingFailedFallback: Bool
         switch result.outcome {
-        case .postProcessingFailedFallback:
+        case .postProcessingRawFallback, .postProcessingFailedFallback:
             outcomeWasPostProcessingFailedFallback = true
         default:
             outcomeWasPostProcessingFailedFallback = false
@@ -8912,7 +8939,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             prompt: result.prompt,
             processingStatus: processingStatus,
             shouldPressEnterAfterPaste: parsedTranscript.shouldPressEnterAfterPaste,
-            outcomeWasPostProcessingFailedFallback: outcomeWasPostProcessingFailedFallback
+            outcomeWasPostProcessingFailedFallback: outcomeWasPostProcessingFailedFallback,
+            aiProcessingOutcome: result.aiProcessingOutcome
         )
     }
 
@@ -8961,7 +8989,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 transcriptionLanguageCodeOverride: settings.transcriptionLanguage.code,
                 customVocabularyOverride: settings.customVocabulary,
                 customSystemPromptOverride: settings.customSystemPrompt,
-                calendarMatch: calendarMatch
+                calendarMatch: calendarMatch,
+                aiProcessingOutcome: completion.aiProcessingOutcome
             )
             completeCloudTranscriptionHistory(
                 historyID: historyID,
@@ -10508,7 +10537,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         transcriptionLanguageCodeOverride: String? = nil,
         customVocabularyOverride: String? = nil,
         customSystemPromptOverride: String? = nil,
-        calendarMatch: CalendarEventMatch? = nil
+        calendarMatch: CalendarEventMatch? = nil,
+        aiProcessingOutcome: AIProcessingOutcome = .succeeded
     ) -> Bool {
         let existingID = activeTranscriptionJobs[jobID]?.liveNoteID
         let existingEntry = existingID.flatMap { id in
@@ -10548,6 +10578,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             contextScreenshotStatus: context.screenshotError
                 ?? "available (\(context.screenshotMimeType ?? "image"))",
             postProcessingStatus: processingStatus,
+            aiProcessingOutcome: aiProcessingOutcome.pipelineHistoryStatus,
             debugStatus: debugStatusMessage,
             customVocabulary: customVocabularyOverride ?? customVocabulary,
             customSystemPrompt: customSystemPromptOverride ?? customSystemPrompt,

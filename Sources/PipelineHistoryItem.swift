@@ -102,6 +102,10 @@ struct PipelineHistoryItem: Identifiable, Codable {
     let contextScreenshotDataURL: String?
     let contextScreenshotStatus: String
     let postProcessingStatus: String
+    private let storedAIProcessingOutcome: String?
+    var aiProcessingOutcome: String {
+        storedAIProcessingOutcome ?? "succeeded"
+    }
     let debugStatus: String
     let customVocabulary: String
     let customSystemPrompt: String
@@ -137,6 +141,7 @@ struct PipelineHistoryItem: Identifiable, Codable {
         contextScreenshotDataURL: String?,
         contextScreenshotStatus: String,
         postProcessingStatus: String,
+        aiProcessingOutcome: String = "succeeded",
         debugStatus: String,
         customVocabulary: String,
         customSystemPrompt: String = "",
@@ -171,6 +176,7 @@ struct PipelineHistoryItem: Identifiable, Codable {
         self.contextScreenshotDataURL = contextScreenshotDataURL
         self.contextScreenshotStatus = contextScreenshotStatus
         self.postProcessingStatus = postProcessingStatus
+        self.storedAIProcessingOutcome = aiProcessingOutcome
         self.debugStatus = debugStatus
         self.customVocabulary = customVocabulary
         self.customSystemPrompt = customSystemPrompt
@@ -337,6 +343,7 @@ struct PipelineHistoryItem: Identifiable, Codable {
             contextScreenshotDataURL: contextScreenshotDataURL,
             contextScreenshotStatus: contextScreenshotStatus,
             postProcessingStatus: postProcessingStatus,
+            aiProcessingOutcome: aiProcessingOutcome,
             debugStatus: debugStatus,
             customVocabulary: customVocabulary,
             customSystemPrompt: customSystemPrompt,
@@ -387,6 +394,7 @@ struct PipelineHistoryItem: Identifiable, Codable {
             contextScreenshotStatus: contextScreenshotStatus,
             postProcessingStatus: recoveryContext?.recoveredStatus
                 ?? "Error: Interrupted before transcription completed",
+            aiProcessingOutcome: aiProcessingOutcome,
             debugStatus: recoveryContext?.mode.recoveredDebugStatus
                 ?? "Interrupted before completion",
             customVocabulary: customVocabulary,

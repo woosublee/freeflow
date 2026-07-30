@@ -552,7 +552,7 @@ private extension QuillUserIssueCode {
         case .postProcessingGuardFallback:
             return QuillUserIssueCopy(
                 titleKey: "Original transcript kept",
-                bodyKey: "Quill detected that cleanup may have changed the intended meaning.",
+                bodyKey: "Post-processing was not applied; the original transcript was kept.",
                 suggestionKey: "Review the original transcript before using it."
             )
         case .contextUnavailable:

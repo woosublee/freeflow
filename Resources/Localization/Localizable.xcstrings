@@ -11701,6 +11701,22 @@
         }
       }
     },
+    "Post-processing was not applied; the original transcript was kept.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Post-processing was not applied; the original transcript was kept."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "후처리를 적용하지 않고 원문을 유지했습니다."
+          }
+        }
+      }
+    },
     "Review the original transcript before using it.": {
       "localizations": {
         "en": {
