@@ -256,7 +256,8 @@ Validation requires:
 
 - exact schema;
 - activity limited to two short declarative sentences;
-- no prompt markers, role tags, imperative instructions, or unsupported language switch;
+- no prompt markers, role tags, or imperative instructions;
+- activity's dominant language matching the current Quill UI language (`preferredLocalizedStringLanguage()`), with an uncertain or different language rejected;
 - a bounded number and length of reference terms;
 - reference terms that are plain terms rather than commands, URLs, or delimiter fragments;
 - confidence high enough to supply a non-empty hint.
