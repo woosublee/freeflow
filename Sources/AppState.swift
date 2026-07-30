@@ -11,6 +11,36 @@ import os.log
 private let recordingLog = OSLog(subsystem: "com.woosublee.quill", category: "Recording")
 private let calendarLog = OSLog(subsystem: "com.woosublee.quill", category: "Calendar")
 
+extension AIProcessingFeature {
+    var modelFeature: AIModelFeature {
+        switch self {
+        case .postProcessing: .postProcessing
+        case .context: .contextCapture
+        case .meetingSummary: .meetingSummary
+        }
+    }
+}
+
+extension AIProcessingBackendChoice {
+    var capabilities: AIModelCapabilities {
+        switch self {
+        case .cloud(let modelID):
+            ModelConfiguration.capabilities(for: modelID)
+        case .localAI(let modelID):
+            LocalAIModelCatalog.capabilities(for: modelID)
+                ?? AIModelCapabilityCatalog.qwenTextCapabilities
+        }
+    }
+}
+
+func isAIProcessingChoiceCompatible(
+    _ choice: AIProcessingBackendChoice,
+    for feature: AIProcessingFeature
+) -> Bool {
+    guard choice.capabilities.supports(feature.modelFeature) else { return false }
+    return feature != .context || choice.capabilities.modalities.contains(.image)
+}
+
 struct VoiceMacro: Codable, Identifiable, Equatable {
     var id: UUID = UUID()
     var command: String
@@ -2277,6 +2307,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var activeTranscriptionJobs: [UUID: TranscriptionJob] = [:]
     let localAIServerManager: LocalAIServerManager
     @Published private(set) var localAIInstallStates: [String: LocalAIModelInstallViewState] = [:]
+    @Published private(set) var contextModelCapabilityWarning: String?
     @Published private var pendingLocalAISelections: [AIProcessingFeature: String] = [:]
     private var localAIInstallTasks: [String: LocalAIInstallTask] = [:]
     private var localAIProgressCoalescers:
@@ -2813,6 +2844,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.meetingSummaryOutputLanguage = meetingSummaryOutputLanguage
         self.postProcessingBackendChoice = postProcessingBackendChoice
         self.contextBackendChoice = contextBackendChoice
+        self.contextModelCapabilityWarning = nil
         self.meetingSummaryBackendChoice = meetingSummaryBackendChoice
         self.holdShortcut = shortcuts.hold
         self.toggleShortcut = shortcuts.toggle
@@ -3317,42 +3349,65 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
+    private func setAIProcessingFeatureEnabled(
+        _ isEnabled: Bool,
+        for feature: AIProcessingFeature
+    ) {
+        switch feature {
+        case .postProcessing:
+            disablePostProcessing = !isEnabled
+        case .context:
+            disableContextCapture = !isEnabled
+        case .meetingSummary:
+            disableMeetingSummary = !isEnabled
+        }
+    }
+
+    @MainActor
+    private func updateContextModelCapabilityWarning(
+        for choice: AIProcessingBackendChoice? = nil
+    ) {
+        let choice = choice ?? contextBackendChoice
+        guard !isAIProcessingChoiceCompatible(choice, for: .context) else {
+            contextModelCapabilityWarning = nil
+            return
+        }
+        contextModelCapabilityWarning = [
+            localizedCatalogString("This model does not support screen Context."),
+            localizedCatalogString("Choose an image-capable model to enable Context.")
+        ].joined(separator: " ")
+    }
+
+    @MainActor
     private func commitAIProcessingSettingsDraft(
         feature: AIProcessingFeature,
         isEnabled: Bool,
         preferredChoice: AIProcessingBackendChoice
     ) {
         guard isEnabled,
+              isAIProcessingChoiceCompatible(preferredChoice, for: feature),
               let readyChoice = readyAIProcessingChoice(
                 preferred: preferredChoice,
                 for: feature
               ) else {
-            switch feature {
-            case .postProcessing:
-                disablePostProcessing = true
-            case .context:
-                disableContextCapture = true
-            case .meetingSummary:
-                disableMeetingSummary = true
-            }
+            setAIProcessingFeatureEnabled(false, for: feature)
+            if feature == .context { updateContextModelCapabilityWarning() }
             return
         }
 
         applyAIProcessingChoice(readyChoice, for: feature)
-        switch feature {
-        case .postProcessing:
-            disablePostProcessing = false
-        case .context:
-            disableContextCapture = false
-        case .meetingSummary:
-            disableMeetingSummary = false
-        }
+        setAIProcessingFeatureEnabled(true, for: feature)
+        if feature == .context { updateContextModelCapabilityWarning() }
     }
 
     @MainActor
     func isAIProcessingChoiceAvailable(
-        _ choice: AIProcessingBackendChoice
+        _ choice: AIProcessingBackendChoice,
+        for feature: AIProcessingFeature
     ) -> Bool {
+        guard isAIProcessingChoiceCompatible(choice, for: feature) else {
+            return false
+        }
         switch choice {
         case .cloud:
             return true
@@ -3366,13 +3421,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
     func isAIProcessingBackendReady(
         for feature: AIProcessingFeature
     ) -> Bool {
-        isAIProcessingChoiceReady(currentAIProcessingChoice(for: feature))
+        isAIProcessingChoiceReady(
+            currentAIProcessingChoice(for: feature),
+            for: feature
+        )
     }
 
     @MainActor
     func isAIProcessingChoiceReady(
-        _ choice: AIProcessingBackendChoice
+        _ choice: AIProcessingBackendChoice,
+        for feature: AIProcessingFeature
     ) -> Bool {
+        guard isAIProcessingChoiceCompatible(choice, for: feature) else {
+            return false
+        }
         switch choice {
         case .cloud:
             return !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -3391,18 +3453,28 @@ final class AppState: ObservableObject, @unchecked Sendable {
         preferred: AIProcessingBackendChoice? = nil,
         for feature: AIProcessingFeature
     ) -> AIProcessingBackendChoice? {
-        if let preferred, isAIProcessingChoiceReady(preferred) {
-            return preferred
+        if let preferred {
+            guard isAIProcessingChoiceCompatible(preferred, for: feature) else {
+                return nil
+            }
+            if isAIProcessingChoiceReady(preferred, for: feature) {
+                return preferred
+            }
         }
         let currentChoice = currentAIProcessingChoice(for: feature)
-        if isAIProcessingChoiceReady(currentChoice) {
+        guard isAIProcessingChoiceCompatible(currentChoice, for: feature) else {
+            return nil
+        }
+        if isAIProcessingChoiceReady(currentChoice, for: feature) {
             return currentChoice
         }
 
         let availability = Self.localAIProcessingAvailabilityProvider()
         if hasCompletedLocalAIStatusRefresh, availability.isSupported {
             let readyModels = LocalAIModelCatalog.all.filter {
-                localAIInstallState(for: $0).status == .ready
+                $0.capabilities.supports(feature.modelFeature)
+                    && (feature != .context || $0.capabilities.modalities.contains(.image))
+                    && localAIInstallState(for: $0).status == .ready
             }
             let preferredModel = readyModels.first {
                 $0.id == availability.recommendedModel.id
@@ -3415,7 +3487,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
-        return .cloud(modelID: resolvedCloudModelID(for: feature))
+        let cloudChoice = AIProcessingBackendChoice.cloud(
+            modelID: resolvedCloudModelID(for: feature)
+        )
+        return isAIProcessingChoiceCompatible(cloudChoice, for: feature)
+            ? cloudChoice
+            : nil
     }
 
     @MainActor
@@ -3429,9 +3506,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 cloudModelIDs.append(modelID)
             }
         }
-        let cloudDisplays = cloudModelIDs.map { modelID in
-            AIProcessingChoiceDisplay(
-                choice: .cloud(modelID: modelID),
+        let cloudDisplays = cloudModelIDs.compactMap { modelID -> AIProcessingChoiceDisplay? in
+            let choice = AIProcessingBackendChoice.cloud(modelID: modelID)
+            guard isAIProcessingChoiceCompatible(choice, for: feature) else {
+                return nil
+            }
+            return AIProcessingChoiceDisplay(
+                choice: choice,
                 section: "Cloud",
                 title: modelID,
                 subtitle: nil,
@@ -3443,9 +3524,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         let availability = Self.localAIProcessingAvailabilityProvider()
         guard availability.isSupported else { return cloudDisplays }
-        let localDisplays = LocalAIModelCatalog.all.map { model in
-            AIProcessingChoiceDisplay(
-                choice: .localAI(modelID: model.id),
+        let localDisplays = LocalAIModelCatalog.all.compactMap {
+            model -> AIProcessingChoiceDisplay? in
+            let choice = AIProcessingBackendChoice.localAI(modelID: model.id)
+            guard isAIProcessingChoiceCompatible(choice, for: feature) else {
+                return nil
+            }
+            return AIProcessingChoiceDisplay(
+                choice: choice,
                 section: "On This Mac",
                 title: model.displayName,
                 subtitle: ByteCountFormatter.string(
@@ -3465,6 +3551,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         _ choice: AIProcessingBackendChoice,
         for feature: AIProcessingFeature
     ) {
+        guard isAIProcessingChoiceCompatible(choice, for: feature) else {
+            if feature == .context {
+                disableContextCapture = true
+                updateContextModelCapabilityWarning(for: choice)
+            }
+            return
+        }
         switch choice {
         case .cloud(let modelID):
             setPendingLocalAIModelID(nil, for: feature)
@@ -3753,6 +3846,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         _ choice: AIProcessingBackendChoice,
         for feature: AIProcessingFeature
     ) -> AIProcessingBackendChoice? {
+        guard isAIProcessingChoiceCompatible(choice, for: feature) else {
+            return nil
+        }
         switch choice {
         case .cloud:
             return choice
@@ -3783,6 +3879,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard hasCompletedLocalAIStatusRefresh else { return }
         for feature in AIProcessingFeature.allCases {
             let current = currentAIProcessingChoice(for: feature)
+            guard isAIProcessingChoiceCompatible(current, for: feature) else {
+                setAIProcessingFeatureEnabled(false, for: feature)
+                if feature == .context { updateContextModelCapabilityWarning() }
+                continue
+            }
+            if feature == .context { updateContextModelCapabilityWarning() }
             if let normalized = normalizedAIProcessingChoice(
                 current,
                 for: feature
@@ -10543,9 +10645,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @MainActor
     private func startContextCapture() {
         contextCaptureTask?.cancel()
         capturedContext = nil
+
+        guard isAIProcessingChoiceCompatible(contextBackendChoice, for: .context) else {
+            disableContextCapture = true
+            updateContextModelCapabilityWarning()
+            lastContextSummary = "Context unavailable"
+            lastPostProcessingStatus = "Context unavailable"
+            lastContextScreenshotDataURL = nil
+            lastContextScreenshotStatus = "Unavailable"
+            return
+        }
 
         guard !disableContextCapture else {
             lastContextSummary = "Context capture disabled"

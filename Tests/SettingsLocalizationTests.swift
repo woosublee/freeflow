@@ -211,6 +211,8 @@ struct SettingsLocalizationTests {
             "Add an API key in Cloud Provider to enable Context.": "컨텍스트를 활성화하려면 클라우드 공급자에서 API Key를 추가하세요.",
             "Context is on, but AI context analysis is unavailable until an API key is configured.": "컨텍스트가 켜져 있지만 API Key를 설정하기 전에는 AI 컨텍스트 분석을 사용할 수 없습니다.",
             "Context capture is off. Quill skips app context and screenshots for normal dictation.": "컨텍스트 캡처가 꺼져 있습니다. Quill은 일반 받아쓰기에서 앱 맥락과 스크린샷을 건너뜁니다.",
+            "This model does not support screen Context.": "이 모델은 화면 컨텍스트를 지원하지 않습니다.",
+            "Choose an image-capable model to enable Context.": "Context를 활성화하려면 이미지를 지원하는 모델을 선택하세요.",
             "Paste Automatically": "자동으로 붙여넣기",
             "When off, Quill copies the transcript to the clipboard so you can paste it manually.": "끄면 Quill이 전사문을 클립보드에 복사하며, 필요할 때 직접 붙여넣을 수 있습니다.",
             "Used for transcript cleanup and Edit Mode transforms.": "전사문 정리와 Edit Mode 변환에 사용합니다.",

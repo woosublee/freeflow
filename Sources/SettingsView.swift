@@ -1987,7 +1987,7 @@ struct ModelsSettingsView: View {
         switch choice {
         case .cloud(let modelID):
             appState.discardPendingLocalAISelection(for: feature)
-            if appState.isAIProcessingChoiceReady(choice) {
+            if appState.isAIProcessingChoiceReady(choice, for: feature) {
                 appState.selectAIProcessingBackendChoice(choice, for: feature)
                 setAIProcessingFeatureEnabled(true, for: feature)
             }
@@ -2106,13 +2106,7 @@ struct ModelsSettingsView: View {
     private func managedLocalAIModel(
         for feature: AIProcessingFeature
     ) -> LocalAIModel? {
-        guard let model = managedLocalAIResolution(for: feature).model,
-              appState.aiProcessingChoiceDisplays(for: feature).contains(where: {
-                  $0.choice == .localAI(modelID: model.id)
-              }) else {
-            return nil
-        }
-        return model
+        managedLocalAIResolution(for: feature).model
     }
 
     private func aiProcessingChoiceMenuLabel(
@@ -2308,7 +2302,8 @@ struct ModelsSettingsView: View {
                     return
                 }
                 guard appState.isAIProcessingChoiceReady(
-                    settingsAIProcessingChoice(for: .postProcessing)
+                    settingsAIProcessingChoice(for: .postProcessing),
+                    for: .postProcessing
                 ) else {
                     return
                 }
@@ -2396,7 +2391,8 @@ struct ModelsSettingsView: View {
                     return
                 }
                 guard appState.isAIProcessingChoiceReady(
-                    settingsAIProcessingChoice(for: .context)
+                    settingsAIProcessingChoice(for: .context),
+                    for: .context
                 ) else {
                     return
                 }
@@ -2435,6 +2431,12 @@ struct ModelsSettingsView: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 aiProcessingChoicePicker(for: .context)
+
+                if let warning = appState.contextModelCapabilityWarning {
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
 
                 if let model = managedLocalAIModel(for: .context) {
                     LocalAIModelRowView(
@@ -2490,7 +2492,8 @@ struct ModelsSettingsView: View {
                     return
                 }
                 guard appState.isAIProcessingChoiceReady(
-                    settingsAIProcessingChoice(for: .meetingSummary)
+                    settingsAIProcessingChoice(for: .meetingSummary),
+                    for: .meetingSummary
                 ) else {
                     return
                 }

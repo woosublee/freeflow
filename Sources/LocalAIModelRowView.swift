@@ -123,6 +123,29 @@ struct LocalAIModelRowView: View {
         }
     }
 
+    private func localizedFeatureName(_ feature: AIModelFeature) -> String {
+        switch feature {
+        case .postProcessing:
+            localizedCatalogString("Post-processing")
+        case .contextCapture:
+            localizedCatalogString("Context")
+        case .meetingSummary:
+            localizedCatalogString("Meeting Summary")
+        }
+    }
+
+    private var supportedFeatureDescription: String {
+        [
+            AIModelFeature.postProcessing,
+            .contextCapture,
+            .meetingSummary
+        ].compactMap { feature in
+            model.capabilities.supports(feature)
+                ? localizedFeatureName(feature)
+                : nil
+        }.joined(separator: " · ")
+    }
+
     private var modelDescription: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(verbatim: model.displayName)
@@ -139,6 +162,9 @@ struct LocalAIModelRowView: View {
             )
             .font(.caption2)
             .foregroundStyle(.secondary)
+            Text(supportedFeatureDescription)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 
