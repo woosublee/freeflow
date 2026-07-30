@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import AppKit
 import AVFoundation
+import CoreAudio
 import ServiceManagement
 import ApplicationServices
 import ScreenCaptureKit
@@ -2101,6 +2102,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
     @Published var availableMicrophones: [AudioDevice] = []
+    @Published private(set) var systemDefaultMicrophoneName: String?
 
     let audioRecorder = AudioRecorder()
     let systemAudioRecorder = SystemAudioRecorder()
@@ -2229,11 +2231,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @MainActor
     func selectedMicrophoneDisplayName() -> String {
         if selectedMicrophoneDeviceID == AudioInputDevice.defaultMicrophoneID {
-            return localizedCatalogString("System Default")
+            return systemDefaultMicrophoneDisplayName()
         }
         return availableMicrophones.first(where: {
             $0.uid == selectedMicrophoneDeviceID
         })?.name ?? localizedCatalogString("Selected Microphone")
+    }
+
+    @MainActor
+    func systemDefaultMicrophoneDisplayName() -> String {
+        AudioInputDevice.systemDefaultDisplayName(
+            deviceName: systemDefaultMicrophoneName,
+            defaultTitle: localizedCatalogString("System Default"),
+            format: localizedCatalogString("System Default (%@)")
+        )
     }
 
     @MainActor
@@ -2372,6 +2383,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var shouldTerminateAfterTranscription = false
     private var pendingAudioOnlyStopIDs: Set<UUID> = []
     private var audioDeviceObservers: [NSObjectProtocol] = []
+    private var defaultInputDeviceListener: AudioObjectPropertyListenerBlock?
+    private var defaultInputDeviceListenerAddress: AudioObjectPropertyAddress?
     private var needsMicrophoneRefreshAfterRecording = false
     private let pipelineHistoryStore = PipelineHistoryStore()
     private let recordingJournalStore: RecordingJournalStore
@@ -3893,6 +3906,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
             notificationCenter.removeObserver(observer)
         }
         audioDeviceObservers.removeAll()
+
+        if let defaultInputDeviceListener, var defaultInputDeviceListenerAddress {
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &defaultInputDeviceListenerAddress,
+                DispatchQueue.main,
+                defaultInputDeviceListener
+            )
+        }
+        defaultInputDeviceListener = nil
+        defaultInputDeviceListenerAddress = nil
     }
 
     private static func loadStoredAPIKey(account: String) -> String {
@@ -6768,7 +6792,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
 
         needsMicrophoneRefreshAfterRecording = false
-        availableMicrophones = AudioDevice.availableInputDevices()
+        let microphoneSnapshot = AudioDevice.inputDeviceSnapshot()
+        availableMicrophones = microphoneSnapshot.devices
+        systemDefaultMicrophoneName = microphoneSnapshot.defaultInputDeviceName
     }
 
     private func refreshAvailableMicrophonesIfNeeded() {
@@ -6804,6 +6830,27 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 using: refreshOnAudioDeviceChange
             )
         )
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            DispatchQueue.main.async {
+                self?.refreshAvailableMicrophones()
+            }
+        }
+        guard AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main,
+            listener
+        ) == noErr else {
+            return
+        }
+        defaultInputDeviceListener = listener
+        defaultInputDeviceListenerAddress = address
     }
 
     var usesFnShortcut: Bool {

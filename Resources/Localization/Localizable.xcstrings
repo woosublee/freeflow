@@ -3057,6 +3057,22 @@
         }
       }
     },
+    "System Default (%@)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "System Default (%@)"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "시스템 기본값 (%@)"
+          }
+        }
+      }
+    },
     "Tap %@": {
       "localizations": {
         "en": {

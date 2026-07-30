@@ -53,6 +53,18 @@ enum AudioInputDevice {
     static let systemDefaultAndSystemAudioID = "__system_default_and_system_audio__"
     static let defaultMicrophoneID = "default"
 
+    static func systemDefaultDisplayName(
+        deviceName: String?,
+        defaultTitle: String,
+        format: String
+    ) -> String {
+        guard let deviceName = deviceName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !deviceName.isEmpty else {
+            return defaultTitle
+        }
+        return String(format: format, deviceName)
+    }
+
     static func isSystemAudio(_ id: String) -> Bool {
         id == systemAudioID
     }

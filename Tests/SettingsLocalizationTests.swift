@@ -7,6 +7,7 @@ struct SettingsLocalizationTests {
         try testTranscriptionModelKeepsIdentityAndLocalizesDescription()
         try testNativeWhisperModelKeepsIdentityAndLocalizesDescription()
         try testAudioImportDisplayKeepsModelIDAndLocalizesStaticLabels()
+        try testSystemDefaultMicrophoneLabelLocalization()
         try testSettingsSectionTitlePolicy()
         try testGoogleCalendarHealthMessagesLocalizeWithoutChangingDetail()
         try testCalendarReminderLeadTimeUsesLocalizedCopy()
@@ -77,6 +78,27 @@ struct SettingsLocalizationTests {
         assert(legacyDisplay.title == "Legacy mlx-whisper")
         assert(legacyDisplay.localizedCurrentLabel(language: "en", bundle: localizationBundle) == "On This Mac · Legacy · Whisper Medium")
         assert(legacyDisplay.localizedCurrentLabel(language: "ko", bundle: localizationBundle) == "이 Mac에서 · 레거시 · Whisper Medium")
+    }
+
+    private static func testSystemDefaultMicrophoneLabelLocalization() throws {
+        let bundle = try compiledLocalizationBundle()
+
+        assert(
+            localizedCatalogFormat(
+                "System Default (%@)",
+                "MacBook Air Microphone",
+                language: "en",
+                bundle: bundle
+            ) == "System Default (MacBook Air Microphone)"
+        )
+        assert(
+            localizedCatalogFormat(
+                "System Default (%@)",
+                "MacBook Air Microphone",
+                language: "ko",
+                bundle: bundle
+            ) == "시스템 기본값 (MacBook Air Microphone)"
+        )
     }
 
     private static func testSettingsSectionTitlePolicy() throws {
