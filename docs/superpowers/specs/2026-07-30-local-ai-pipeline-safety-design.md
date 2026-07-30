@@ -10,7 +10,6 @@ The investigation with Quill's bundled `llama-server` and the installed Qwen2.5 
 - A malicious window title makes text-only Local Context return an injected result; injecting that result into Post-processing makes a normal transcript return `EMPTY`.
 - An 8,000-character Korean transcript can return `EMPTY` from Local Post-processing and is currently treated as a successful result.
 - A 12,000-character Korean Summary chunk consumes 8,114 prompt tokens against the current 8,192-token Local server context. `llama-server` begins context shifting and can exceed the request timeout.
-- Context selected text has no token budget and can produce a Chinese activity summary from Korean input. Context output currently flows into the next LLM request as free-form text.
 - Summary validates JSON shape but not output language, source quote presence, or owner/due-date grounding.
 
 This design replaces the old Local Context decision from `docs/superpowers/specs/2026-07-21-local-ai-processing-engine-design.md` and `docs/superpowers/specs/2026-07-22-local-ai-processing-backends-design.md`: text-only Local models are no longer eligible for Context. Context requires a model that can actually analyze the screenshot.
@@ -21,7 +20,7 @@ This design replaces the old Local Context decision from `docs/superpowers/specs
 2. Keep Qwen2.5 7B available for Local Post-processing and Meeting Summary, but remove it from Context because it cannot consume screenshots.
 3. Make every Local AI pipeline non-destructive: an invalid, empty, wrong-language, injected, timed-out, or unavailable model result never replaces user source text or an existing meeting summary.
 4. Replace character-count chunking with model-token budgets that reserve system, template, calendar, output, and safety capacity.
-5. Prevent Context results from acting as free-form instructions in Post-processing.
+5. Preserve the existing screenshot Context pipeline while preventing text-only Local models from being selected for it.
 6. Make Local model start, readiness, cancellation, output rejection, and history persistence failures visible and diagnosable without exposing source content or private paths.
 7. Establish an architecture that allows a future vision-capable Local model to appear automatically in Context after its model metadata and runtime artifacts are declared.
 
@@ -126,7 +125,7 @@ This rule applies to the existing stored Qwen2.5 7B Context selection. It does n
 
 ### Untrusted input envelope
 
-Transcript text, app metadata, selected text, calendar values, vocabulary, and model-produced Context data are untrusted source data. They are never concatenated directly into prompt delimiters.
+Transcript text, calendar values, and vocabulary are untrusted source data. They are never concatenated directly into prompt delimiters. This implementation preserves the existing Context prompt and Context-to-Post-processing flow for vision-capable models.
 
 Every request creates a versioned, JSON-encoded envelope. JSON encoding escapes line breaks, quotes, delimiters, and role-like strings before model input.
 
@@ -136,10 +135,7 @@ Every request creates a versioned, JSON-encoded envelope. JSON encoding escapes 
   "feature": "post_processing",
   "data": {
     "transcript": "Untrusted dictated text.",
-    "context_hints": {
-      "destination": "unknown",
-      "reference_terms": []
-    }
+    "context_summary": "Existing activity summary used only as a formatting reference."
   }
 }
 ```
@@ -166,12 +162,11 @@ Qwen2.5 7B uses a 16,384-token Local server context. Feature reservations are:
 | Feature operation | Completion reservation |
 |---|---:|
 | Post-processing chunk | source token count + 512, capped at 6,144 |
-| Context | 256 |
 | Summary extraction | 1,024 |
 | Summary intermediate merge | 1,024 |
 | Summary final merge | 1,024 |
 
-Post-processing input chunks are reduced until their expected output reservation, prompt overhead, and safety margin fit in the 16K context. Summary uses its smaller fixed output reservation to keep more space for grounded extraction. Context truncates selected text before model input; it never consumes the full context window for an auxiliary feature.
+Post-processing input chunks are reduced until their expected output reservation, prompt overhead, and safety margin fit in the 16K context. Summary uses its smaller fixed output reservation to keep more space for grounded extraction. Context continues to use its existing compatible-vision request behavior and does not adopt this token-budgeting path in this work.
 
 The request payload always sends the computed `max_completion_tokens`; Local requests no longer rely on the server's effectively unbounded completion default.
 
@@ -184,7 +179,7 @@ Raw transcript
   ↓
 Sentence/paragraph chunking within token budget
   ↓
-JSON envelope with validated Context hints only
+JSON envelope with the existing Context summary as a formatting reference
   ↓
 Local or Cloud model request
   ↓
@@ -226,43 +221,28 @@ Show “Post-processing was not applied; the original transcript was kept.”
 
 There is no blind automatic retry after language, injection, or semantic-preservation failure. A deterministic Local model retry with the same source is not expected to repair the problem. The user can retry after changing Settings or use the preserved raw transcript.
 
-## Context Pipeline
+## Context Compatibility Policy
 
-### Eligibility and capture
+This implementation does not modify Context capture or propagation for a compatible model. The existing flow remains:
 
-Context starts only when its active selected model supports `.contextCapture` and `.image`. The feature collects active-app metadata, limited selected text, and the active-window screenshot. Text-only models do not trigger screenshot capture for Context.
-
-Cloud image models and a future declared Local vision model receive the screenshot plus an encoded metadata envelope. A Cloud image request may retain the existing text-only retry only as a provider transport fallback; the fallback result is display-only and does not create Post-processing hints.
-
-### Typed Context result
-
-Context separates user-visible activity from downstream hints.
-
-```swift
-struct ContextDisplaySummary: Codable, Sendable {
-    let activity: String
-    let confidence: ContextConfidence
-}
-
-struct PostProcessingContextHints: Codable, Sendable {
-    let destination: DestinationKind
-    let referenceTerms: [String]
-}
+```text
+active app metadata + active-window screenshot
+  ↓
+vision-capable Context model
+  ↓
+current activity summary
+  ↓
+existing Post-processing formatting reference
 ```
 
-The Context model returns strict JSON containing these values. The UI displays `activity`; Post-processing receives only validated `destination` and `referenceTerms`, never the activity sentence itself.
+The only Context changes are model-selection safeguards:
 
-Validation requires:
+- Context starts only when its selected model declares both `.contextCapture` and `.image`.
+- Qwen2.5 7B and other text-only Local models are absent from the Context picker.
+- An existing stored text-only Local Context selection disables Context with an explanation; it does not select a Cloud model or capture a screenshot.
+- A future Local vision model appears in Context after its declared model/projector artifacts validate and its endpoint reports image support.
 
-- exact schema;
-- activity limited to two short declarative sentences;
-- no prompt markers, role tags, or imperative instructions;
-- activity's dominant language matching the current Quill UI language (`preferredLocalizedStringLanguage()`), with an uncertain or different language rejected;
-- a bounded number and length of reference terms;
-- reference terms that are plain terms rather than commands, URLs, or delimiter fragments;
-- confidence high enough to supply a non-empty hint.
-
-When Context fails validation, times out, is cancelled, or cannot start, Quill shows Context unavailable and invokes Post-processing with empty hints. Context never changes, deletes, or blocks the transcript.
+The existing Context prompt, screenshot-plus-metadata payload, activity-summary representation, Context fallback behavior, and Context-to-Post-processing flow remain unchanged in this work.
 
 ## Meeting Summary Pipeline
 
@@ -381,7 +361,7 @@ When history-store recovery fails, Quill first moves the existing SQLite store, 
 - envelope encoding preserves arbitrary delimiters, quotes, newlines, role tags, and JSON-looking transcript data as data;
 - token budgets reserve prompt, template, output, and safety capacity;
 - Post-processing rejects non-filler `EMPTY`, wrong-language output, missing protected atoms, template echoes, and summary-like collapse;
-- Context rejection removes hints without failing Post-processing;
+- existing Context screenshot capture and Context-to-Post-processing propagation remain unchanged for a compatible vision model;
 - Summary validates evidence, quote membership, owner/due-date grounding, language, and legacy schema compatibility;
 - hierarchy merge never creates a request over its budget;
 - persistence recovery backs up the failed store and exposes non-durable mode.
@@ -397,7 +377,7 @@ make test-local-ai-integration
 It uses the real bundled binary and model through loopback. It verifies properties, not exact prose:
 
 1. a Post-processing delimiter injection never becomes accepted Chinese output and preserves raw transcript;
-2. Context title/selected-text injection never creates Post-processing hints;
+2. Qwen2.5 7B is never selected for Context and a compatible vision endpoint retains the existing screenshot Context request shape;
 3. a meaningful long Post-processing transcript never becomes accepted `EMPTY`;
 4. a Korean 12,000-character Summary completes under the 16K budget with Korean, evidence-bearing JSON;
 5. multi-batch Summary merge remains bounded and grounded;
