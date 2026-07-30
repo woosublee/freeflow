@@ -14804,6 +14804,22 @@
           }
         }
       }
+    },
+    "Previously selected on-device model": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Previously selected on-device model"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전에 선택한 온디바이스 모델"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

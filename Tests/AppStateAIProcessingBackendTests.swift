@@ -379,6 +379,10 @@ struct AppStateAIProcessingBackendTests {
                 }
                 precondition(display?.isAvailable == false)
                 precondition(display?.unavailableReason?.isEmpty == false)
+                precondition(
+                    display?.title != retiredModelID,
+                    "retired model IDs are not exposed in Settings"
+                )
             }
             let postLocalDisplays = appState.aiProcessingChoiceDisplays(for: .postProcessing)
                 .filter { $0.choice.isLocal && $0.isAvailable }

@@ -106,6 +106,7 @@ struct LocalizationResourceTests {
                 "이전에 선택한 온디바이스 모델을 더 이상 사용할 수 없습니다. 로컬에서 계속하려면 Qwen2.5 7B를 직접 선택하세요.",
             "The previously selected on-device model is no longer available. Context requires an image-capable model.":
                 "이전에 선택한 온디바이스 모델을 더 이상 사용할 수 없습니다. Context에는 이미지 지원 모델이 필요합니다.",
+            "Previously selected on-device model": "이전에 선택한 온디바이스 모델",
             "Canceled": "취소됨"
         ]
         for (key, expected) in localAISettingsKorean {

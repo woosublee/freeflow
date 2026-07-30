@@ -3535,7 +3535,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         return AIProcessingChoiceDisplay(
             choice: choice,
             section: "On This Mac",
-            title: modelID,
+            title: localizedCatalogString("Previously selected on-device model"),
             subtitle: unavailableReason,
             isAvailable: false,
             unavailableReason: unavailableReason,
