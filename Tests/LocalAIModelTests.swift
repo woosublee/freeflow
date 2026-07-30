@@ -5,6 +5,8 @@ struct LocalAIModelTests {
     static func main() throws {
         try testQualityModelMetadata()
         try testFastModelMetadata()
+        try testModelsDeclareTextOnlyCapabilitiesAndRuntime()
+        try testCapabilityLookupUsesStoredModelIDs()
         try testCatalogArtifactsAreCompleteAndValid()
         try testCatalogContainsBothModelsWithQualityRecommended()
         try testFindReturnsMatchingModelOrFallsBackToRecommended()
@@ -53,6 +55,23 @@ struct LocalAIModelTests {
         assert(model.approximateResidentRAMBytes > model.approximateBytes)
         assert(model.approximateBytes < LocalAIModelCatalog.quality.approximateBytes)
         assert(model.primaryArtifact == artifact)
+    }
+
+    private static func testModelsDeclareTextOnlyCapabilitiesAndRuntime() throws {
+        for model in LocalAIModelCatalog.all {
+            assert(model.runtime == .textChat)
+            assert(model.capabilities.supports(.postProcessing))
+            assert(model.capabilities.supports(.meetingSummary))
+            assert(!model.capabilities.supportsContextCapture)
+        }
+    }
+
+    private static func testCapabilityLookupUsesStoredModelIDs() throws {
+        assert(
+            LocalAIModelCatalog.capabilities(for: LocalAIModelCatalog.quality.id)
+                == LocalAIModelCatalog.quality.capabilities
+        )
+        assert(LocalAIModelCatalog.capabilities(for: "does-not-exist") == nil)
     }
 
     private static func testCatalogArtifactsAreCompleteAndValid() throws {

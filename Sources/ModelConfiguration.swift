@@ -26,6 +26,10 @@ public struct ModelConfiguration {
         "meta-llama/llama-prompt-guard-2-86m"
     ]
 
+    static func capabilities(for modelID: String) -> AIModelCapabilities {
+        AIModelCapabilityCatalog.capabilities(forCloudModelID: modelID)
+    }
+
     public static let transcriptionModels = [
         "whisper-large-v3",
         "whisper-large-v3-turbo"

@@ -6,8 +6,9 @@ struct AIProcessingBackendTests {
         try testChoiceStorageRoundTripAndFallback()
         try testAvailabilityAndRAMRecommendation()
         try await testCloudExecutorPreservesProviderConfiguration()
+        try await testDeclaredCloudVisionModelSupportsImages()
         try await testCloudExecutorRejectsMissingKeyBeforeOperation()
-        try await testLocalExecutorUsesLeaseAndLocalRequestContract()
+        try await testLocalQwenExecutorUsesDescriptorAndLocalRequestContract()
         try await testUnknownLocalModelFailsWithoutCatalogFallback()
         print("AIProcessingBackendTests passed")
     }
@@ -74,6 +75,18 @@ struct AIProcessingBackendTests {
         assert(endpoint.authorizationToken == "secret-key")
         assert(endpoint.requestModelID == "provider/custom-model")
         assert(endpoint.selectedModelID == "provider/custom-model")
+        assert(!endpoint.supportsImages)
+    }
+
+    private static func testDeclaredCloudVisionModelSupportsImages() async throws {
+        let executor = AIProcessingBackendExecutor(
+            choice: .cloud(modelID: "qwen/qwen3.6-27b"),
+            cloudBaseURL: "https://api.example.com/openai/v1",
+            cloudAPIKey: "secret-key"
+        )
+
+        let endpoint = try await executor.withEndpoint { $0 }
+        assert(endpoint.kind == .cloud)
         assert(endpoint.supportsImages)
     }
 
@@ -100,7 +113,7 @@ struct AIProcessingBackendTests {
         assert(operations.values.isEmpty)
     }
 
-    private static func testLocalExecutorUsesLeaseAndLocalRequestContract() async throws {
+    private static func testLocalQwenExecutorUsesDescriptorAndLocalRequestContract() async throws {
         let process = FakeLocalAIServerProcess()
         let observedModelIDs = ObservedModelIDs()
         let manager = LocalAIServerManager(
@@ -112,19 +125,19 @@ struct AIProcessingBackendTests {
             validateModel: { _ in .ready }
         )
         let executor = AIProcessingBackendExecutor(
-            choice: .localAI(modelID: LocalAIModelCatalog.fast.id),
+            choice: .localAI(modelID: LocalAIModelCatalog.quality.id),
             cloudBaseURL: "https://api.example.com/openai/v1",
             cloudAPIKey: "cloud-key",
             localServerManager: manager
         )
 
         let endpoint = try await executor.withEndpoint { $0 }
-        assert(observedModelIDs.values == [LocalAIModelCatalog.fast.id])
+        assert(observedModelIDs.values == [LocalAIModelCatalog.quality.id])
         assert(endpoint.kind == .local)
         assert(endpoint.baseURL.host == "127.0.0.1")
         assert(endpoint.authorizationToken == nil)
         assert(endpoint.requestModelID == "local")
-        assert(endpoint.selectedModelID == LocalAIModelCatalog.fast.id)
+        assert(endpoint.selectedModelID == LocalAIModelCatalog.quality.id)
         assert(!endpoint.supportsImages)
     }
 

@@ -223,7 +223,8 @@ struct AIProcessingBackendExecutor: Sendable {
                     authorizationToken: cloudAPIKey,
                     requestModelID: modelID,
                     selectedModelID: modelID,
-                    supportsImages: true
+                    supportsImages: ModelConfiguration.capabilities(for: modelID)
+                        .modalities.contains(.image)
                 )
             )
 
@@ -242,7 +243,7 @@ struct AIProcessingBackendExecutor: Sendable {
                         authorizationToken: nil,
                         requestModelID: "local",
                         selectedModelID: model.id,
-                        supportsImages: false
+                        supportsImages: model.capabilities.modalities.contains(.image)
                     )
                 )
             }

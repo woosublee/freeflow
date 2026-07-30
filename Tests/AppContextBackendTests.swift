@@ -65,7 +65,7 @@ struct AppContextBackendTests {
             apiKey: "cloud-key",
             baseURL: "https://api.example.com/openai/v1",
             customContextPrompt: "",
-            contextModel: "provider/context",
+            contextModel: "qwen/qwen3.6-27b",
             transport: { request in
                 recorder.record(request)
                 if recorder.count() == 1 {
@@ -109,7 +109,7 @@ struct AppContextBackendTests {
             apiKey: "cloud-key",
             baseURL: "https://api.example.com/openai/v1",
             customContextPrompt: "",
-            contextModel: "provider/context",
+            contextModel: "qwen/qwen3.6-27b",
             transport: { request in
                 recorder.record(request)
                 if recorder.count() == 1 {
@@ -144,12 +144,12 @@ struct AppContextBackendTests {
         let issues = ContextIssueRecorder()
         let service = AppContextService(
             backendExecutor: AIProcessingBackendExecutor(
-                choice: .cloud(modelID: "provider/context"),
+                choice: .cloud(modelID: "qwen/qwen3.6-27b"),
                 cloudBaseURL: "https://api.example.com/openai/v1",
                 cloudAPIKey: "cloud-key"
             ),
             customContextPrompt: "",
-            contextModel: "provider/context",
+            contextModel: "qwen/qwen3.6-27b",
             transport: { request in
                 recorder.record(request)
                 throw URLError(.cannotConnectToHost)
@@ -179,12 +179,12 @@ struct AppContextBackendTests {
         let issues = ContextIssueRecorder()
         let service = AppContextService(
             backendExecutor: AIProcessingBackendExecutor(
-                choice: .cloud(modelID: "provider/context"),
+                choice: .cloud(modelID: "qwen/qwen3.6-27b"),
                 cloudBaseURL: "https://api.example.com/openai/v1",
                 cloudAPIKey: "  "
             ),
             customContextPrompt: "",
-            contextModel: "provider/context",
+            contextModel: "qwen/qwen3.6-27b",
             transport: { request in
                 recorder.record(request)
                 return try successResponse(
@@ -280,12 +280,12 @@ struct AppContextBackendTests {
         let gate = ContextCancellationGate()
         let service = AppContextService(
             backendExecutor: AIProcessingBackendExecutor(
-                choice: .cloud(modelID: "provider/context"),
+                choice: .cloud(modelID: "qwen/qwen3.6-27b"),
                 cloudBaseURL: "https://api.example.com/openai/v1",
                 cloudAPIKey: "cloud-key"
             ),
             customContextPrompt: "",
-            contextModel: "provider/context",
+            contextModel: "qwen/qwen3.6-27b",
             transport: { request in
                 recorder.record(request)
                 await gate.waitForRelease()
