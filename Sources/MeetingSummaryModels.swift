@@ -255,18 +255,13 @@ struct MeetingSummaryDraftContentV2: Codable, Equatable, Sendable {
     }
 
     var validatedSourceTexts: [String] {
-        var texts = [overview.text]
-        texts.append(contentsOf: overview.sourceQuotes)
+        var texts = overview.sourceQuotes
         for point in keyPoints + decisions + openQuestions {
-            texts.append(point.text)
             if let sourceQuote = point.sourceQuote {
                 texts.append(sourceQuote)
             }
         }
         for action in actionItems {
-            texts.append(action.task)
-            if let owner = action.owner { texts.append(owner) }
-            if let dueDate = action.dueDate { texts.append(dueDate) }
             if let sourceQuote = action.sourceQuote {
                 texts.append(sourceQuote)
             }

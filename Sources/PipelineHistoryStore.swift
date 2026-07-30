@@ -454,11 +454,23 @@ final class PipelineHistoryStore {
             withIntermediateDirectories: true
         )
 
-        for component in components {
-            try moveItem(
-                component,
-                backupURL.appendingPathComponent(component.lastPathComponent)
-            )
+        var movedComponents: [URL] = []
+        do {
+            for component in components {
+                try moveItem(
+                    component,
+                    backupURL.appendingPathComponent(component.lastPathComponent)
+                )
+                movedComponents.append(component)
+            }
+        } catch {
+            for component in movedComponents.reversed() {
+                let backupComponent = backupURL.appendingPathComponent(
+                    component.lastPathComponent
+                )
+                try? moveItem(backupComponent, component)
+            }
+            throw error
         }
         return backupName
     }

@@ -6,6 +6,7 @@ import Foundation
 struct MeetingSummaryOutputValidatorTests {
     static func main() throws {
         try testRejectsSourceQuoteOutsideTranscript()
+        try testRejectsGeneratedPartialProseAsMergeEvidence()
         try testRejectsActionOwnerOutsideSourceQuote()
         try testRejectsWrongLanguageInGeneratedProse()
         try testPreservesSourceQuoteLanguageWhileValidatingGeneratedProse()
@@ -17,6 +18,22 @@ struct MeetingSummaryOutputValidatorTests {
             try MeetingSummaryOutputValidator().validate(
                 v2WithQuote("invented source"),
                 against: "Minsu will send it."
+            )
+        }
+    }
+
+    private static func testRejectsGeneratedPartialProseAsMergeEvidence() throws {
+        let partial = v2WithQuote(
+            "The team will ship Friday.",
+            overview: "The launch is cancelled."
+        )
+        try expectFailure(.sourceQuoteNotFound) {
+            try MeetingSummaryOutputValidator().validate(
+                v2WithQuote(
+                    "The launch is cancelled.",
+                    overview: "The release status changed."
+                ),
+                againstValidatedRecords: [partial]
             )
         }
     }

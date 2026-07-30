@@ -96,6 +96,12 @@ struct PipelineHistoryStoreRecoveryTests {
         )
         try expect(
             FileManager.default.fileExists(
+                atPath: fixture.componentURLs[0].path
+            ),
+            "failed backup restores the main SQLite database"
+        )
+        try expect(
+            FileManager.default.fileExists(
                 atPath: fixture.componentURLs[1].path
             ),
             "failed move leaves the WAL original intact"
