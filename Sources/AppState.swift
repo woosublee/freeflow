@@ -365,6 +365,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         (AppState) -> any MeetingSummaryGenerating = { appState in
             appState.makeMeetingSummaryService()
         }
+    static var pipelineHistoryStoreFactory: () -> PipelineHistoryStore = {
+        PipelineHistoryStore()
+    }
 
     static var googleCalendarTokenLoader: (Bool) -> GoogleCalendarOAuthToken? = { allowsAuthenticationUI in
         GoogleCalendarTokenStore.load(allowsAuthenticationUI: allowsAuthenticationUI)
@@ -2079,6 +2082,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         [UUID: CloudTranscriptionDisplayProgress] = [:]
     @Published var lastTranscript: String = ""
     @Published var errorMessage: String?
+    @Published private(set) var historyPersistenceWarning: QuillUserIssueRecord?
     @Published var statusText: String = localizedCatalogString("Ready")
 
     // MCP interface
@@ -2420,7 +2424,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var defaultInputDeviceListener: AudioObjectPropertyListenerBlock?
     private var defaultInputDeviceListenerAddress: AudioObjectPropertyAddress?
     private var needsMicrophoneRefreshAfterRecording = false
-    private let pipelineHistoryStore = PipelineHistoryStore()
+    private let pipelineHistoryStore: PipelineHistoryStore
     private let recordingJournalStore: RecordingJournalStore
     private let cloudTranscriptionJobStore: CloudTranscriptionJobStore
     @MainActor private let cloudTranscriptionHistoryCoordinator =
@@ -2454,6 +2458,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let postTranscriptionUpdateReminderDuration: TimeInterval = 7
 
     init() {
+        pipelineHistoryStore = Self.pipelineHistoryStoreFactory()
         let audioDirectory = Self.audioStorageDirectory()
         recordingJournalStore = RecordingJournalStore(
             audioDirectory: audioDirectory
@@ -2901,6 +2906,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.soundVolume = soundVolume
         self.voiceMacros = initialMacros
         self.pipelineHistory = savedHistory
+        if case .inMemoryFallback = pipelineHistoryStore.durability {
+            self.historyPersistenceWarning = QuillUserIssueRecord(
+                code: .historyPersistenceUnavailable
+            )
+        }
         self.hasAccessibility = initialAccessibility
         self.hasScreenRecordingPermission = initialScreenCapturePermission
         self.launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -6006,6 +6016,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard meetingSummaryAvailability(for: startItem) == .available else {
             throw MeetingSummaryError.invalidInput
         }
+        if case .inMemoryFallback = pipelineHistoryStore.durability {
+            throw QuillUserIssueError.historyPersistenceUnavailable()
+        }
 
         let source = meetingSummarySource(for: startItem)
         meetingSummaryGeneratingNoteIDs.insert(id)
@@ -6035,7 +6048,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             content: result.draft.materialized()
         ).preservingCompletion(from: currentItem.meetingSummary)
         let updated = currentItem.withMeetingSummary(envelope)
-        try pipelineHistoryStore.update(updated)
+        try pipelineHistoryStore.update(updated, requiresDurableStore: true)
         pipelineHistory[currentIndex] = updated
         meetingSummaryPendingRevealNoteIDs.insert(id)
     }

@@ -14725,6 +14725,54 @@
         }
       }
     },
+    "History isn't being saved": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History isn't being saved"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기록이 저장되지 않고 있습니다"
+          }
+        }
+      }
+    },
+    "Quill cannot save history for this session.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill cannot save history for this session."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이번 세션에서는 Quill이 기록을 저장할 수 없습니다."
+          }
+        }
+      }
+    },
+    "Keep Quill open while you work, then restart it after checking available disk space and permissions.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep Quill open while you work, then restart it after checking available disk space and permissions."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "작업하는 동안 Quill을 열어 두고, 사용 가능한 디스크 공간과 권한을 확인한 뒤 다시 시작하세요."
+          }
+        }
+      }
+    },
     "Could not update action item.": {
       "localizations": {
         "en": {

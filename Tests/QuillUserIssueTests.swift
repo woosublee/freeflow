@@ -48,7 +48,8 @@ struct QuillUserIssueTests {
             .localAIProcessExited,
             .contextUnavailable,
             .meetingSummaryUnavailable,
-            .meetingSummaryInvalidResponse
+            .meetingSummaryInvalidResponse,
+            .historyPersistenceUnavailable
         ]
 
         for code in QuillUserIssueCode.allCases {
@@ -101,6 +102,10 @@ struct QuillUserIssueTests {
         try expect(
             QuillUserIssueRecord(code: .meetingSummaryInvalidResponse).recoveryAction == .none,
             "meeting summary invalid response has no recovery action"
+        )
+        try expect(
+            QuillUserIssueRecord(code: .historyPersistenceUnavailable).recoveryAction == .none,
+            "non-durable history is informational only"
         )
         try expect(
             QuillUserIssueRecord(code: .screenRecordingPermissionDenied).recoveryAction == .openScreenRecordingSettings,

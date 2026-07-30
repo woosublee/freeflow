@@ -136,6 +136,18 @@ struct MenuBarView: View {
                     .lineLimit(3)
             }
 
+            if let warning = appState.historyPersistenceWarning {
+                Divider()
+                Label(
+                    warning.presentation().compactMessage,
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
+                .font(.caption)
+                .padding(.horizontal, 16)
+                .lineLimit(3)
+            }
+
             if let error = appState.errorMessage {
                 Divider()
                 Text(error)

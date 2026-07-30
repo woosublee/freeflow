@@ -7,6 +7,7 @@ struct QuillUserIssueUIContractTests {
         let noteBrowser = try source("Sources/NoteBrowserView.swift")
         let setup = try source("Sources/SetupView.swift")
         let settings = try source("Sources/SettingsView.swift")
+        let menuBar = try source("Sources/MenuBarView.swift")
         let appState = try source("Sources/AppState.swift")
 
         try testSharedRenderer(issueView)
@@ -17,6 +18,10 @@ struct QuillUserIssueUIContractTests {
         try testRunLogSanitizesMachineStatuses(settings)
         try testRecoveryActionsUseExistingRoutes(noteBrowser, appState)
         try testDismissibleBannerScopedToWarningStyle(issueView, noteBrowser, appState)
+        try testNonDurableHistoryWarningIsVisibleAndDoesNotExposeBackups(
+            menuBar,
+            appState
+        )
         print("QuillUserIssueUIContractTests passed")
     }
 
@@ -214,6 +219,32 @@ struct QuillUserIssueUIContractTests {
         try expect(
             retryBody.contains("incrementNoteRetryGeneration(for: item.id)"),
             "retry bumps the note's retry generation, invalidating stale dismissals"
+        )
+    }
+
+    private static func testNonDurableHistoryWarningIsVisibleAndDoesNotExposeBackups(
+        _ menuBar: String,
+        _ appState: String
+    ) throws {
+        try expect(
+            appState.contains("@Published private(set) var historyPersistenceWarning"),
+            "AppState publishes a session-only history persistence warning"
+        )
+        try expect(
+            appState.contains(".historyPersistenceUnavailable"),
+            "AppState uses the structured non-durable history warning"
+        )
+        try expect(
+            menuBar.contains("appState.historyPersistenceWarning"),
+            "Menu Bar shows the non-durable history warning"
+        )
+        try expect(
+            !menuBar.contains("backupName"),
+            "Menu Bar never exposes a history recovery backup name"
+        )
+        try expect(
+            !menuBar.contains("History Recovery"),
+            "Menu Bar never exposes a history recovery path"
         )
     }
 

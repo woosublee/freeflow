@@ -29,6 +29,7 @@ enum QuillUserIssueCode: String, Codable, CaseIterable, Sendable {
     case contextUnavailable = "context-unavailable"
     case meetingSummaryUnavailable = "meeting-summary-unavailable"
     case meetingSummaryInvalidResponse = "meeting-summary-invalid-response"
+    case historyPersistenceUnavailable = "history-persistence-unavailable"
     case unknown
     case legacy
 }
@@ -138,7 +139,8 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
         case .screenRecordingPermissionDenied:
             return .openScreenRecordingSettings
         case .postProcessingGuardFallback, .contextUnavailable,
-             .meetingSummaryUnavailable, .meetingSummaryInvalidResponse:
+             .meetingSummaryUnavailable, .meetingSummaryInvalidResponse,
+             .historyPersistenceUnavailable:
             return .none
         case .networkUnavailable, .requestTimedOut, .rateLimited,
              .providerUnavailable, .audioFileTooLarge,
@@ -244,6 +246,10 @@ struct QuillUserIssueError: Error, Sendable {
         self.privateDiagnostic = String(
             privateDiagnostic.suffix(Self.diagnosticCharacterLimit)
         )
+    }
+
+    static func historyPersistenceUnavailable() -> Self {
+        Self(record: QuillUserIssueRecord(code: .historyPersistenceUnavailable))
     }
 
     static func missingProviderAPIKey(
@@ -396,7 +402,7 @@ private extension QuillUserIssueCode {
              .postProcessingGuardFallback, .localAIModelUnavailable,
              .localAIStartFailed, .localAIProcessExited,
              .contextUnavailable, .meetingSummaryUnavailable,
-             .meetingSummaryInvalidResponse:
+             .meetingSummaryInvalidResponse, .historyPersistenceUnavailable:
             return .warning
         default:
             return .error
@@ -572,6 +578,12 @@ private extension QuillUserIssueCode {
                 titleKey: "Summary response could not be read",
                 bodyKey: "The provider returned a response Quill could not use for the summary.",
                 suggestionKey: "Try Regenerate again. If it continues, check the provider configuration."
+            )
+        case .historyPersistenceUnavailable:
+            return QuillUserIssueCopy(
+                titleKey: "History isn't being saved",
+                bodyKey: "Quill cannot save history for this session.",
+                suggestionKey: "Keep Quill open while you work, then restart it after checking available disk space and permissions."
             )
         case .unknown:
             return QuillUserIssueCopy(

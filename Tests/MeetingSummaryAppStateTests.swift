@@ -10,6 +10,7 @@ struct MeetingSummaryAppStateTests {
         }
         do {
             try await testGenerationPersistsOnlyAfterSuccess()
+            try await testNonDurableHistoryWarningPreventsSummaryPersistence()
             try await testFailurePreservesExistingSummary()
             try await testGroundingFailurePreservesExistingSummaryAndCompletion()
             try await testTranscriptChangeDiscardsInflightResult()
@@ -135,6 +136,64 @@ struct MeetingSummaryAppStateTests {
         }
     }
 
+    private static func testNonDurableHistoryWarningPreventsSummaryPersistence() async throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let store = makeInMemoryFallbackStore(at: directoryURL)
+        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
+        defer {
+            AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+        }
+        AppState.pipelineHistoryStoreFactory = { store }
+
+        let item = makeItem()
+        let appState = await MainActor.run {
+            AppState()
+        }
+        await MainActor.run {
+            appState.apiKey = "configured-key"
+            appState.selectAIProcessingBackendChoice(
+                .cloud(modelID: "summary/model"),
+                for: .meetingSummary
+            )
+            appState.disableMeetingSummary = false
+            appState.pipelineHistory = [item]
+            precondition(
+                appState.historyPersistenceWarning?.code
+                    == .historyPersistenceUnavailable,
+                "in-memory history warns for this session"
+            )
+        }
+        await MainActor.run {
+            AppState.meetingSummaryGeneratorFactory = { _ in
+                MeetingSummaryGeneratorStub { _ in generationResult }
+            }
+        }
+
+        do {
+            try await appState.generateMeetingSummary(id: item.id)
+            throw MeetingSummaryAppStateTestFailure(
+                "Expected non-durable history warning"
+            )
+        } catch let issue as QuillUserIssueError {
+            await MainActor.run {
+                precondition(
+                    issue.record.code == .historyPersistenceUnavailable,
+                    "summary persistence uses the non-durable history warning"
+                )
+                precondition(
+                    appState.pipelineHistory[0].meetingSummary == nil,
+                    "new summary is not claimed as durably saved"
+                )
+            }
+        }
+    }
+
     private static func testFailurePreservesExistingSummary() async throws {
         let existing = envelope(completed: true)
         let item = makeItem().withMeetingSummary(existing)
@@ -243,6 +302,26 @@ struct MeetingSummaryAppStateTests {
                 appState.meetingSummaryAvailability(for: item) == .available
             )
         }
+    }
+
+    private static func makeInMemoryFallbackStore(
+        at directoryURL: URL
+    ) -> PipelineHistoryStore {
+        var persistentLoadAttempts = 0
+        return PipelineHistoryStore(
+            storeURL: directoryURL.appendingPathComponent("PipelineHistory.sqlite"),
+            persistentStoreLoader: { container in
+                persistentLoadAttempts += 1
+                if persistentLoadAttempts <= 2 {
+                    return MeetingSummaryAppStateTestFailure(
+                        "Injected persistent-store load failure"
+                    )
+                }
+                return PipelineHistoryStore.loadPersistentStoresSynchronously(
+                    container: container
+                )
+            }
+        )
     }
 
     private static func configuredAppState(
