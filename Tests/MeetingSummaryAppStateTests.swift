@@ -11,6 +11,7 @@ struct MeetingSummaryAppStateTests {
         do {
             try await testGenerationPersistsOnlyAfterSuccess()
             try await testFailurePreservesExistingSummary()
+            try await testGroundingFailurePreservesExistingSummaryAndCompletion()
             try await testTranscriptChangeDiscardsInflightResult()
             try await testActionCompletionPersists()
             try await testPostProcessingDisabledDoesNotBlockSummary()
@@ -158,6 +159,32 @@ struct MeetingSummaryAppStateTests {
         }
     }
 
+    private static func testGroundingFailurePreservesExistingSummaryAndCompletion() async throws {
+        let existing = envelope(completed: true)
+        let item = makeItem().withMeetingSummary(existing)
+        let appState = await configuredAppState(item: item)
+        await MainActor.run {
+            AppState.meetingSummaryGeneratorFactory = { _ in
+                MeetingSummaryGeneratorStub { _ in
+                    throw MeetingSummaryError.outputRejected(.sourceQuoteNotFound)
+                }
+            }
+        }
+
+        do {
+            try await appState.generateMeetingSummary(id: item.id)
+            throw MeetingSummaryAppStateTestFailure("Expected grounding failure")
+        } catch let failure as MeetingSummaryAppStateTestFailure {
+            throw failure
+        } catch {}
+
+        await MainActor.run {
+            let saved = appState.pipelineHistory[0].meetingSummary
+            precondition(saved == existing)
+            precondition(saved?.content.actionItems[0].isCompleted == true)
+        }
+    }
+
     private static func testTranscriptChangeDiscardsInflightResult() async throws {
         let generator = MeetingSummaryControlledGenerator()
         let item = makeItem()
@@ -261,7 +288,10 @@ struct MeetingSummaryAppStateTests {
             modelID: "summary/model",
             backendKind: .cloud,
             content: MeetingSummaryContent(
-                overview: "Release review",
+                overview: MeetingSummaryEvidenceText(
+                    text: "Release review",
+                    sourceQuotes: ["Decision: ship Friday."]
+                ),
                 keyPoints: [],
                 decisions: [],
                 actionItems: [
@@ -280,16 +310,21 @@ struct MeetingSummaryAppStateTests {
     }
 
     private static let generationResult = MeetingSummaryGenerationResult(
-        draft: MeetingSummaryDraftContent(
-            overview: "Release review",
+        draft: MeetingSummaryDraftContentV2(
+            overview: MeetingSummaryEvidenceText(
+                text: "Release review",
+                sourceQuotes: ["Decision: ship Friday."]
+            ),
             keyPoints: [],
             decisions: [],
             actionItems: [
-                MeetingSummaryDraftActionItem(
+                MeetingSummaryActionItem(
+                    id: UUID(),
                     task: "Write release notes",
                     owner: nil,
                     dueDate: nil,
-                    sourceQuote: "Write release notes."
+                    sourceQuote: "Write release notes.",
+                    isCompleted: false
                 )
             ],
             openQuestions: []

@@ -8,13 +8,19 @@ struct MeetingSummaryTextChunk: Equatable, Sendable {
 }
 
 struct MeetingSummaryTextChunker: Sendable {
-    static let defaultMaxCharacters = 12_000
+    static let defaultMaximumSourceBytes = 12_000
 
-    let maxCharacters: Int
+    let maximumSourceBytes: Int
 
-    init(maxCharacters: Int = Self.defaultMaxCharacters) {
-        precondition(maxCharacters > 0)
-        self.maxCharacters = maxCharacters
+    init(maximumSourceBytes: Int = Self.defaultMaximumSourceBytes) {
+        precondition(maximumSourceBytes > 0)
+        self.maximumSourceBytes = maximumSourceBytes
+    }
+
+    /// Retained for callers that configured the old character-based chunker.
+    /// New Summary production code uses `maximumSourceBytes` from its token budget.
+    init(maxCharacters: Int) {
+        self.init(maximumSourceBytes: maxCharacters)
     }
 
     func chunks(for text: String) -> [MeetingSummaryTextChunk] {
@@ -25,19 +31,10 @@ struct MeetingSummaryTextChunker: Sendable {
         var startOffset = 0
 
         while start < text.endIndex {
-            let remainingCount = text.distance(from: start, to: text.endIndex)
-            let end: String.Index
-            if remainingCount <= maxCharacters {
-                end = text.endIndex
-            } else {
-                let hardEnd = text.index(start, offsetBy: maxCharacters)
-                end = preferredBoundary(
-                    in: text,
-                    from: start,
-                    hardEnd: hardEnd
-                )
-            }
-
+            let hardEnd = byteBoundedEnd(in: text, from: start)
+            let end = hardEnd == text.endIndex
+                ? hardEnd
+                : preferredBoundary(in: text, from: start, hardEnd: hardEnd)
             let chunkText = String(text[start..<end])
             let endOffset = startOffset + chunkText.count
             chunks.append(
@@ -53,6 +50,25 @@ struct MeetingSummaryTextChunker: Sendable {
         }
 
         return chunks
+    }
+
+    private func byteBoundedEnd(
+        in text: String,
+        from start: String.Index
+    ) -> String.Index {
+        var index = start
+        var byteCount = 0
+        while index < text.endIndex {
+            let next = text.index(after: index)
+            let characterBytes = String(text[index..<next]).utf8.count
+            if byteCount > 0 && byteCount + characterBytes > maximumSourceBytes {
+                break
+            }
+            byteCount += characterBytes
+            index = next
+            if byteCount >= maximumSourceBytes { break }
+        }
+        return index
     }
 
     private func preferredBoundary(

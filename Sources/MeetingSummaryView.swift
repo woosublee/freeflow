@@ -94,7 +94,7 @@ struct MeetingSummaryView: View {
         let content = envelope.content
         return VStack(alignment: .leading, spacing: 24) {
             summarySection(title: "Overview") {
-                Text(content.overview)
+                Text(content.overview.text)
                     .font(.body)
                     .textSelection(.enabled)
             }
