@@ -183,7 +183,7 @@ struct QuillUserIssueTests {
         let localIssue = QuillUserIssueError.local(
             code: .localAIProcessExited,
             backend: "Local AI",
-            modelID: "qwen2.5-1.5b-instruct",
+            modelID: "local-model-id",
             diagnostic: "/Users/private/model.gguf STDERR_SECRET"
         )
         let localPayload = try decodedPayloadString(localIssue.record.encodedStatus())

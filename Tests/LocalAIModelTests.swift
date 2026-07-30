@@ -4,12 +4,11 @@ import Foundation
 struct LocalAIModelTests {
     static func main() throws {
         try testQualityModelMetadata()
-        try testFastModelMetadata()
         try testModelsDeclareTextOnlyCapabilitiesAndRuntime()
         try testCapabilityLookupUsesStoredModelIDs()
         try testCatalogArtifactsAreCompleteAndValid()
-        try testCatalogContainsBothModelsWithQualityRecommended()
-        try testFindReturnsMatchingModelOrFallsBackToRecommended()
+        try testCatalogContainsOnlyQualityModel()
+        try testProductSourcesContainNoRetiredCatalogMetadata()
         try testDownloadProgressDisplayText()
         try testLocalizedModelMetadataAndDownloadProgress()
         print("LocalAIModelTests passed")
@@ -36,25 +35,6 @@ struct LocalAIModelTests {
         assert(model.approximateBytes == 4_683_073_632)
         assert(model.primaryArtifact == first)
         assert(model.approximateResidentRAMBytes > model.approximateBytes)
-    }
-
-    private static func testFastModelMetadata() throws {
-        let model = LocalAIModelCatalog.fast
-        assert(model.id == "qwen2.5-1.5b-instruct")
-        assert(model.displayName == "Qwen2.5 1.5B Instruct")
-        assert(model.artifacts.count == 1)
-
-        let artifact = model.artifacts[0]
-        assert(artifact.downloadURL.absoluteString == "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf")
-        assert(artifact.expectedFileName == "qwen2.5-1.5b-instruct-q4_k_m.gguf")
-        assert(artifact.approximateBytes == 1_117_320_736)
-        assert(artifact.checksumSHA256 == "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e")
-
-        assert(model.approximateBytes == 1_117_320_736)
-        assert(model.approximateResidentRAMBytes == 2_500_000_000)
-        assert(model.approximateResidentRAMBytes > model.approximateBytes)
-        assert(model.approximateBytes < LocalAIModelCatalog.quality.approximateBytes)
-        assert(model.primaryArtifact == artifact)
     }
 
     private static func testModelsDeclareTextOnlyCapabilitiesAndRuntime() throws {
@@ -85,14 +65,27 @@ struct LocalAIModelTests {
         }
     }
 
-    private static func testCatalogContainsBothModelsWithQualityRecommended() throws {
-        assert(LocalAIModelCatalog.all.map(\.id) == ["qwen2.5-7b-instruct", "qwen2.5-1.5b-instruct"])
-        assert(LocalAIModelCatalog.recommended.id == LocalAIModelCatalog.quality.id)
+    private static func testCatalogContainsOnlyQualityModel() throws {
+        assert(LocalAIModelCatalog.all.map(\.id) == ["qwen2.5-7b-instruct"])
+        assert(LocalAIModelCatalog.model(id: "qwen2.5-7b-instruct") == LocalAIModelCatalog.quality)
+        assert(LocalAIModelCatalog.model(id: "does-not-exist") == nil)
     }
 
-    private static func testFindReturnsMatchingModelOrFallsBackToRecommended() throws {
-        assert(LocalAIModelCatalog.find(id: "qwen2.5-1.5b-instruct").id == "qwen2.5-1.5b-instruct")
-        assert(LocalAIModelCatalog.find(id: "does-not-exist").id == LocalAIModelCatalog.recommended.id)
+    private static func testProductSourcesContainNoRetiredCatalogMetadata() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let localModelSource = try String(
+            contentsOf: root.appendingPathComponent("Sources/LocalAIModel.swift"),
+            encoding: .utf8
+        )
+        let capabilitySource = try String(
+            contentsOf: root.appendingPathComponent("Sources/AIModelCapabilities.swift"),
+            encoding: .utf8
+        )
+        for source in [localModelSource, capabilitySource] {
+            assert(!source.contains("qwen2.5-1.5b-instruct"))
+            assert(!source.contains("Qwen2.5-1.5B-Instruct-GGUF"))
+            assert(!source.contains("Faster and lighter. Good for lower-memory Macs."))
+        }
     }
 
     private static func testDownloadProgressDisplayText() throws {
@@ -109,12 +102,6 @@ struct LocalAIModelTests {
                 language: "ko",
                 bundle: bundle
             ) == "최고 품질입니다. 더 많은 메모리가 필요합니다."
-        )
-        assert(
-            LocalAIModelCatalog.fast.localizedDescription(
-                language: "ko",
-                bundle: bundle
-            ) == "더 빠르고 가볍습니다. 메모리가 적은 Mac에 적합합니다."
         )
         assert(
             LocalAIDownloadProgress(

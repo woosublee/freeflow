@@ -75,29 +75,7 @@ struct LocalAIModelCatalog {
         runtime: .textChat
     )
 
-    static let fast = LocalAIModel(
-        id: "qwen2.5-1.5b-instruct",
-        displayName: "Qwen2.5 1.5B Instruct",
-        description: "Faster and lighter. Good for lower-memory Macs.",
-        artifacts: [
-            LocalAIModelArtifact(
-                downloadURL: URL(string: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf")!,
-                expectedFileName: "qwen2.5-1.5b-instruct-q4_k_m.gguf",
-                approximateBytes: 1_117_320_736,
-                checksumSHA256: "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"
-            )
-        ],
-        approximateResidentRAMBytes: 2_500_000_000,
-        capabilities: AIModelCapabilityCatalog.qwenTextCapabilities,
-        runtime: .textChat
-    )
-
-    static let recommended = quality
-    static let all: [LocalAIModel] = [quality, fast]
-
-    static func find(id: String) -> LocalAIModel {
-        all.first { $0.id == id } ?? recommended
-    }
+    static let all: [LocalAIModel] = [quality]
 
     static func model(id: String) -> LocalAIModel? {
         all.first { $0.id == id }

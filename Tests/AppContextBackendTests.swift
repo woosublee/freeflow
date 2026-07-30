@@ -33,7 +33,7 @@ struct AppContextBackendTests {
         let service = AppContextService(
             backendExecutor: localExecutor(manager: readyManager()),
             customContextPrompt: "",
-            contextModel: LocalAIModelCatalog.fast.id,
+            contextModel: LocalAIModelCatalog.quality.id,
             screenshotMaxDimension: 1024,
             transport: { request in
                 recorder.record(request)
@@ -546,7 +546,7 @@ struct AppContextBackendTests {
         let service = AppContextService(
             backendExecutor: localExecutor(manager: readyManager()),
             customContextPrompt: "",
-            contextModel: LocalAIModelCatalog.fast.id,
+            contextModel: LocalAIModelCatalog.quality.id,
             screenshotMaxDimension: 1024,
             transport: { _ in throw URLError(.cannotConnectToHost) },
             issueSink: { issue in issues.record(issue) }
@@ -571,7 +571,7 @@ struct AppContextBackendTests {
         let service = AppContextService(
             backendExecutor: localExecutor(manager: readyManager(process: process)),
             customContextPrompt: "",
-            contextModel: LocalAIModelCatalog.fast.id,
+            contextModel: LocalAIModelCatalog.quality.id,
             screenshotMaxDimension: 1024,
             transport: { _ in
                 process.simulateExit()
@@ -595,7 +595,7 @@ struct AppContextBackendTests {
 
     private static func localExecutor(manager: LocalAIServerManager) -> AIProcessingBackendExecutor {
         AIProcessingBackendExecutor(
-            choice: .localAI(modelID: LocalAIModelCatalog.fast.id),
+            choice: .localAI(modelID: LocalAIModelCatalog.quality.id),
             cloudBaseURL: AppState.defaultAPIBaseURL,
             cloudAPIKey: "cloud-secret",
             localServerManager: manager

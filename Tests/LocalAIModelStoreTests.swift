@@ -16,7 +16,7 @@ struct LocalAIModelStoreTests {
         try testDeleteRemovesOnlySelectedPackageArtifactsAndBackups()
         try testDanglingOfficialEntriesAreReportedAndRemoved()
         try testDeleteMissingPackageSucceeds()
-        try testCatalogModelsHaveIndependentStorage()
+        try testModelDescriptorsHaveIndependentStorage()
         print("LocalAIModelStoreTests passed")
     }
 
@@ -263,14 +263,16 @@ struct LocalAIModelStoreTests {
         assert(store.installStatus(for: model) == .notInstalled)
     }
 
-    private static func testCatalogModelsHaveIndependentStorage() throws {
+    private static func testModelDescriptorsHaveIndependentStorage() throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = LocalAIModelStore(rootDirectory: root)
+        let first = testModel(id: "first-model")
+        let second = testModel(id: "second-model")
 
-        assert(store.modelURL(for: LocalAIModelCatalog.quality) != store.modelURL(for: LocalAIModelCatalog.fast))
-        assert(store.artifactURL(for: LocalAIModelCatalog.quality.primaryArtifact) != store.artifactURL(for: LocalAIModelCatalog.fast.primaryArtifact))
-        assert(store.partialArtifactURL(for: LocalAIModelCatalog.quality.primaryArtifact) != store.partialArtifactURL(for: LocalAIModelCatalog.fast.primaryArtifact))
+        assert(store.modelURL(for: first) != store.modelURL(for: second))
+        assert(store.artifactURL(for: first.primaryArtifact) != store.artifactURL(for: second.primaryArtifact))
+        assert(store.partialArtifactURL(for: first.primaryArtifact) != store.partialArtifactURL(for: second.primaryArtifact))
     }
 
     private static func writeFinalArtifacts(_ data: [Data], for model: LocalAIModel, to store: LocalAIModelStore) throws {

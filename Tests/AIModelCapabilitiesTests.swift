@@ -5,6 +5,7 @@ struct AIModelCapabilitiesTests {
     static func main() throws {
         try testContextRequiresImageModality()
         try testQualityQwenFeatures()
+        try testRetiredQwenHasNoCapabilities()
         try testCloudCapabilitiesAreExplicit()
         print("AIModelCapabilitiesTests passed")
     }
@@ -28,6 +29,13 @@ struct AIModelCapabilitiesTests {
         try expect(!model.capabilities.supportsContextCapture, "quality excludes Context")
         try expect(model.capabilities.recommendedContextWindow == 16_384,
                    "quality uses 16K context")
+    }
+
+    private static func testRetiredQwenHasNoCapabilities() throws {
+        try expect(
+            LocalAIModelCatalog.capabilities(for: "qwen2.5-1.5b-instruct") == nil,
+            "retired Qwen has no Local capability mapping"
+        )
     }
 
     private static func testCloudCapabilitiesAreExplicit() throws {

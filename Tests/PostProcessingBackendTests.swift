@@ -228,7 +228,7 @@ struct PostProcessingBackendTests {
     private static func testInvalidCloudBaseURLIsNotRelabeledAsLocal() throws {
         let service = PostProcessingService(
             backendExecutor: AIProcessingBackendExecutor(
-                choice: .localAI(modelID: LocalAIModelCatalog.fast.id),
+                choice: .localAI(modelID: LocalAIModelCatalog.quality.id),
                 cloudBaseURL: "not a valid cloud URL",
                 cloudAPIKey: ""
             ),
@@ -266,7 +266,7 @@ struct PostProcessingBackendTests {
         )
         return PostProcessingService(
             backendExecutor: AIProcessingBackendExecutor(
-                choice: .localAI(modelID: LocalAIModelCatalog.fast.id),
+                choice: .localAI(modelID: LocalAIModelCatalog.quality.id),
                 cloudBaseURL: cloudBaseURL,
                 cloudAPIKey: "cloud-secret",
                 localServerManager: manager
@@ -289,7 +289,7 @@ struct PostProcessingBackendTests {
             recorder: recorder,
             cooldownIdentity: LLMCooldownIdentity(
                 baseURL: cloudBaseURL,
-                model: LocalAIModelCatalog.fast.id
+                model: LocalAIModelCatalog.quality.id
             )
         )
     }

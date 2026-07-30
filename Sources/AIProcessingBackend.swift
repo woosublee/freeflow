@@ -1,9 +1,5 @@
 import Foundation
 
-#if canImport(Darwin)
-import Darwin
-#endif
-
 enum AIProcessingFeature: String, CaseIterable, Hashable, Sendable {
     case postProcessing
     case context
@@ -91,26 +87,20 @@ struct AIProcessingBackendChoiceStore {
 }
 
 struct LocalAIProcessingAvailability: Equatable {
-    static let qualityMemoryThreshold: UInt64 = 16 * 1_024 * 1_024 * 1_024
-
     let isAppleSilicon: Bool
     let runnerIsExecutable: Bool
-    let physicalMemory: UInt64
 
     var isSupported: Bool {
         isAppleSilicon && runnerIsExecutable
     }
 
     var recommendedModel: LocalAIModel {
-        physicalMemory < Self.qualityMemoryThreshold
-            ? LocalAIModelCatalog.fast
-            : LocalAIModelCatalog.quality
+        LocalAIModelCatalog.quality
     }
 
     static func live(
         bundle: Bundle = .main,
-        fileManager: FileManager = .default,
-        processInfo: ProcessInfo = ProcessInfo.processInfo
+        fileManager: FileManager = .default
     ) -> LocalAIProcessingAvailability {
         #if arch(arm64)
         let isAppleSilicon = true
@@ -123,8 +113,7 @@ struct LocalAIProcessingAvailability: Equatable {
         } ?? false
         return LocalAIProcessingAvailability(
             isAppleSilicon: isAppleSilicon,
-            runnerIsExecutable: executable,
-            physicalMemory: processInfo.physicalMemory
+            runnerIsExecutable: executable
         )
     }
 }

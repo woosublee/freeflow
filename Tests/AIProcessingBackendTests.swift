@@ -4,12 +4,12 @@ import Foundation
 struct AIProcessingBackendTests {
     static func main() async throws {
         try testChoiceStorageRoundTripAndFallback()
-        try testAvailabilityAndRAMRecommendation()
+        try testAvailabilityAlwaysRecommendsQuality()
         try await testCloudExecutorPreservesProviderConfiguration()
         try await testDeclaredCloudVisionModelSupportsImages()
         try await testCloudExecutorRejectsMissingKeyBeforeOperation()
         try await testLocalQwenExecutorUsesDescriptorAndLocalRequestContract()
-        try await testUnknownLocalModelFailsWithoutCatalogFallback()
+        try await testRetiredLocalModelFailsWithoutServerOrCloudFallback()
         print("AIProcessingBackendTests passed")
     }
 
@@ -24,7 +24,7 @@ struct AIProcessingBackendTests {
         defer { defaults.removePersistentDomain(forName: suite) }
 
         let stored = AIProcessingBackendChoice.localAI(
-            modelID: LocalAIModelCatalog.fast.id
+            modelID: LocalAIModelCatalog.quality.id
         )
         AIProcessingBackendChoiceStore.save(stored, defaults: defaults, key: "choice")
         assert(
@@ -45,25 +45,17 @@ struct AIProcessingBackendTests {
         )
     }
 
-    private static func testAvailabilityAndRAMRecommendation() throws {
-        let supported8GB = LocalAIProcessingAvailability(
+    private static func testAvailabilityAlwaysRecommendsQuality() throws {
+        let supported = LocalAIProcessingAvailability(
             isAppleSilicon: true,
-            runnerIsExecutable: true,
-            physicalMemory: 8 * 1_024 * 1_024 * 1_024
+            runnerIsExecutable: true
         )
-        let supported16GB = LocalAIProcessingAvailability(
-            isAppleSilicon: true,
-            runnerIsExecutable: true,
-            physicalMemory: 16 * 1_024 * 1_024 * 1_024
-        )
-        assert(supported8GB.isSupported)
-        assert(supported8GB.recommendedModel.id == LocalAIModelCatalog.fast.id)
-        assert(supported16GB.recommendedModel.id == LocalAIModelCatalog.quality.id)
+        assert(supported.isSupported)
+        assert(supported.recommendedModel.id == LocalAIModelCatalog.quality.id)
         assert(
             !LocalAIProcessingAvailability(
                 isAppleSilicon: false,
-                runnerIsExecutable: true,
-                physicalMemory: UInt64.max
+                runnerIsExecutable: true
             ).isSupported
         )
     }
@@ -147,19 +139,33 @@ struct AIProcessingBackendTests {
         assert(!endpoint.supportsImages)
     }
 
-    private static func testUnknownLocalModelFailsWithoutCatalogFallback() async throws {
-        let executor = AIProcessingBackendExecutor(
-            choice: .localAI(modelID: "missing-model"),
-            cloudBaseURL: "https://api.example.com/openai/v1",
-            cloudAPIKey: "",
-            localServerManager: LocalAIServerManager(validateModel: { _ in .ready })
+    private static func testRetiredLocalModelFailsWithoutServerOrCloudFallback() async throws {
+        let retiredModelID = "qwen2.5-1.5b-instruct"
+        let process = FakeLocalAIServerProcess()
+        let launchedModelIDs = ObservedModelIDs()
+        let manager = LocalAIServerManager(
+            launchProcess: { model, _, port, _ in
+                launchedModelIDs.append(model.id)
+                return (process, port)
+            },
+            pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
+            validateModel: { _ in .ready }
         )
+        let executor = AIProcessingBackendExecutor(
+            choice: .localAI(modelID: retiredModelID),
+            cloudBaseURL: "https://api.example.com/openai/v1",
+            cloudAPIKey: "configured-cloud-key",
+            localServerManager: manager
+        )
+
         do {
             _ = try await executor.withEndpoint { $0 }
-            assertionFailure("Expected unknown model failure")
+            assertionFailure("Expected retired local model failure")
         } catch AIProcessingBackendError.unknownLocalModel(let modelID) {
-            assert(modelID == "missing-model")
+            assert(modelID == retiredModelID)
         }
+        assert(launchedModelIDs.values.isEmpty)
     }
 }
 

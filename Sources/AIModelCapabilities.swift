@@ -14,6 +14,12 @@ struct AIModelCapabilities: Hashable, Sendable, Codable {
     let modalities: Set<AIModelModality>
     let recommendedContextWindow: Int?
 
+    static let none = AIModelCapabilities(
+        features: [],
+        modalities: [],
+        recommendedContextWindow: nil
+    )
+
     func supports(_ feature: AIModelFeature) -> Bool {
         features.contains(feature)
     }
@@ -55,7 +61,7 @@ enum AIModelCapabilityCatalog {
 
     static func capabilities(forLocalModelID modelID: String) -> AIModelCapabilities? {
         switch modelID {
-        case "qwen2.5-7b-instruct", "qwen2.5-1.5b-instruct":
+        case "qwen2.5-7b-instruct":
             qwenTextCapabilities
         default:
             nil

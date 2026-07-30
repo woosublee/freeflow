@@ -28,7 +28,7 @@ extension AIProcessingBackendChoice {
             ModelConfiguration.capabilities(for: modelID)
         case .localAI(let modelID):
             LocalAIModelCatalog.capabilities(for: modelID)
-                ?? AIModelCapabilityCatalog.qwenTextCapabilities
+                ?? .none
         }
     }
 }
@@ -3512,6 +3512,38 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
+    private func unavailableLocalAIChoiceDisplay(
+        for feature: AIProcessingFeature
+    ) -> AIProcessingChoiceDisplay? {
+        let choice = currentAIProcessingChoice(for: feature)
+        guard case .localAI(let modelID) = choice,
+              LocalAIModelCatalog.model(id: modelID) == nil else {
+            return nil
+        }
+
+        let unavailableReason: String
+        switch feature {
+        case .context:
+            unavailableReason = localizedCatalogString(
+                "The previously selected on-device model is no longer available. Context requires an image-capable model."
+            )
+        case .postProcessing, .meetingSummary:
+            unavailableReason = localizedCatalogString(
+                "The previously selected on-device model is no longer available. Explicitly select Qwen2.5 7B to continue locally."
+            )
+        }
+        return AIProcessingChoiceDisplay(
+            choice: choice,
+            section: "On This Mac",
+            title: modelID,
+            subtitle: unavailableReason,
+            isAvailable: false,
+            unavailableReason: unavailableReason,
+            isRecommended: false
+        )
+    }
+
+    @MainActor
     func aiProcessingChoiceDisplays(
         for feature: AIProcessingFeature
     ) -> [AIProcessingChoiceDisplay] {
@@ -3538,8 +3570,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
             )
         }
 
+        let unavailableLocalDisplays = unavailableLocalAIChoiceDisplay(
+            for: feature
+        ).map { [$0] } ?? []
         let availability = Self.localAIProcessingAvailabilityProvider()
-        guard availability.isSupported else { return cloudDisplays }
+        guard availability.isSupported else {
+            return cloudDisplays + unavailableLocalDisplays
+        }
         let localDisplays = LocalAIModelCatalog.all.compactMap {
             model -> AIProcessingChoiceDisplay? in
             let choice = AIProcessingBackendChoice.localAI(modelID: model.id)
@@ -3559,7 +3596,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 isRecommended: model.id == availability.recommendedModel.id
             )
         }
-        return cloudDisplays + localDisplays
+        return cloudDisplays + unavailableLocalDisplays + localDisplays
     }
 
     @MainActor

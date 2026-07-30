@@ -13573,22 +13573,6 @@
         }
       }
     },
-    "Faster and lighter. Good for lower-memory Macs.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Faster and lighter. Good for lower-memory Macs."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "더 빠르고 가볍습니다. 메모리가 적은 Mac에 적합합니다."
-          }
-        }
-      }
-    },
     "Canceled": {
       "localizations": {
         "en": {
@@ -14785,6 +14769,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "할 일을 업데이트하지 못했습니다."
+          }
+        }
+      }
+    },
+    "The previously selected on-device model is no longer available. Explicitly select Qwen2.5 7B to continue locally.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The previously selected on-device model is no longer available. Explicitly select Qwen2.5 7B to continue locally."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전에 선택한 온디바이스 모델을 더 이상 사용할 수 없습니다. 로컬에서 계속하려면 Qwen2.5 7B를 직접 선택하세요."
+          }
+        }
+      }
+    },
+    "The previously selected on-device model is no longer available. Context requires an image-capable model.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The previously selected on-device model is no longer available. Context requires an image-capable model."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전에 선택한 온디바이스 모델을 더 이상 사용할 수 없습니다. Context에는 이미지 지원 모델이 필요합니다."
           }
         }
       }

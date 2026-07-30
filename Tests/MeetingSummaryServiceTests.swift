@@ -131,7 +131,7 @@ struct MeetingSummaryServiceTests {
         )
         let service = MeetingSummaryService(
             backendExecutor: AIProcessingBackendExecutor(
-                choice: .localAI(modelID: LocalAIModelCatalog.fast.id),
+                choice: .localAI(modelID: LocalAIModelCatalog.quality.id),
                 cloudBaseURL: "https://api.example.com/openai/v1",
                 cloudAPIKey: "cloud-secret",
                 localServerManager: manager
