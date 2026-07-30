@@ -177,7 +177,7 @@ struct LocalizationResourceTests {
         try assertInfoPlistTranslations(root: root)
 
         let settingsSource = try String(contentsOf: root.appendingPathComponent("Sources/SettingsView.swift"), encoding: .utf8)
-        assert(settingsSource.contains("MicrophoneOptionRow(\n                    title: \"System Default\""))
+        assert(settingsSource.contains("verbatimName: appState.systemDefaultMicrophoneDisplayName(),"))
         assert(settingsSource.contains("verbatimName: device.name,"))
         assert(settingsSource.contains("init(title: LocalizedStringKey"))
         assert(settingsSource.contains("init(verbatimName: String"))
@@ -193,7 +193,7 @@ struct LocalizationResourceTests {
         }
         for key in [
             "Auto Detect", "Audio Input", "Audio Source", "Microphone",
-            "System Default", "System Audio", "Microphone + System Audio",
+            "System Default", "System Default (%@)", "System Audio", "Microphone + System Audio",
             "%@ + System Audio", "Choose what Quill records.",
             "Used for Microphone and Microphone + System Audio."
         ] {

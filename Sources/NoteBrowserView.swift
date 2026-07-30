@@ -568,8 +568,8 @@ struct NoteBrowserView: View {
                     microphones: [
                         AudioInputMenuOption(
                             id: AudioInputDevice.defaultMicrophoneID,
-                            name: "System Default",
-                            isStaticQuillName: true
+                            name: appState.systemDefaultMicrophoneDisplayName(),
+                            isStaticQuillName: false
                         )
                     ] + appState.availableMicrophones.map {
                         AudioInputMenuOption(

@@ -3863,7 +3863,7 @@ struct InputSettingsView: View {
 
             VStack(spacing: 6) {
                 MicrophoneOptionRow(
-                    title: "System Default",
+                    verbatimName: appState.systemDefaultMicrophoneDisplayName(),
                     isSelected: appState.selectedMicrophoneDeviceID == AudioInputDevice.defaultMicrophoneID,
                     action: { appState.selectMicrophoneDevice(AudioInputDevice.defaultMicrophoneID) }
                 )

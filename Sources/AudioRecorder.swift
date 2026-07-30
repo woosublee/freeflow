@@ -25,9 +25,29 @@ struct AudioDevice: Identifiable {
         ).devices
     }
 
+    static func defaultInputDevice() -> AVCaptureDevice? {
+        AVCaptureDevice.default(for: .audio) ?? captureDevices().first
+    }
+
+    static func inputDeviceSnapshot() -> (
+        devices: [AudioDevice],
+        defaultInputDeviceName: String?
+    ) {
+        let resolvedCaptureDevices = captureDevices()
+        let defaultDevice = AVCaptureDevice.default(for: .audio) ?? resolvedCaptureDevices.first
+        return (
+            devices: makeAudioDevices(from: resolvedCaptureDevices),
+            defaultInputDeviceName: displayName(for: defaultDevice)
+        )
+    }
+
     static func availableInputDevices() -> [AudioDevice] {
+        makeAudioDevices(from: captureDevices())
+    }
+
+    private static func makeAudioDevices(from captureDevices: [AVCaptureDevice]) -> [AudioDevice] {
         var seenUIDs = Set<String>()
-        return captureDevices()
+        return captureDevices
             .compactMap { device in
                 let uid = device.uniqueID.trimmingCharacters(in: .whitespacesAndNewlines)
                 let name = device.localizedName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -39,6 +59,11 @@ struct AudioDevice: Identifiable {
             .sorted { lhs, rhs in
                 lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
             }
+    }
+
+    private static func displayName(for device: AVCaptureDevice?) -> String? {
+        let name = device?.localizedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name?.isEmpty == false ? name : nil
     }
 }
 
@@ -162,7 +187,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     }
 
     private static func defaultCaptureDevice() -> AVCaptureDevice? {
-        AVCaptureDevice.default(for: .audio) ?? AudioDevice.captureDevices().first
+        AudioDevice.defaultInputDevice()
     }
 
     private func preferredCaptureDevice(

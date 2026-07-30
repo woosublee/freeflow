@@ -11,10 +11,13 @@ struct SystemAudioInputSelectionTests {
         testAudioSourceMapping()
         testAudioSourceCatalog()
         testMicrophoneDeviceNormalization()
+        testSystemDefaultMicrophoneDisplayName()
+        try testSystemDefaultInputChangeRefreshesCachedName()
         try testSettingsSeparatesSourceAndMicrophone()
         try testMenuBarSeparatesSourceAndMicrophone()
         try testSettingsPickerIncludesMicrophoneAndSystemAudio()
         try testMenuBarPickerIncludesMicrophoneAndSystemAudio()
+        try testMicrophoneSelectorsUseCommonSystemDefaultDisplayName()
         try testSetupOmitsAudioInputPicker()
         print("SystemAudioInputSelectionTests passed")
     }
@@ -97,6 +100,43 @@ struct SystemAudioInputSelectionTests {
         assert(AudioInputDevice.normalizedMicrophoneDeviceID("device-uid") == "device-uid")
     }
 
+    private static func testSystemDefaultMicrophoneDisplayName() {
+        let fallback = "System Default"
+        let format = "System Default (%@)"
+
+        precondition(
+            AudioInputDevice.systemDefaultDisplayName(
+                deviceName: "MacBook Air Microphone",
+                defaultTitle: fallback,
+                format: format
+            ) == "System Default (MacBook Air Microphone)"
+        )
+        precondition(
+            AudioInputDevice.systemDefaultDisplayName(
+                deviceName: " \n ",
+                defaultTitle: fallback,
+                format: format
+            ) == fallback
+        )
+        precondition(
+            AudioInputDevice.systemDefaultDisplayName(
+                deviceName: nil,
+                defaultTitle: fallback,
+                format: format
+            ) == fallback
+        )
+    }
+
+    private static func testSystemDefaultInputChangeRefreshesCachedName() throws {
+        let appStateSource = try sourceFile("Sources/AppState.swift")
+
+        assertContains(appStateSource, "import CoreAudio")
+        assertContains(appStateSource, "kAudioHardwarePropertyDefaultInputDevice")
+        assertContains(appStateSource, "AudioObjectAddPropertyListenerBlock")
+        assertContains(appStateSource, "AudioObjectRemovePropertyListenerBlock")
+        assertContains(appStateSource, "refreshAvailableMicrophones()")
+    }
+
     private static func testSettingsSeparatesSourceAndMicrophone() throws {
         let source = try sourceFile("Sources/SettingsView.swift")
         assertOrder(
@@ -134,6 +174,17 @@ struct SystemAudioInputSelectionTests {
         assertContains(source, "ForEach(AudioRecordingSource.allCases)")
         assertContains(source, "localizedCatalogString(source.titleKey)")
         assertContains(source, "appState.isAudioSourceSelectable(source)")
+    }
+
+    private static func testMicrophoneSelectorsUseCommonSystemDefaultDisplayName() throws {
+        for path in [
+            "Sources/SettingsView.swift",
+            "Sources/NoteBrowserView.swift",
+            "Sources/MenuBarView.swift"
+        ] {
+            let source = try sourceFile(path)
+            assertContains(source, "systemDefaultMicrophoneDisplayName()")
+        }
     }
 
     private static func testSetupOmitsAudioInputPicker() throws {

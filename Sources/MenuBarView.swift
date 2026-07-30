@@ -349,14 +349,14 @@ struct MenuBarView: View {
                 }
 
                 Menu("Microphone") {
+                    let systemDefaultName = appState.systemDefaultMicrophoneDisplayName()
                     Button {
                         appState.selectMicrophoneDevice(AudioInputDevice.defaultMicrophoneID)
                     } label: {
-                        if appState.selectedMicrophoneDeviceID == AudioInputDevice.defaultMicrophoneID {
-                            Text("✓ System Default")
-                        } else {
-                            Text("  System Default")
-                        }
+                        let prefix = appState.selectedMicrophoneDeviceID == AudioInputDevice.defaultMicrophoneID
+                            ? "✓ "
+                            : "  "
+                        Text(verbatim: prefix + systemDefaultName)
                     }
                     ForEach(appState.availableMicrophones) { device in
                         Button {
