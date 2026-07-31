@@ -270,13 +270,24 @@ final class MCPServer {
 
         switch name {
         case "start_recording":
+            if appState.isHistoryUnavailable {
+                return textContent(
+                    "Error: \(appState.historyUnavailableMessage)",
+                    isError: true
+                )
+            }
             if appState.isRecording {
                 return textContent("Already recording.")
             }
             if let context = args["context"] as? String, !context.isEmpty {
                 appState.mcpAdditionalContext = context
             }
-            appState.startRecordingFromMCP()
+            guard appState.startRecordingFromMCP() else {
+                return textContent(
+                    "Error: \(appState.historyUnavailableMessage)",
+                    isError: true
+                )
+            }
             let ctx = appState.mcpAdditionalContext
             return textContent("Recording started.\(ctx.isEmpty ? "" : " Context: \(ctx)")")
 
@@ -304,6 +315,12 @@ final class MCPServer {
             }
 
         case "get_status":
+            if appState.isHistoryUnavailable {
+                return textContent("""
+                    status: history_unavailable
+                    message: \(appState.historyUnavailableMessage)
+                    """)
+            }
             let status: String
             if appState.isRecording {
                 status = "recording"
@@ -324,6 +341,12 @@ final class MCPServer {
                 """)
 
         case "list_transcripts":
+            if appState.isHistoryUnavailable {
+                return textContent(
+                    "Error: \(appState.historyUnavailableMessage)",
+                    isError: true
+                )
+            }
             let limit = max(0, min(args["limit"] as? Int ?? 10, 50))
             let entries = Array(appState.pipelineHistory.prefix(limit))
             if entries.isEmpty {
@@ -338,6 +361,12 @@ final class MCPServer {
             return textContent(lines.joined(separator: "\n\n"))
 
         case "get_transcript":
+            if appState.isHistoryUnavailable {
+                return textContent(
+                    "Error: \(appState.historyUnavailableMessage)",
+                    isError: true
+                )
+            }
             guard let idString = args["id"] as? String, let uuid = UUID(uuidString: idString) else {
                 return textContent("Error: valid 'id' is required.", isError: true)
             }
@@ -358,6 +387,12 @@ final class MCPServer {
             return textContent(lines.joined(separator: "\n"))
 
         case "get_meeting_source":
+            if appState.isHistoryUnavailable {
+                return textContent(
+                    "Error: \(appState.historyUnavailableMessage)",
+                    isError: true
+                )
+            }
             guard let idString = args["id"] as? String, let uuid = UUID(uuidString: idString) else {
                 return textContent("Error: valid 'id' is required.", isError: true)
             }

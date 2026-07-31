@@ -288,7 +288,9 @@ struct LocalizationResourceTests {
             "Audio recording",
             "Not transcribed",
             "Saved without transcription. You can transcribe it later.",
-            "Transcribe audio"
+            "Transcribe audio",
+            "Audio file unavailable",
+            "This recording's audio file is unavailable, so it can't be transcribed."
         ]
         for key in noteBrowserKeys {
             let localizations = (strings[key] as? [String: Any])?["localizations"]

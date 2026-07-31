@@ -11,6 +11,7 @@ struct MCPLocalAccessPolicyTests {
         testListenerIsRestrictedToLoopback()
         try testMCPServerUsesPolicyAndDoesNotEmitCORSHeaders()
         try testMCPStopRecordingCopySupportsRecordOnly()
+        try testMCPHistoryUnavailableNeverClaimsAnEmptyHistory()
         print("MCPLocalAccessPolicyTests passed")
     }
 
@@ -110,6 +111,36 @@ struct MCPLocalAccessPolicyTests {
         assertContains(handler, "Recording stopped. Transcription in progress — listen for recording/completed event.")
         assertContains(handler, "Recording stopped. Audio note is being saved.")
         assertDoesNotContain(handler, "appState.transcriptionEnabled")
+    }
+
+    private static func testMCPHistoryUnavailableNeverClaimsAnEmptyHistory() throws {
+        let source = try String(contentsOfFile: "Sources/MCPServer.swift", encoding: .utf8)
+        guard let start = source.range(of: "case \"start_recording\":"),
+              let end = source.range(
+                of: "case \"add_context\":",
+                range: start.upperBound..<source.endIndex
+              ) else {
+            fatalError("Unable to locate start_recording handler")
+        }
+        let startHandler = String(source[start.lowerBound..<end.lowerBound])
+        assertContains(startHandler, "if appState.isHistoryUnavailable")
+        assertContains(startHandler, "appState.historyUnavailableMessage")
+        assertContains(startHandler, "guard appState.startRecordingFromMCP() else")
+        assertDoesNotContain(startHandler, "appState.mcpAdditionalContext = context\n            }\n            appState.startRecordingFromMCP()")
+
+        for marker in ["case \"list_transcripts\":", "case \"get_transcript\":", "case \"get_meeting_source\":"] {
+            guard let range = source.range(of: marker) else {
+                fatalError("Missing \(marker)")
+            }
+            let handler = String(source[range.lowerBound...].prefix(320))
+            assertContains(handler, "if appState.isHistoryUnavailable")
+            assertContains(handler, "appState.historyUnavailableMessage")
+        }
+        guard let statusRange = source.range(of: "case \"get_status\":") else {
+            fatalError("Missing get_status handler")
+        }
+        let statusHandler = String(source[statusRange.lowerBound...].prefix(360))
+        assertContains(statusHandler, "status: history_unavailable")
     }
 
     private static func assertTrue(_ condition: @autoclosure () -> Bool, _ message: String) {

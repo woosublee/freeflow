@@ -4202,7 +4202,7 @@ struct RunLogView: View {
                 Button("Clear History") {
                     appState.clearPipelineHistory()
                 }
-                .disabled(appState.pipelineHistory.isEmpty)
+                .disabled(appState.pipelineHistory.isEmpty || appState.isHistoryUnavailable)
             }
             .padding(.horizontal, 24)
             .padding(.top, 20)
@@ -4210,7 +4210,32 @@ struct RunLogView: View {
 
             Divider()
 
-            if appState.pipelineHistory.isEmpty {
+            if appState.isHistoryUnavailable {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "externaldrive.badge.exclamationmark")
+                        .font(.system(size: 30, weight: .light))
+                        .foregroundStyle(.orange)
+                    Text("Recording history couldn’t be opened")
+                        .font(.headline)
+                    Text("Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 420)
+                    HStack {
+                        Button("Open Data Folder") {
+                            appState.openHistoryDataFolder()
+                        }
+                        Button("Quit Quill") {
+                            NSApplication.shared.terminate(nil)
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity)
+            } else if appState.pipelineHistory.isEmpty {
                 VStack {
                     Spacer()
                     Text("No runs yet. Use dictation to populate history.")
@@ -4400,7 +4425,7 @@ struct RunLogEntryView: View {
                             }
                         }
                         .buttonStyle(.plain)
-                        .disabled(isRetrying)
+                        .disabled(isRetrying || appState.isHistoryUnavailable)
                         .help("Retry transcription")
                     } else {
                         Color.clear
@@ -4423,7 +4448,11 @@ struct RunLogEntryView: View {
                         copyTranscriptToPasteboard()
                     }
 
-                    actionIconButton(systemName: "trash", help: "Delete this run") {
+                    actionIconButton(
+                        systemName: "trash",
+                        help: "Delete this run",
+                        disabled: appState.isHistoryUnavailable
+                    ) {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             appState.deleteHistoryEntry(id: item.id)
                         }

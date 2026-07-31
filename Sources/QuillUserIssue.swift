@@ -583,9 +583,9 @@ private extension QuillUserIssueCode {
             )
         case .historyPersistenceUnavailable:
             return QuillUserIssueCopy(
-                titleKey: "History isn't being saved",
-                bodyKey: "Quill cannot save history for this session.",
-                suggestionKey: "Keep Quill open while you work, then restart it after checking available disk space and permissions."
+                titleKey: "Recording history couldn’t be opened",
+                bodyKey: "Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery.",
+                suggestionKey: "Open the data folder to keep the original history available for support and recovery."
             )
         case .historyRecovered:
             return QuillUserIssueCopy(

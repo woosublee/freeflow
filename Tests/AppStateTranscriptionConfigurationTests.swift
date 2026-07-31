@@ -2,9 +2,8 @@ import Combine
 import Darwin
 import Foundation
 
-#if !QUILL_GROUPED_TEST_RUNNER
-@main
-#endif
+// AppState tests run only through FullSourceAppStateTestRunner so its process
+// isolation always protects production preferences and stored recordings.
 struct AppStateTranscriptionConfigurationTests {
     static func main() async throws {
         let originalNativeWhisperInstallStatusProvider =

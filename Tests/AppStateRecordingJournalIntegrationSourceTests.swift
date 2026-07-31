@@ -51,11 +51,18 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             of: "recoverRecordingJournalsBeforeHistoryLoad(",
             in: initializerBody
         )
-        let historyRange = try requiredRange(
-            of: "pipelineHistoryStore.loadAllHistory()",
+        let preflightHistoryRange = try requiredRange(
+            of: "pipelineHistoryStore.verifyHistoryReadable()",
             in: initializerBody
         )
-        precondition(recoveryRange.lowerBound < historyRange.lowerBound)
+        guard let recoveredHistoryRange = initializerBody.range(
+            of: "pipelineHistoryStore.loadAllHistory()",
+            range: recoveryRange.upperBound..<initializerBody.endIndex
+        ) else {
+            throw TestFailure("missing history reload after journal recovery")
+        }
+        precondition(preflightHistoryRange.lowerBound < recoveryRange.lowerBound)
+        precondition(recoveryRange.lowerBound < recoveredHistoryRange.lowerBound)
 
         let startBody = try functionBody(named: "startSelectedAudioRecorder", in: source)
         precondition(startBody.contains("makeActiveSegmentedJournalController(inputID: inputID)"))
@@ -163,7 +170,7 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             in: source
         )
         precondition(completeFailureBody.contains("RecordingRecoveryHistory("))
-        precondition(completeFailureBody.contains("pipelineHistoryStore.loadAllHistory()"))
+        precondition(completeFailureBody.contains("loadPipelineHistory()"))
         precondition(completeFailureBody.contains("pipelineHistoryStore.delete(id:"))
 
         let storageBodies = storageFailureBody
@@ -388,7 +395,7 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         let catchBody = String(persist[catchRange.upperBound...])
 
         assert(catchBody.contains("journalRecordingID == nil"))
-        assert(catchBody.contains("!pipelineHistoryStore.loadAllHistory().contains(where: { $0.id == recordingID })"))
+        assert(catchBody.contains("!loadPipelineHistory().contains(where: { $0.id == recordingID })"))
         assert(catchBody.contains("Self.deleteStoredFiles("))
         assert(catchBody.contains("audioFileName: audioFileName"))
         assert(catchBody.contains("transcriptFileName: nil"))
