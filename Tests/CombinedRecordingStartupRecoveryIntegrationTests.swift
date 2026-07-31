@@ -197,7 +197,9 @@ struct CombinedRecordingStartupRecoveryIntegrationTests {
         let journalStore = RecordingJournalStore(
             audioDirectory: root.appendingPathComponent("audio", isDirectory: true)
         )
-        let historyStore = PipelineHistoryStore(inMemory: true)
+        let historyStore = PipelineHistoryStore(
+            storeURL: root.appendingPathComponent("PipelineHistory.sqlite")
+        )
         let controller = try CombinedRecordingJournalController(
             request: CombinedRecordingJournalCreateRequest(
                 recordingID: recordingID,

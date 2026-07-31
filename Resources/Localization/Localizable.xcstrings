@@ -14884,6 +14884,86 @@
           }
         }
       }
+    },
+    "On-device model storage": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On-device model storage"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "온디바이스 모델 저장 공간"
+          }
+        }
+      }
+    },
+    "Installed models that cannot run on this Mac can be removed here.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Installed models that cannot run on this Mac can be removed here."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 Mac에서 실행할 수 없는 설치된 모델은 여기에서 삭제할 수 있습니다."
+          }
+        }
+      }
+    },
+    "This installed model is unavailable and cannot be used on this Mac.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This installed model is unavailable and cannot be used on this Mac."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 설치된 모델은 이 Mac에서 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "This on-device model is unavailable and cannot be used on this Mac.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This on-device model is unavailable and cannot be used on this Mac."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 온디바이스 모델은 이 Mac에서 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "Unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unavailable"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사용할 수 없음"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

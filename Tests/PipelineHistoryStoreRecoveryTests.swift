@@ -6,6 +6,7 @@ struct PipelineHistoryStoreRecoveryTests {
     static func main() throws {
         try testRecoveryMovesAllSQLiteComponentsBeforeLoadingReplacementStore()
         try testRecoveredStoreRemainsDurableAndReloadsNewHistory()
+        try testExplicitInMemoryStoreRejectsDurableWrites()
         try testFailedBackupKeepsRemainingOriginalFilesAndUsesInMemoryStore()
         print("PipelineHistoryStoreRecoveryTests passed")
     }
@@ -112,6 +113,32 @@ struct PipelineHistoryStoreRecoveryTests {
             reopened.loadAllHistory().contains(where: { $0.id == item.id }),
             "new history written after recovery reloads from SQLite"
         )
+    }
+
+    private static func testExplicitInMemoryStoreRejectsDurableWrites() throws {
+        let store = PipelineHistoryStore(inMemory: true)
+        try expect(store.durability == .inMemory, "explicit in-memory store has distinct durability")
+        let item = PipelineHistoryItem(
+            id: UUID(),
+            timestamp: Date(timeIntervalSince1970: 1_000),
+            rawTranscript: "In-memory history item.",
+            postProcessedTranscript: "In-memory history item.",
+            postProcessingPrompt: nil,
+            contextSummary: "",
+            contextScreenshotDataURL: nil,
+            contextScreenshotStatus: "No screenshot",
+            postProcessingStatus: "succeeded",
+            debugStatus: "",
+            customVocabulary: "",
+            usedPostProcessing: false
+        )
+
+        do {
+            _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
+            throw RecoveryTestFailure("Explicit in-memory stores must reject durable writes")
+        } catch PipelineHistoryStoreError.durableStoreUnavailable {
+            // expected
+        }
     }
 
     private static func testFailedBackupKeepsRemainingOriginalFilesAndUsesInMemoryStore() throws {

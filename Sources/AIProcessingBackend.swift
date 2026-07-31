@@ -86,16 +86,36 @@ struct AIProcessingBackendChoiceStore {
     }
 }
 
-struct LocalAIProcessingAvailability: Equatable {
+struct LocalAIProcessingAvailability: Equatable, Sendable {
     let isAppleSilicon: Bool
     let runnerIsExecutable: Bool
+    let physicalMemory: UInt64
+
+    init(
+        isAppleSilicon: Bool,
+        runnerIsExecutable: Bool,
+        physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) {
+        self.isAppleSilicon = isAppleSilicon
+        self.runnerIsExecutable = runnerIsExecutable
+        self.physicalMemory = physicalMemory
+    }
 
     var isSupported: Bool {
         isAppleSilicon && runnerIsExecutable
     }
 
-    var recommendedModel: LocalAIModel {
-        LocalAIModelCatalog.quality
+    func isModelSupported(_ model: LocalAIModel) -> Bool {
+        isSupported && physicalMemory >= model.minimumPhysicalMemoryBytes
+    }
+
+    var availableModels: [LocalAIModel] {
+        LocalAIModelCatalog.all.filter(isModelSupported)
+    }
+
+    var recommendedModel: LocalAIModel? {
+        availableModels.first { $0.id == LocalAIModelCatalog.quality.id }
+            ?? availableModels.first
     }
 
     static func live(
@@ -113,7 +133,8 @@ struct LocalAIProcessingAvailability: Equatable {
         } ?? false
         return LocalAIProcessingAvailability(
             isAppleSilicon: isAppleSilicon,
-            runnerIsExecutable: executable
+            runnerIsExecutable: executable,
+            physicalMemory: ProcessInfo.processInfo.physicalMemory
         )
     }
 }
@@ -154,25 +175,31 @@ struct AIProcessingBackendExecutor: Sendable {
     let cloudBaseURL: String
     let cloudAPIKey: String
     let localServerManager: LocalAIServerManager?
+    let localAIAvailability: LocalAIProcessingAvailability
 
     init(
         choice: AIProcessingBackendChoice,
         cloudBaseURL: String,
         cloudAPIKey: String,
-        localServerManager: LocalAIServerManager? = nil
+        localServerManager: LocalAIServerManager? = nil,
+        localAIAvailability: LocalAIProcessingAvailability = .live()
     ) {
         self.choice = choice
         self.cloudBaseURL = cloudBaseURL
         self.cloudAPIKey = cloudAPIKey
         self.localServerManager = localServerManager
+        self.localAIAvailability = localAIAvailability
     }
 
     var isConfigured: Bool {
         switch choice {
         case .cloud:
             return !cloudAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .localAI:
-            return localServerManager != nil
+        case .localAI(let modelID):
+            guard let model = LocalAIModelCatalog.model(id: modelID) else {
+                return false
+            }
+            return localServerManager != nil && localAIAvailability.isModelSupported(model)
         }
     }
 
@@ -181,7 +208,8 @@ struct AIProcessingBackendExecutor: Sendable {
             choice: choice,
             cloudBaseURL: cloudBaseURL,
             cloudAPIKey: cloudAPIKey,
-            localServerManager: localServerManager
+            localServerManager: localServerManager,
+            localAIAvailability: localAIAvailability
         )
     }
 
@@ -220,6 +248,9 @@ struct AIProcessingBackendExecutor: Sendable {
         case .localAI(let modelID):
             guard let model = LocalAIModelCatalog.model(id: modelID) else {
                 throw AIProcessingBackendError.unknownLocalModel(modelID)
+            }
+            guard localAIAvailability.isModelSupported(model) else {
+                throw AIProcessingBackendError.localRuntimeUnavailable(modelID)
             }
             guard let localServerManager else {
                 throw AIProcessingBackendError.localRuntimeUnavailable(modelID)

@@ -330,7 +330,12 @@ struct AppContextBackendTests {
                 choice: .localAI(modelID: selectedModelID),
                 cloudBaseURL: "https://api.example.com/openai/v1",
                 cloudAPIKey: "cloud-key",
-                localServerManager: readyManager()
+                localServerManager: readyManager(),
+                localAIAvailability: LocalAIProcessingAvailability(
+                    isAppleSilicon: true,
+                    runnerIsExecutable: true,
+                    physicalMemory: 16 * 1024 * 1024 * 1024
+                )
             ),
             customContextPrompt: "",
             contextModel: selectedModelID,
@@ -598,7 +603,12 @@ struct AppContextBackendTests {
             choice: .localAI(modelID: LocalAIModelCatalog.quality.id),
             cloudBaseURL: AppState.defaultAPIBaseURL,
             cloudAPIKey: "cloud-secret",
-            localServerManager: manager
+            localServerManager: manager,
+            localAIAvailability: LocalAIProcessingAvailability(
+                isAppleSilicon: true,
+                runnerIsExecutable: true,
+                physicalMemory: 16 * 1024 * 1024 * 1024
+            )
         )
     }
 

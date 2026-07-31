@@ -795,16 +795,14 @@ struct ModelsSettingsUIContractTests {
         precondition(context.contains("settingsAIProcessingChoice(for: .context)"))
         precondition(context.contains("Local Context uses app and window text only. Screenshots stay on this Mac."))
         precondition(
-            activeLocalAI.contains(
-                "isAIProcessingChoiceCompatible(.localAI(modelID: modelID), for: feature)"
-            ),
-            "an incompatible Local Context choice does not present Local Context details"
+            activeLocalAI.contains("isAIProcessingChoiceCompatible(choice, for: feature)")
+                && activeLocalAI.contains("appState.isAIProcessingChoiceAvailable(choice, for: feature)"),
+            "an unavailable Local choice does not present Local Context details"
         )
         precondition(
-            managedLocalAI.contains("isAIProcessingChoiceCompatible(")
-                && managedLocalAI.contains(".localAI(modelID: model.id)")
-                && managedLocalAI.contains("for: feature"),
-            "an incompatible Local Context choice does not present a model management row"
+            managedLocalAI.contains("isAIProcessingChoiceCompatible(choice, for: feature)")
+                && managedLocalAI.contains("appState.isAIProcessingChoiceAvailable(choice, for: feature)"),
+            "an incompatible or unavailable Local choice does not present a model management row"
         )
 
         precondition(postProcessingDetails.contains("customAIProcessingModelSetting("))
@@ -865,6 +863,12 @@ struct ModelsSettingsUIContractTests {
         precondition(localAIModelRow.contains(".accessibilityLabel(\"Delete Model\")"))
         precondition(localAIModelRow.contains("localizedCatalogString(isSelected ? \"Selected\" : \"Not selected\")"))
         precondition(localAIModelRow.contains("QuillUserIssueView("))
+        precondition(models.contains("private var cleanupOnlyLocalAIModels: [LocalAIModel]"))
+        precondition(models.contains("private var localAIArtifactCleanupSection: some View"))
+        precondition(models.contains("presentation: .cleanupOnly"))
+        precondition(localAIModelRow.contains("enum LocalAIModelRowPresentation"))
+        precondition(localAIModelRow.contains("if presentation == .cleanupOnly"))
+        precondition(localAIModelRow.contains("This installed model is unavailable"))
 
         precondition(!models.contains("retiredLocalAIManagementRow"))
         precondition(!models.contains("retiredLocalAIManagementModel"))

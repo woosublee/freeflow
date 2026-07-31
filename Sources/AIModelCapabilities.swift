@@ -82,12 +82,4 @@ enum AIModelCapabilityCatalog {
             : cloudTextCapabilities
     }
 
-    static func capabilities(forLocalModelID modelID: String) -> AIModelCapabilities? {
-        switch modelID {
-        case "qwen2.5-7b-instruct":
-            qwenTextCapabilities
-        default:
-            nil
-        }
-    }
 }

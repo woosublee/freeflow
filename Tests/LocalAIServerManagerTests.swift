@@ -15,6 +15,10 @@ struct LocalAIServerManagerTests {
         try await testDefaultHealthPollUsesExplicitShortRequestTimeout()
         try await testHealthPollCannotExceedOverallDeadline()
         try await testHealthPollCancellationExitsPromptly()
+        try await testReadinessPollRetriesUntilCompletionResponseSucceeds()
+        try await testReadinessPollCannotExceedOverallDeadline()
+        try await testReadinessPollCancellationExitsPromptly()
+        try await testReadinessRetryPublishesRunningAfterCompletionSucceeds()
         try await testSecondRequestForSameModelReusesRunningProcess()
         try await testConcurrentSameModelRequestsCoalesceOneStartup()
         try await testCancellingOneOfTwoSameModelWaitersKeepsSharedStartup()
@@ -350,6 +354,138 @@ struct LocalAIServerManagerTests {
         await polling.value
 
         try require(result.value == false, "cancelled health poll should report failure")
+    }
+
+    private static func testReadinessPollRetriesUntilCompletionResponseSucceeds() async throws {
+        let clock = FakeMonotonicClock()
+        let observedRequests = LockedBox<[URLRequest]>([])
+        let attempts = LockedBox(0)
+        let poller = LocalAIReadinessPoller(
+            overallTimeout: 10,
+            probeTimeout: 1,
+            cadence: 0.2,
+            maxAttempts: 50,
+            now: { clock.value },
+            sleep: { duration in clock.advance(by: duration) }
+        )
+
+        let result = await poller.poll(port: 12_345, using: { request in
+            observedRequests.withValue { $0.append(request) }
+            let attempt = attempts.withValue { value -> Int in
+                value += 1
+                return value
+            }
+            if attempt == 1 {
+                return (Data("not JSON".utf8), readinessResponse(for: request, statusCode: 200))
+            }
+            return (Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8), readinessResponse(for: request, statusCode: 200))
+        })
+
+        try require(result, "readiness polling retries a transient invalid completion response")
+        try require(attempts.value == 2, "readiness polling should stop after the first valid completion")
+        try assertFixedSourceFreeReadinessRequests(observedRequests.value)
+        try require(
+            observedRequests.value.allSatisfy { $0.timeoutInterval == 1 },
+            "readiness requests should use the configured short timeout"
+        )
+    }
+
+    private static func testReadinessPollCannotExceedOverallDeadline() async throws {
+        let clock = FakeMonotonicClock()
+        let observedTimeouts = LockedBox<[TimeInterval]>([])
+        let poller = LocalAIReadinessPoller(
+            overallTimeout: 10,
+            probeTimeout: 1,
+            cadence: 0.2,
+            maxAttempts: 50,
+            now: { clock.value },
+            sleep: { duration in clock.advance(by: duration) }
+        )
+
+        let result = await poller.poll(port: 12_345, using: { request in
+            observedTimeouts.withValue { $0.append(request.timeoutInterval) }
+            clock.advance(by: request.timeoutInterval)
+            throw HealthProbeFailure.stalled
+        })
+
+        try require(!result, "stalled completion probes should fail readiness polling")
+        try require(clock.value <= 10.000_001, "readiness polling exceeded its overall deadline")
+        try require(observedTimeouts.value.count <= 50, "readiness polling exceeded the attempt limit")
+        try require(
+            observedTimeouts.value.allSatisfy { $0 > 0 && $0 <= 1 },
+            "every readiness request timeout must be short and bounded by the remaining deadline"
+        )
+    }
+
+    private static func testReadinessPollCancellationExitsPromptly() async throws {
+        let sleepStarted = DispatchSemaphore(value: 0)
+        let completed = DispatchSemaphore(value: 0)
+        let result = LockedBox<Bool?>(nil)
+        let poller = LocalAIReadinessPoller(
+            overallTimeout: 10,
+            probeTimeout: 1,
+            cadence: 0.2,
+            maxAttempts: 50,
+            now: { ProcessInfo.processInfo.systemUptime },
+            sleep: { _ in
+                sleepStarted.signal()
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        )
+        let polling = Task {
+            let value = await poller.poll(port: 12_345, using: { _ in
+                throw HealthProbeFailure.failed
+            })
+            result.withValue { $0 = value }
+            completed.signal()
+        }
+        try wait(sleepStarted, "readiness poll did not enter its retry sleep")
+
+        polling.cancel()
+        try wait(completed, "cancelled readiness poll did not exit promptly")
+        await polling.value
+
+        try require(result.value == false, "cancelled readiness poll should report failure")
+    }
+
+    private static func testReadinessRetryPublishesRunningAfterCompletionSucceeds() async throws {
+        let clock = FakeMonotonicClock()
+        let process = FakeProcess()
+        let attempts = LockedBox(0)
+        let snapshots = LockedBox<[LocalAIServerManager.LifecycleSnapshot]>([])
+        let poller = LocalAIReadinessPoller(
+            overallTimeout: 10,
+            probeTimeout: 1,
+            cadence: 0.2,
+            maxAttempts: 50,
+            now: { clock.value },
+            sleep: { duration in clock.advance(by: duration) }
+        )
+        let manager = makeManager(
+            launchProcess: { _, _, port, _ in (process, port) },
+            readinessProbe: { request in
+                let attempt = attempts.withValue { value -> Int in
+                    value += 1
+                    return value
+                }
+                if attempt == 1 {
+                    return (Data("not JSON".utf8), readinessResponse(for: request, statusCode: 200))
+                }
+                return (Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8), readinessResponse(for: request, statusCode: 200))
+            },
+            readinessPoller: poller,
+            observeLifecycle: { snapshot in
+                snapshots.withValue { $0.append(snapshot) }
+            }
+        )
+
+        _ = try await manager.withBaseURL(for: testModel) { $0 }
+
+        try require(attempts.value == 2, "manager should retry completion readiness")
+        try require(
+            snapshots.value.last?.phase == .running,
+            "manager should publish running only after completion readiness succeeds"
+        )
     }
 
     private static func testSecondRequestForSameModelReusesRunningProcess() async throws {
@@ -1135,6 +1271,7 @@ struct LocalAIServerManagerTests {
             let body = Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8)
             return (body, readinessResponse(for: request, statusCode: 200))
         },
+        readinessPoller: LocalAIReadinessPoller = LocalAIServerManagerTests.singleAttemptReadinessPoller,
         validateModel: @escaping LocalAIServerManager.ValidateModel = { _ in .ready },
         terminationGracePeriod: TimeInterval = 2,
         waitForProcessExit: @escaping LocalAIServerManager.WaitForProcessExit = { process, _ in
@@ -1152,6 +1289,7 @@ struct LocalAIServerManagerTests {
             launchProcess: launchProcess,
             pollHealth: pollHealth,
             readinessProbe: readinessProbe,
+            readinessPoller: readinessPoller,
             validateModel: validateModel,
             terminationGracePeriod: terminationGracePeriod,
             waitForProcessExit: waitForProcessExit,
@@ -1159,6 +1297,18 @@ struct LocalAIServerManagerTests {
             observeLifecycle: observeLifecycle
         )
     }
+
+    private static let singleAttemptReadinessPoller = LocalAIReadinessPoller(
+        overallTimeout: 1,
+        probeTimeout: 1,
+        cadence: 0.2,
+        maxAttempts: 1,
+        now: { ProcessInfo.processInfo.systemUptime },
+        sleep: { duration in
+            let nanoseconds = UInt64(max(0, duration) * 1_000_000_000)
+            try await Task.sleep(nanoseconds: nanoseconds)
+        }
+    )
 
     private static let successfulReadinessProbe: LocalAIServerManager.ReadinessProbe = { request in
         let body = Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8)
@@ -1178,31 +1328,39 @@ struct LocalAIServerManagerTests {
         _ requests: [URLRequest]
     ) throws {
         try require(requests.count == 1, "startup must perform exactly one readiness probe")
-        let request = requests[0]
-        try require(request.url?.scheme == "http", "readiness probe must use loopback HTTP")
-        try require(request.url?.host == "127.0.0.1", "readiness probe must target loopback")
-        try require(request.url?.path == "/v1/chat/completions", "readiness probe must use chat completions")
-        try require(request.httpMethod == "POST", "readiness probe must use POST")
-        try require(request.value(forHTTPHeaderField: "Authorization") == nil, "readiness probe must not send authorization")
-        guard let body = request.httpBody,
-              let payload = try JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let messages = payload["messages"] as? [[String: String]] else {
-            throw TestFailure("readiness probe must encode the fixed JSON request")
+        try assertFixedSourceFreeReadinessRequests(requests)
+    }
+
+    private static func assertFixedSourceFreeReadinessRequests(
+        _ requests: [URLRequest]
+    ) throws {
+        try require(!requests.isEmpty, "startup must perform a readiness probe")
+        for request in requests {
+            try require(request.url?.scheme == "http", "readiness probe must use loopback HTTP")
+            try require(request.url?.host == "127.0.0.1", "readiness probe must target loopback")
+            try require(request.url?.path == "/v1/chat/completions", "readiness probe must use chat completions")
+            try require(request.httpMethod == "POST", "readiness probe must use POST")
+            try require(request.value(forHTTPHeaderField: "Authorization") == nil, "readiness probe must not send authorization")
+            guard let body = request.httpBody,
+                  let payload = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                  let messages = payload["messages"] as? [[String: String]] else {
+                throw TestFailure("readiness probe must encode the fixed JSON request")
+            }
+            try require(payload["model"] as? String == "local", "readiness probe model must be local")
+            try require((payload["temperature"] as? NSNumber)?.intValue == 0, "readiness probe temperature must be zero")
+            try require((payload["max_completion_tokens"] as? NSNumber)?.intValue == 8, "readiness probe completion limit must be eight")
+            try require((payload["max_tokens"] as? NSNumber)?.intValue == 8, "readiness probe legacy completion limit must be eight")
+            try require(
+                messages == [
+                    ["role": "system", "content": "Reply with OK."],
+                    ["role": "user", "content": "ready"]
+                ],
+                "readiness probe must contain only the fixed messages"
+            )
+            let readinessProbeContainsUserData = String(decoding: body, as: UTF8.self).contains("/Users/private")
+                || String(decoding: body, as: UTF8.self).contains("PRIVATE_TRANSCRIPT")
+            try require(!readinessProbeContainsUserData, "readiness probe contains no source data")
         }
-        try require(payload["model"] as? String == "local", "readiness probe model must be local")
-        try require((payload["temperature"] as? NSNumber)?.intValue == 0, "readiness probe temperature must be zero")
-        try require((payload["max_completion_tokens"] as? NSNumber)?.intValue == 8, "readiness probe completion limit must be eight")
-        try require((payload["max_tokens"] as? NSNumber)?.intValue == 8, "readiness probe legacy completion limit must be eight")
-        try require(
-            messages == [
-                ["role": "system", "content": "Reply with OK."],
-                ["role": "user", "content": "ready"]
-            ],
-            "readiness probe must contain only the fixed messages"
-        )
-        let readinessProbeContainsUserData = String(decoding: body, as: UTF8.self).contains("/Users/private")
-            || String(decoding: body, as: UTF8.self).contains("PRIVATE_TRANSCRIPT")
-        try require(!readinessProbeContainsUserData, "readiness probe contains no source data")
     }
 
     private static func resultTask(

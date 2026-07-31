@@ -408,7 +408,12 @@ struct PostProcessingBackendTests {
                 choice: .localAI(modelID: LocalAIModelCatalog.quality.id),
                 cloudBaseURL: cloudBaseURL,
                 cloudAPIKey: "cloud-secret",
-                localServerManager: manager
+                localServerManager: manager,
+                localAIAvailability: LocalAIProcessingAvailability(
+                    isAppleSilicon: true,
+                    runnerIsExecutable: true,
+                    physicalMemory: 16 * 1024 * 1024 * 1024
+                )
             ),
             cloudFallbackModelID: "cloud/fallback",
             instructionExecutionGuardEnabled: false,

@@ -2909,7 +2909,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         switch pipelineHistoryStore.durability {
         case .durable:
             self.historyPersistenceWarning = nil
-        case .inMemoryFallback:
+        case .inMemory, .inMemoryFallback:
             self.historyPersistenceWarning = QuillUserIssueRecord(
                 code: .historyPersistenceUnavailable
             )
@@ -3188,7 +3188,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 clearPendingLocalAISelections(forModelID: modelID)
                 continue
             }
-            guard Self.localAIProcessingAvailabilityProvider().isSupported else {
+            guard isLocalAIModelAvailable(model) else {
                 clearPendingLocalAISelections(forModelID: modelID)
                 var state = localAIInstallState(for: model)
                 state.issue = localAIModelUnavailableIssue(for: model)
@@ -3208,7 +3208,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 clearPendingLocalAISelections(forModelID: modelID)
                 continue
             }
-            guard Self.localAIProcessingAvailabilityProvider().isSupported else {
+            guard isLocalAIModelAvailable(model) else {
                 clearPendingLocalAISelections(forModelID: modelID)
                 var state = localAIInstallState(for: model)
                 state.issue = localAIModelUnavailableIssue(for: model)
@@ -3421,6 +3421,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
+    func isLocalAIModelAvailable(_ model: LocalAIModel) -> Bool {
+        guard LocalAIModelCatalog.model(id: model.id) == model else {
+            return false
+        }
+        return Self.localAIProcessingAvailabilityProvider().isModelSupported(model)
+    }
+
+    @MainActor
     func isAIProcessingChoiceAvailable(
         _ choice: AIProcessingBackendChoice,
         for feature: AIProcessingFeature
@@ -3432,8 +3440,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case .cloud:
             return true
         case .localAI(let modelID):
-            return LocalAIModelCatalog.model(id: modelID) != nil
-                && Self.localAIProcessingAvailabilityProvider().isSupported
+            guard let model = LocalAIModelCatalog.model(id: modelID) else {
+                return false
+            }
+            return isLocalAIModelAvailable(model)
         }
     }
 
@@ -3460,8 +3470,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case .localAI(let modelID):
             guard hasCompletedLocalAIStatusRefresh,
-                  Self.localAIProcessingAvailabilityProvider().isSupported,
-                  let model = LocalAIModelCatalog.model(id: modelID) else {
+                  let model = LocalAIModelCatalog.model(id: modelID),
+                  isLocalAIModelAvailable(model) else {
                 return false
             }
             return localAIInstallState(for: model).status == .ready
@@ -3477,6 +3487,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
             guard isAIProcessingChoiceCompatible(preferred, for: feature) else {
                 return nil
             }
+            if case .localAI(let modelID) = preferred,
+               let model = LocalAIModelCatalog.model(id: modelID),
+               !isLocalAIModelAvailable(model) {
+                return nil
+            }
             if isAIProcessingChoiceReady(preferred, for: feature) {
                 return preferred
             }
@@ -3485,19 +3500,24 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard isAIProcessingChoiceCompatible(currentChoice, for: feature) else {
             return nil
         }
+        if case .localAI(let modelID) = currentChoice,
+           let model = LocalAIModelCatalog.model(id: modelID),
+           !isLocalAIModelAvailable(model) {
+            return nil
+        }
         if isAIProcessingChoiceReady(currentChoice, for: feature) {
             return currentChoice
         }
 
         let availability = Self.localAIProcessingAvailabilityProvider()
         if hasCompletedLocalAIStatusRefresh, availability.isSupported {
-            let readyModels = LocalAIModelCatalog.all.filter {
+            let readyModels = availability.availableModels.filter {
                 $0.capabilities.supports(feature.modelFeature)
                     && (feature != .context || $0.capabilities.modalities.contains(.image))
                     && localAIInstallState(for: $0).status == .ready
             }
-            let preferredModel = readyModels.first {
-                $0.id == availability.recommendedModel.id
+            let preferredModel = availability.recommendedModel.flatMap { recommended in
+                readyModels.first { $0.id == recommended.id }
             } ?? readyModels.first
             if let preferredModel {
                 return .localAI(modelID: preferredModel.id)
@@ -3523,14 +3543,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
         for feature: AIProcessingFeature
     ) -> AIProcessingChoiceDisplay? {
         let choice = currentAIProcessingChoice(for: feature)
-        guard case .localAI(let modelID) = choice,
-              LocalAIModelCatalog.model(id: modelID) == nil else {
+        guard case .localAI(let modelID) = choice else {
+            return nil
+        }
+        let model = LocalAIModelCatalog.model(id: modelID)
+        guard model == nil || !isLocalAIModelAvailable(model!) else {
             return nil
         }
 
         let unavailableReason: String
         let title: String
-        if modelID == "qwen2.5-1.5b-instruct" {
+        if let model {
+            title = model.displayName
+            unavailableReason = localizedCatalogString(
+                "This on-device model is unavailable and cannot be used on this Mac."
+            )
+        } else if modelID == "qwen2.5-1.5b-instruct" {
             title = "Qwen2.5 1.5B Instruct"
             unavailableReason = localizedCatalogString(
                 "This on-device model is no longer available and cannot be used."
@@ -3590,13 +3618,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
             for: feature
         ).map { [$0] } ?? []
         let availability = Self.localAIProcessingAvailabilityProvider()
-        guard availability.isSupported else {
-            return cloudDisplays + unavailableLocalDisplays
-        }
         let localDisplays = LocalAIModelCatalog.all.compactMap {
             model -> AIProcessingChoiceDisplay? in
             let choice = AIProcessingBackendChoice.localAI(modelID: model.id)
-            guard isAIProcessingChoiceCompatible(choice, for: feature) else {
+            guard isAIProcessingChoiceCompatible(choice, for: feature),
+                  availability.isModelSupported(model) else {
                 return nil
             }
             return AIProcessingChoiceDisplay(
@@ -3609,7 +3635,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 ),
                 isAvailable: true,
                 unavailableReason: nil,
-                isRecommended: model.id == availability.recommendedModel.id
+                isRecommended: model.id == availability.recommendedModel?.id
             )
         }
         return cloudDisplays + unavailableLocalDisplays + localDisplays
@@ -3647,8 +3673,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             applyAIProcessingChoice(choice, for: feature)
 
         case .localAI(let modelID):
-            guard Self.localAIProcessingAvailabilityProvider().isSupported,
-                  let model = LocalAIModelCatalog.model(id: modelID),
+            guard let model = LocalAIModelCatalog.model(id: modelID),
+                  isLocalAIModelAvailable(model),
                   !localAIDeletionRequestedModelIDs.contains(modelID) else {
                 return
             }
@@ -3672,7 +3698,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     ) {
         guard !isModelTerminationCleanupPending else { return }
         guard let canonicalModel = canonicalLocalAIModel(model),
-              Self.localAIProcessingAvailabilityProvider().isSupported,
+              isLocalAIModelAvailable(canonicalModel),
               !localAIDeletionRequestedModelIDs.contains(model.id) else {
             return
         }
@@ -3706,7 +3732,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard localAIInstallTasks[model.id] == nil,
               !localAICancellingModelIDs.contains(model.id),
               !localAIDeletionRequestedModelIDs.contains(model.id),
-              Self.localAIProcessingAvailabilityProvider().isSupported else {
+              isLocalAIModelAvailable(model) else {
             return
         }
 
@@ -3809,7 +3835,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             switch result {
             case .success
                 where status == .ready
-                    && Self.localAIProcessingAvailabilityProvider().isSupported:
+                    && isLocalAIModelAvailable(model):
                 state.issue = nil
                 applyReadyLocalAIModelToWaitingFeatures(model)
             case .success:
@@ -3833,7 +3859,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         guard wasCancelling, shouldRestart else { return }
         guard cleanupErrorDescription == nil,
-              Self.localAIProcessingAvailabilityProvider().isSupported else {
+              isLocalAIModelAvailable(model) else {
             clearPendingLocalAISelections(forModelID: model.id)
             var unavailableState = localAIInstallState(for: model)
             unavailableState.issue = localAIModelUnavailableIssue(for: model)
@@ -3849,7 +3875,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func applyReadyLocalAIModelToWaitingFeatures(_ model: LocalAIModel) {
-        guard Self.localAIProcessingAvailabilityProvider().isSupported,
+        guard isLocalAIModelAvailable(model),
               localAIInstallState(for: model).status == .ready else {
             clearPendingLocalAISelections(forModelID: model.id)
             var state = localAIInstallState(for: model)
@@ -3933,19 +3959,21 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case .cloud:
             return choice
         case .localAI(let modelID):
-            if Self.localAIProcessingAvailabilityProvider().isSupported,
-               let model = LocalAIModelCatalog.model(id: modelID),
-               localAIInstallState(for: model).status == .ready {
-                return choice
+            guard let selectedModel = LocalAIModelCatalog.model(id: modelID) else {
+                return nil
             }
             let availability = Self.localAIProcessingAvailabilityProvider()
-            let installed = availability.isSupported
-                ? LocalAIModelCatalog.all.filter {
-                    localAIInstallState(for: $0).status == .ready
-                }
-                : []
-            let preferred = installed.first {
-                $0.id == availability.recommendedModel.id
+            guard availability.isModelSupported(selectedModel) else {
+                return nil
+            }
+            if localAIInstallState(for: selectedModel).status == .ready {
+                return choice
+            }
+            let installed = availability.availableModels.filter {
+                localAIInstallState(for: $0).status == .ready
+            }
+            let preferred = availability.recommendedModel.flatMap { recommended in
+                installed.first { $0.id == recommended.id }
             } ?? installed.first
             if let preferred {
                 return .localAI(modelID: preferred.id)
@@ -6069,7 +6097,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard meetingSummaryAvailability(for: startItem) == .available else {
             throw MeetingSummaryError.invalidInput
         }
-        if case .inMemoryFallback = pipelineHistoryStore.durability {
+        switch pipelineHistoryStore.durability {
+        case .durable, .recovered:
+            break
+        case .inMemory, .inMemoryFallback:
             throw QuillUserIssueError.historyPersistenceUnavailable()
         }
 

@@ -4,11 +4,12 @@ import Foundation
 struct AIProcessingBackendTests {
     static func main() async throws {
         try testChoiceStorageRoundTripAndFallback()
-        try testAvailabilityAlwaysRecommendsQuality()
+        try testAvailabilityIsModelSpecific()
         try await testCloudExecutorPreservesProviderConfiguration()
         try await testDeclaredCloudVisionModelSupportsImages()
         try await testCloudExecutorRejectsMissingKeyBeforeOperation()
         try await testLocalQwenExecutorUsesDescriptorAndLocalRequestContract()
+        try await testLowMemoryLocalExecutorRejectsBeforeLaunch()
         try await testRetiredLocalModelFailsWithoutServerOrCloudFallback()
         print("AIProcessingBackendTests passed")
     }
@@ -45,17 +46,43 @@ struct AIProcessingBackendTests {
         )
     }
 
-    private static func testAvailabilityAlwaysRecommendsQuality() throws {
-        let supported = LocalAIProcessingAvailability(
+    private static func testAvailabilityIsModelSpecific() throws {
+        let belowThreshold = LocalAIProcessingAvailability(
             isAppleSilicon: true,
-            runnerIsExecutable: true
+            runnerIsExecutable: true,
+            physicalMemory: 8 * 1024 * 1024 * 1024
         )
-        assert(supported.isSupported)
-        assert(supported.recommendedModel.id == LocalAIModelCatalog.quality.id)
+        assert(belowThreshold.isSupported)
+        assert(!belowThreshold.isModelSupported(LocalAIModelCatalog.quality))
+        assert(belowThreshold.availableModels.isEmpty)
+        assert(belowThreshold.recommendedModel == nil)
+
+        let atThreshold = LocalAIProcessingAvailability(
+            isAppleSilicon: true,
+            runnerIsExecutable: true,
+            physicalMemory: 16 * 1024 * 1024 * 1024
+        )
+        assert(atThreshold.isSupported)
+        assert(atThreshold.isModelSupported(LocalAIModelCatalog.quality))
+        assert(atThreshold.availableModels == [LocalAIModelCatalog.quality])
+        assert(atThreshold.recommendedModel == LocalAIModelCatalog.quality)
+
+        let smallerFutureModel = LocalAIModel(
+            id: "future-small-model",
+            displayName: "Future small model",
+            description: "Test model",
+            artifacts: [],
+            approximateResidentRAMBytes: 1,
+            minimumPhysicalMemoryBytes: 1,
+            capabilities: .none
+        )
+        assert(belowThreshold.isModelSupported(smallerFutureModel))
+
         assert(
             !LocalAIProcessingAvailability(
                 isAppleSilicon: false,
-                runnerIsExecutable: true
+                runnerIsExecutable: true,
+                physicalMemory: 16 * 1024 * 1024 * 1024
             ).isSupported
         )
     }
@@ -126,7 +153,12 @@ struct AIProcessingBackendTests {
             choice: .localAI(modelID: LocalAIModelCatalog.quality.id),
             cloudBaseURL: "https://api.example.com/openai/v1",
             cloudAPIKey: "cloud-key",
-            localServerManager: manager
+            localServerManager: manager,
+            localAIAvailability: LocalAIProcessingAvailability(
+                isAppleSilicon: true,
+                runnerIsExecutable: true,
+                physicalMemory: 16 * 1024 * 1024 * 1024
+            )
         )
 
         let endpoint = try await executor.withEndpoint { $0 }
@@ -137,6 +169,39 @@ struct AIProcessingBackendTests {
         assert(endpoint.requestModelID == "local")
         assert(endpoint.selectedModelID == LocalAIModelCatalog.quality.id)
         assert(!endpoint.supportsImages)
+    }
+
+    private static func testLowMemoryLocalExecutorRejectsBeforeLaunch() async throws {
+        let process = FakeLocalAIServerProcess()
+        let launchedModelIDs = ObservedModelIDs()
+        let manager = LocalAIServerManager(
+            launchProcess: { model, _, port, _ in
+                launchedModelIDs.append(model.id)
+                return (process, port)
+            },
+            pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
+            validateModel: { _ in .ready }
+        )
+        let executor = AIProcessingBackendExecutor(
+            choice: .localAI(modelID: LocalAIModelCatalog.quality.id),
+            cloudBaseURL: "https://api.example.com/openai/v1",
+            cloudAPIKey: "cloud-key",
+            localServerManager: manager,
+            localAIAvailability: LocalAIProcessingAvailability(
+                isAppleSilicon: true,
+                runnerIsExecutable: true,
+                physicalMemory: 8 * 1024 * 1024 * 1024
+            )
+        )
+
+        do {
+            _ = try await executor.withEndpoint { $0 }
+            assertionFailure("Expected low-memory Local AI failure")
+        } catch AIProcessingBackendError.localRuntimeUnavailable(let modelID) {
+            assert(modelID == LocalAIModelCatalog.quality.id)
+        }
+        assert(launchedModelIDs.values.isEmpty)
     }
 
     private static func testRetiredLocalModelFailsWithoutServerOrCloudFallback() async throws {

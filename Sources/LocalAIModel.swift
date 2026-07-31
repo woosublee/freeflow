@@ -15,6 +15,7 @@ struct LocalAIModel: Identifiable, Hashable, Codable, Sendable {
     let description: String
     let artifacts: [LocalAIModelArtifact]
     let approximateResidentRAMBytes: Int64
+    let minimumPhysicalMemoryBytes: UInt64
     let capabilities: AIModelCapabilities
     let runtime: LocalAIRuntime
 
@@ -24,6 +25,7 @@ struct LocalAIModel: Identifiable, Hashable, Codable, Sendable {
         description: String,
         artifacts: [LocalAIModelArtifact],
         approximateResidentRAMBytes: Int64,
+        minimumPhysicalMemoryBytes: UInt64 = 0,
         capabilities: AIModelCapabilities = AIModelCapabilityCatalog.qwenTextCapabilities,
         runtime: LocalAIRuntime = .textChat
     ) {
@@ -32,6 +34,7 @@ struct LocalAIModel: Identifiable, Hashable, Codable, Sendable {
         self.description = description
         self.artifacts = artifacts
         self.approximateResidentRAMBytes = approximateResidentRAMBytes
+        self.minimumPhysicalMemoryBytes = minimumPhysicalMemoryBytes
         self.capabilities = capabilities
         self.runtime = runtime
     }
@@ -71,6 +74,7 @@ struct LocalAIModelCatalog {
             )
         ],
         approximateResidentRAMBytes: 6_400_000_000,
+        minimumPhysicalMemoryBytes: 16 * 1024 * 1024 * 1024,
         capabilities: AIModelCapabilityCatalog.qwenTextCapabilities,
         runtime: .textChat
     )
@@ -82,7 +86,7 @@ struct LocalAIModelCatalog {
     }
 
     static func capabilities(for id: String) -> AIModelCapabilities? {
-        AIModelCapabilityCatalog.capabilities(forLocalModelID: id)
+        model(id: id)?.capabilities
     }
 }
 

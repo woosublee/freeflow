@@ -15,6 +15,7 @@ enum PipelineHistoryStoreError: Error {
 enum PipelineHistoryDurability: Equatable, Sendable {
     case durable
     case recovered(backupName: String)
+    case inMemory
     case inMemoryFallback
 }
 
@@ -29,7 +30,12 @@ final class PipelineHistoryStore {
     private(set) var durability: PipelineHistoryDurability
 
     private var isDurableStore: Bool {
-        durability != .inMemoryFallback
+        switch durability {
+        case .durable, .recovered:
+            true
+        case .inMemory, .inMemoryFallback:
+            false
+        }
     }
 
     convenience init() {
@@ -42,6 +48,13 @@ final class PipelineHistoryStore {
             usesInMemoryStore: inMemory,
             persistentStoreLoader: Self.loadPersistentStoresSynchronously,
             moveItem: Self.moveFile
+        )
+    }
+
+    convenience init(storeURL: URL) {
+        self.init(
+            storeURL: storeURL,
+            persistentStoreLoader: Self.loadPersistentStoresSynchronously
         )
     }
 
@@ -69,7 +82,7 @@ final class PipelineHistoryStore {
             managedObjectModel: Self.managedObjectModel
         )
         isStoreLoaded = false
-        durability = .durable
+        durability = usesInMemoryStore ? .inMemory : .durable
 
         var loaded = false
         var recoveredBackupName: String?
@@ -121,7 +134,11 @@ final class PipelineHistoryStore {
         }
 
         isStoreLoaded = loaded
-        durability = recoveredBackupName.map(PipelineHistoryDurability.recovered) ?? .durable
+        if usesInMemoryStore {
+            durability = .inMemory
+        } else {
+            durability = recoveredBackupName.map(PipelineHistoryDurability.recovered) ?? .durable
+        }
     }
 
     func loadAllHistory() -> [PipelineHistoryItem] {

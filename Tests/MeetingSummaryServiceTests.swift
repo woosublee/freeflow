@@ -135,7 +135,12 @@ struct MeetingSummaryServiceTests {
                 choice: .localAI(modelID: LocalAIModelCatalog.quality.id),
                 cloudBaseURL: "https://api.example.com/openai/v1",
                 cloudAPIKey: "cloud-secret",
-                localServerManager: manager
+                localServerManager: manager,
+                localAIAvailability: LocalAIProcessingAvailability(
+                    isAppleSilicon: true,
+                    runnerIsExecutable: true,
+                    physicalMemory: 16 * 1024 * 1024 * 1024
+                )
             ),
             cloudFallbackModelID: "cloud/fallback",
             outputLanguage: "English",

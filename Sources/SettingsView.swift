@@ -1578,6 +1578,11 @@ struct ModelsSettingsView: View {
                 SettingsCard("Meeting Summary", icon: "text.document") {
                     meetingSummaryFeatureSection
                 }
+                if !cleanupOnlyLocalAIModels.isEmpty {
+                    SettingsCard("On-device model storage", icon: "internaldrive") {
+                        localAIArtifactCleanupSection
+                    }
+                }
             }
             .padding(24)
         }
@@ -1689,6 +1694,29 @@ struct ModelsSettingsView: View {
 
     private var hasConfiguredCloudAPIKey: Bool {
         !appState.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var cleanupOnlyLocalAIModels: [LocalAIModel] {
+        LocalAIModelCatalog.all.filter { model in
+            appState.localAIInstallState(for: model).status == .ready
+                && !appState.isLocalAIModelAvailable(model)
+        }
+    }
+
+    private var localAIArtifactCleanupSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Installed models that cannot run on this Mac can be removed here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(cleanupOnlyLocalAIModels) { model in
+                LocalAIModelRowView(
+                    feature: .postProcessing,
+                    model: model,
+                    isSelected: false,
+                    presentation: .cleanupOnly
+                )
+            }
+        }
     }
 
     private var cloudProviderSection: some View {
@@ -1949,7 +1977,9 @@ struct ModelsSettingsView: View {
               LocalAIModelCatalog.model(id: modelID) != nil else {
             return false
         }
-        return isAIProcessingChoiceCompatible(.localAI(modelID: modelID), for: feature)
+        let choice = AIProcessingBackendChoice.localAI(modelID: modelID)
+        return isAIProcessingChoiceCompatible(choice, for: feature)
+            && appState.isAIProcessingChoiceAvailable(choice, for: feature)
     }
 
     private func setAIProcessingChoiceDraft(
@@ -2116,11 +2146,12 @@ struct ModelsSettingsView: View {
     private func managedLocalAIModel(
         for feature: AIProcessingFeature
     ) -> LocalAIModel? {
-        guard let model = managedLocalAIResolution(for: feature).model,
-              isAIProcessingChoiceCompatible(
-                .localAI(modelID: model.id),
-                for: feature
-              ) else {
+        guard let model = managedLocalAIResolution(for: feature).model else {
+            return nil
+        }
+        let choice = AIProcessingBackendChoice.localAI(modelID: model.id)
+        guard isAIProcessingChoiceCompatible(choice, for: feature),
+              appState.isAIProcessingChoiceAvailable(choice, for: feature) else {
             return nil
         }
         return model

@@ -5,7 +5,7 @@ struct LocalAIModelTests {
     static func main() throws {
         try testQualityModelMetadata()
         try testModelsDeclareTextOnlyCapabilitiesAndRuntime()
-        try testCapabilityLookupUsesStoredModelIDs()
+        try testCapabilityLookupUsesStoredModelDescriptors()
         try testCatalogArtifactsAreCompleteAndValid()
         try testCatalogContainsOnlyQualityModel()
         try testRetiredModelDoesNotHaveProductStorageMetadata()
@@ -46,11 +46,10 @@ struct LocalAIModelTests {
         }
     }
 
-    private static func testCapabilityLookupUsesStoredModelIDs() throws {
-        assert(
-            LocalAIModelCatalog.capabilities(for: LocalAIModelCatalog.quality.id)
-                == LocalAIModelCatalog.quality.capabilities
-        )
+    private static func testCapabilityLookupUsesStoredModelDescriptors() throws {
+        for model in LocalAIModelCatalog.all {
+            assert(LocalAIModelCatalog.capabilities(for: model.id) == model.capabilities)
+        }
         assert(LocalAIModelCatalog.capabilities(for: "does-not-exist") == nil)
     }
 

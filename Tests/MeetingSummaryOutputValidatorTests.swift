@@ -6,6 +6,10 @@ import Foundation
 struct MeetingSummaryOutputValidatorTests {
     static func main() throws {
         try testRejectsSourceQuoteOutsideTranscript()
+        try testRejectsOverviewWithoutEvidence()
+        try testRejectsOverviewWithMoreThanTwoEvidenceQuotes()
+        try testRejectsOverviewWithDuplicateEvidenceQuotes()
+        try testAcceptsOverviewWithTwoDistinctEvidenceQuotes()
         try testRejectsGeneratedPartialProseAsMergeEvidence()
         try testRejectsActionOwnerOutsideSourceQuote()
         try testAcceptsKoreanDateGroundingForISODueDate()
@@ -23,6 +27,50 @@ struct MeetingSummaryOutputValidatorTests {
                 against: "Minsu will send it."
             )
         }
+    }
+
+    private static func testRejectsOverviewWithoutEvidence() throws {
+        try expectFailure(.overviewEvidenceCountInvalid) {
+            try MeetingSummaryOutputValidator().validate(
+                v2WithOverviewQuotes([]),
+                against: "First source quote."
+            )
+        }
+    }
+
+    private static func testRejectsOverviewWithMoreThanTwoEvidenceQuotes() throws {
+        try expectFailure(.overviewEvidenceCountInvalid) {
+            try MeetingSummaryOutputValidator().validate(
+                v2WithOverviewQuotes([
+                    "First source quote.",
+                    "Second source quote.",
+                    "Third source quote."
+                ]),
+                against: "First source quote. Second source quote. Third source quote."
+            )
+        }
+    }
+
+    private static func testRejectsOverviewWithDuplicateEvidenceQuotes() throws {
+        try expectFailure(.overviewEvidenceQuoteDuplicate) {
+            try MeetingSummaryOutputValidator().validate(
+                v2WithOverviewQuotes([
+                    "First source quote.",
+                    " First source quote. "
+                ]),
+                against: "First source quote."
+            )
+        }
+    }
+
+    private static func testAcceptsOverviewWithTwoDistinctEvidenceQuotes() throws {
+        try MeetingSummaryOutputValidator().validate(
+            v2WithOverviewQuotes([
+                "First source quote.",
+                "Second source quote."
+            ]),
+            against: "First source quote. Second source quote."
+        )
     }
 
     private static func testRejectsGeneratedPartialProseAsMergeEvidence() throws {
@@ -106,6 +154,21 @@ struct MeetingSummaryOutputValidatorTests {
             overview: MeetingSummaryEvidenceText(
                 text: overview,
                 sourceQuotes: [quote]
+            ),
+            keyPoints: [],
+            decisions: [],
+            actionItems: [],
+            openQuestions: []
+        )
+    }
+
+    private static func v2WithOverviewQuotes(
+        _ quotes: [String]
+    ) -> MeetingSummaryDraftContentV2 {
+        MeetingSummaryDraftContentV2(
+            overview: MeetingSummaryEvidenceText(
+                text: "The team reviewed the release schedule.",
+                sourceQuotes: quotes
             ),
             keyPoints: [],
             decisions: [],

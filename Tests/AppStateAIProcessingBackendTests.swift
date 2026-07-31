@@ -71,6 +71,7 @@ struct AppStateAIProcessingBackendTests {
         await testInstallerSuccessRechecksHardwareAvailability()
         await testInstallerFailureClearsPendingAndSetsIssue()
         await testUnsupportedHardwareRejectsLocalSelection()
+        await testLowMemoryPreservesStoredLocalChoiceWithoutStartingIt()
         await testCanonicalModelValidationRejectsForgedModels()
         await testAIProcessingChoiceDisplayMetadata()
         testManagedLocalAIModelResolutionReconcilesRetainedLifecycle()
@@ -1703,6 +1704,43 @@ struct AppStateAIProcessingBackendTests {
         precondition(installHarness.starts(for: model) == 0)
     }
 
+    private static func testLowMemoryPreservesStoredLocalChoiceWithoutStartingIt() async {
+        resetAIProcessingDefaults()
+        let statusHarness = LocalAIStatusHarness(defaultStatus: .ready)
+        let installHarness = LocalAIInstallHarness()
+        let seams = LocalAISeamSnapshot()
+        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
+        AppState.localAIInstallStarter = installHarness.start
+        AppState.localAIProcessingAvailabilityProvider = lowMemoryLocalAIAvailability
+        defer { seams.restore() }
+
+        let model = LocalAIModelCatalog.quality
+        let storedChoice = AIProcessingBackendChoice.localAI(modelID: model.id)
+        storeChoice(storedChoice, forKey: "post_processing_backend_choice")
+        UserDefaults.standard.set(false, forKey: "disable_post_processing")
+        let appState = await makeRefreshedAppState()
+
+        await MainActor.run {
+            precondition(appState.postProcessingBackendChoice == storedChoice)
+            precondition(appState.disablePostProcessing)
+            precondition(!appState.isAIProcessingChoiceAvailable(storedChoice, for: .postProcessing))
+            precondition(!appState.isAIProcessingChoiceReady(storedChoice, for: .postProcessing))
+            precondition(
+                appState.aiProcessingChoiceDisplays(for: .postProcessing).contains {
+                    $0.choice == storedChoice && !$0.isAvailable
+                }
+            )
+
+            appState.selectAIProcessingBackendChoice(storedChoice, for: .postProcessing)
+            appState.installLocalAIModel(model, autoSelectFor: .postProcessing)
+
+            precondition(appState.postProcessingBackendChoice == storedChoice)
+            precondition(appState.pendingLocalAIModelID(for: .postProcessing) == nil)
+            precondition(!appState.localAIInstallState(for: model).isInstalling)
+        }
+        precondition(installHarness.starts(for: model) == 0)
+    }
+
     private static func testCanonicalModelValidationRejectsForgedModels() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
@@ -2248,7 +2286,8 @@ struct AppStateAIProcessingBackendTests {
         {
             LocalAIProcessingAvailability(
                 isAppleSilicon: true,
-                runnerIsExecutable: true
+                runnerIsExecutable: true,
+                physicalMemory: 16 * 1024 * 1024 * 1024
             )
         }
     }
@@ -2258,6 +2297,16 @@ struct AppStateAIProcessingBackendTests {
             LocalAIProcessingAvailability(
                 isAppleSilicon: false,
                 runnerIsExecutable: false
+            )
+        }
+    }
+
+    private static var lowMemoryLocalAIAvailability: () -> LocalAIProcessingAvailability {
+        {
+            LocalAIProcessingAvailability(
+                isAppleSilicon: true,
+                runnerIsExecutable: true,
+                physicalMemory: 8 * 1024 * 1024 * 1024
             )
         }
     }

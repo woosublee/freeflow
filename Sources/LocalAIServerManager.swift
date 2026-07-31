@@ -85,6 +85,85 @@ struct LocalAIHealthPoller: Sendable {
     }
 }
 
+struct LocalAIReadinessPoller: Sendable {
+    typealias Probe = @Sendable (URLRequest) async throws -> (Data, URLResponse)
+    typealias MonotonicNow = @Sendable () -> TimeInterval
+    typealias Sleep = @Sendable (TimeInterval) async throws -> Void
+
+    let overallTimeout: TimeInterval
+    let probeTimeout: TimeInterval
+    let cadence: TimeInterval
+    let maxAttempts: Int
+    let now: MonotonicNow
+    let sleep: Sleep
+
+    static let `default` = LocalAIReadinessPoller(
+        overallTimeout: 10,
+        probeTimeout: 5,
+        cadence: 0.2,
+        maxAttempts: 50,
+        now: { ProcessInfo.processInfo.systemUptime },
+        sleep: { duration in
+            let nanoseconds = UInt64(max(0, duration) * 1_000_000_000)
+            try await Task.sleep(nanoseconds: nanoseconds)
+        }
+    )
+
+    func poll(port: UInt16, using probe: Probe) async -> Bool {
+        guard overallTimeout > 0, probeTimeout > 0, maxAttempts > 0 else {
+            return false
+        }
+        let deadline = now() + overallTimeout
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
+
+        for attempt in 0..<maxAttempts {
+            if Task.isCancelled { return false }
+            let remaining = deadline - now()
+            guard remaining > 0 else { return false }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = min(probeTimeout, remaining)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = Data(
+                #"{"model":"local","temperature":0,"max_completion_tokens":8,"max_tokens":8,"messages":[{"role":"system","content":"Reply with OK."},{"role":"user","content":"ready"}]}"#.utf8
+            )
+            do {
+                let (data, response) = try await probe(request)
+                if Self.isReady(data: data, response: response) {
+                    return true
+                }
+            } catch is CancellationError {
+                return false
+            } catch {
+                if Task.isCancelled { return false }
+            }
+
+            guard attempt + 1 < maxAttempts else { return false }
+            let sleepDuration = min(cadence, deadline - now())
+            guard sleepDuration > 0 else { return false }
+            do {
+                try await sleep(sleepDuration)
+            } catch {
+                return false
+            }
+        }
+        return false
+    }
+
+    private static func isReady(data: Data, response: URLResponse) -> Bool {
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200..<300).contains(httpResponse.statusCode),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = payload["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] as? String else {
+            return false
+        }
+        return !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
 /// Owns the lifecycle of exactly one resident `llama-server` process. The
 /// manager lazily starts the configured model, coalesces callers onto one
 /// in-progress startup, switches models without overlapping processes, and
@@ -176,6 +255,7 @@ actor LocalAIServerManager {
     private let launchProcess: LaunchProcess
     private let pollHealth: PollHealth
     private let readinessProbe: ReadinessProbe
+    private let readinessPoller: LocalAIReadinessPoller
     private let validateModel: ValidateModel
     private let terminationGracePeriod: TimeInterval
     private let waitForProcessExit: WaitForProcessExit
@@ -206,6 +286,7 @@ actor LocalAIServerManager {
         readinessProbe: @escaping ReadinessProbe = { request in
             try await LLMAPITransport.data(for: request)
         },
+        readinessPoller: LocalAIReadinessPoller = .default,
         validateModel: ValidateModel? = nil,
         terminationGracePeriod: TimeInterval = 2,
         waitForProcessExit: @escaping WaitForProcessExit = { process, timeout in
@@ -219,6 +300,7 @@ actor LocalAIServerManager {
         self.launchProcess = launchProcess
         self.pollHealth = pollHealth
         self.readinessProbe = readinessProbe
+        self.readinessPoller = readinessPoller
         self.validateModel = validateModel ?? { model in
             try store.recoverInterruptedReplacement(for: model)
             return store.installStatus(for: model)
@@ -617,9 +699,10 @@ actor LocalAIServerManager {
 
         let pollHealth = self.pollHealth
         let readinessProbe = self.readinessProbe
+        let readinessPoller = self.readinessPoller
         let healthTask = Task {
             guard await pollHealth(launchedPort), !Task.isCancelled else { return false }
-            return await Self.probeReadiness(port: launchedPort, using: readinessProbe)
+            return await readinessPoller.poll(port: launchedPort, using: readinessProbe)
                 && !Task.isCancelled
         }
         let launch = LaunchState(
@@ -878,35 +961,6 @@ actor LocalAIServerManager {
 
     private static func baseURL(port: UInt16) -> URL {
         URL(string: "http://127.0.0.1:\(port)/v1")!
-    }
-
-    private static func probeReadiness(
-        port: UInt16,
-        using probe: ReadinessProbe
-    ) async -> Bool {
-        var request = URLRequest(
-            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!
-        )
-        request.httpMethod = "POST"
-        request.timeoutInterval = 5
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Data(
-            #"{"model":"local","temperature":0,"max_completion_tokens":8,"max_tokens":8,"messages":[{"role":"system","content":"Reply with OK."},{"role":"user","content":"ready"}]}"#.utf8
-        )
-        do {
-            let (data, response) = try await probe(request)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200..<300).contains(httpResponse.statusCode),
-                  let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = payload["choices"] as? [[String: Any]],
-                  let message = choices.first?["message"] as? [String: Any],
-                  let content = message["content"] as? String else {
-                return false
-            }
-            return !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        } catch {
-            return false
-        }
     }
 
     private static func defaultLaunchProcess(

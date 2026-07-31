@@ -2,6 +2,8 @@ import Foundation
 
 enum MeetingSummaryOutputValidationError: Error, Equatable, Sendable {
     case sourceQuoteMissing
+    case overviewEvidenceCountInvalid
+    case overviewEvidenceQuoteDuplicate
     case sourceQuoteNotFound
     case ownerNotGrounded
     case dueDateNotGrounded
@@ -54,8 +56,8 @@ struct MeetingSummaryOutputValidator: Sendable {
             !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
 
-        try validate(
-            sourceQuotes: draft.overview.sourceQuotes.map(Optional.some),
+        try validateOverviewEvidence(
+            draft.overview.sourceQuotes,
             sources: sources
         )
         for point in draft.keyPoints + draft.decisions + draft.openQuestions {
@@ -84,6 +86,23 @@ struct MeetingSummaryOutputValidator: Sendable {
         case .accepted, .notRequested, .uncertain:
             break
         }
+    }
+
+    private func validateOverviewEvidence(
+        _ sourceQuotes: [String],
+        sources: [String]
+    ) throws {
+        guard (1...2).contains(sourceQuotes.count) else {
+            throw MeetingSummaryOutputValidationError.overviewEvidenceCountInvalid
+        }
+        let normalizedQuotes = sourceQuotes.compactMap(nonempty)
+        guard normalizedQuotes.count == sourceQuotes.count else {
+            throw MeetingSummaryOutputValidationError.sourceQuoteMissing
+        }
+        guard Set(normalizedQuotes).count == normalizedQuotes.count else {
+            throw MeetingSummaryOutputValidationError.overviewEvidenceQuoteDuplicate
+        }
+        try validate(sourceQuotes: normalizedQuotes.map(Optional.some), sources: sources)
     }
 
     private func validate(
