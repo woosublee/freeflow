@@ -353,7 +353,7 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
             }
 
             let batches = try await largestMergeBatches(from: records)
-            guard batches.allSatisfy({ $0.count > 1 }) else {
+            guard batches.contains(where: { $0.count > 1 }) else {
                 throw MeetingSummaryError.invalidResponse(
                     "Validated summary partial exceeds the safe merge budget."
                 )
@@ -361,6 +361,10 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
 
             var merged: [MergeRecord] = []
             for batch in batches {
+                guard batch.count > 1 else {
+                    merged.append(batch[0])
+                    continue
+                }
                 let inputs = batch.map(\.draft)
                 let prompt = try MeetingSummaryPromptFactory.merge(
                     validatedPartials: inputs,

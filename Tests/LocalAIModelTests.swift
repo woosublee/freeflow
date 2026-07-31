@@ -8,7 +8,7 @@ struct LocalAIModelTests {
         try testCapabilityLookupUsesStoredModelIDs()
         try testCatalogArtifactsAreCompleteAndValid()
         try testCatalogContainsOnlyQualityModel()
-        try testProductSourcesContainNoRetiredCatalogMetadata()
+        try testRetiredModelDoesNotHaveProductStorageMetadata()
         try testDownloadProgressDisplayText()
         try testLocalizedModelMetadataAndDownloadProgress()
         print("LocalAIModelTests passed")
@@ -71,20 +71,23 @@ struct LocalAIModelTests {
         assert(LocalAIModelCatalog.model(id: "does-not-exist") == nil)
     }
 
-    private static func testProductSourcesContainNoRetiredCatalogMetadata() throws {
+    private static func testRetiredModelDoesNotHaveProductStorageMetadata() throws {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        let localModelSource = try String(
-            contentsOf: root.appendingPathComponent("Sources/LocalAIModel.swift"),
-            encoding: .utf8
-        )
-        let capabilitySource = try String(
-            contentsOf: root.appendingPathComponent("Sources/AIModelCapabilities.swift"),
-            encoding: .utf8
-        )
-        for source in [localModelSource, capabilitySource] {
-            assert(!source.contains("qwen2.5-1.5b-instruct"))
+        let retiredModelID = "qwen2.5-1.5b-instruct"
+        let retiredArtifactName = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+        let productSources = try [
+            "Sources/LocalAIModel.swift",
+            "Sources/AIModelCapabilities.swift",
+            "Sources/LocalAIInstaller.swift",
+            "Sources/LocalAIServerManager.swift"
+        ].map { try String(contentsOf: root.appendingPathComponent($0), encoding: .utf8) }
+
+        assert(LocalAIModelCatalog.model(id: retiredModelID) == nil)
+        assert(LocalAIModelCatalog.capabilities(for: retiredModelID) == nil)
+        for source in productSources {
+            assert(!source.contains(retiredModelID))
+            assert(!source.contains(retiredArtifactName))
             assert(!source.contains("Qwen2.5-1.5B-Instruct-GGUF"))
-            assert(!source.contains("Faster and lighter. Good for lower-memory Macs."))
         }
     }
 

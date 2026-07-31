@@ -37,6 +37,7 @@ struct AppStateAIProcessingBackendTests {
         await testStoredCloudChoicesReconcileRememberedModels()
         await testStoredLocalChoicesPreserveRememberedCloudModels()
         await testIncompatibleLegacyContextSelectionIsPreservedAndDisabled()
+        await testProviderlessQwenVisionCloudChoiceSupportsContext()
         await testLegacyUninstalledContextDownloadDoesNotQueueOrActivateIt()
         await testStartupPreservesUnavailableCompatibleLocalChoiceWithoutCloudFallback()
         await testSettingsDismissalPreservesUnavailableLocalChoiceWithoutCloudFallback()
@@ -232,6 +233,28 @@ struct AppStateAIProcessingBackendTests {
         }
     }
 
+    private static func testProviderlessQwenVisionCloudChoiceSupportsContext() async {
+        resetAIProcessingDefaults()
+        let appState = await makeRefreshedAppState()
+        let choice = AIProcessingBackendChoice.cloud(modelID: "qwen3.6-27b")
+
+        await MainActor.run {
+            precondition(
+                appState.isAIProcessingChoiceAvailable(choice, for: .context),
+                "the providerless Qwen vision alias is available for Context"
+            )
+            appState.selectAIProcessingBackendChoice(choice, for: .context)
+            precondition(
+                appState.contextBackendChoice == choice,
+                "the providerless Qwen vision alias is retained as the Context choice"
+            )
+            precondition(
+                appState.contextModelCapabilityWarning == nil,
+                "the providerless Qwen vision alias does not show a Context capability warning"
+            )
+        }
+    }
+
     private static func testLegacyUninstalledContextDownloadDoesNotQueueOrActivateIt() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
@@ -380,10 +403,17 @@ struct AppStateAIProcessingBackendTests {
                 precondition(display?.isAvailable == false)
                 precondition(display?.unavailableReason?.isEmpty == false)
                 precondition(
-                    display?.title != retiredModelID,
-                    "retired model IDs are not exposed in Settings"
+                    display?.title == "Qwen2.5 1.5B Instruct",
+                    "known retired models use their human-readable Settings label"
                 )
             }
+            let contextCloudDisplays = appState.aiProcessingChoiceDisplays(for: .context)
+                .filter { $0.choice == .cloud(modelID: "qwen/qwen3.6-27b") }
+            precondition(
+                contextCloudDisplays.count == 1
+                    && contextCloudDisplays[0].isAvailable,
+                "a retired Context choice does not hide the compatible Cloud Context model"
+            )
             let postLocalDisplays = appState.aiProcessingChoiceDisplays(for: .postProcessing)
                 .filter { $0.choice.isLocal && $0.isAvailable }
             precondition(

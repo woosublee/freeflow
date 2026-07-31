@@ -229,6 +229,7 @@ struct SettingsLocalizationTests {
             "The previously selected on-device model is no longer available. Explicitly select Qwen2.5 7B to continue locally.": "이전에 선택한 온디바이스 모델을 더 이상 사용할 수 없습니다. 로컬에서 계속하려면 Qwen2.5 7B를 직접 선택하세요.",
             "The previously selected on-device model is no longer available. Context requires an image-capable model.": "이전에 선택한 온디바이스 모델을 더 이상 사용할 수 없습니다. Context에는 이미지 지원 모델이 필요합니다.",
             "Previously selected on-device model": "이전에 선택한 온디바이스 모델",
+            "This on-device model is no longer available and cannot be used.": "이 온디바이스 모델은 더 이상 제공되지 않으며 사용할 수 없습니다.",
             "Canceled": "취소됨",
             "Selected": "선택됨",
             "Not selected": "선택되지 않음",

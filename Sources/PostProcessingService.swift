@@ -462,37 +462,13 @@ Behavior:
     ) async throws -> PostProcessingResult {
         let vocabularyTerms = mergedVocabularyTerms(rawVocabulary: customVocabulary)
 
-        let timeoutSeconds = postProcessingTimeoutSeconds
-        return try await withThrowingTaskGroup(of: PostProcessingResult.self) { group in
-            group.addTask { [weak self] in
-                guard let self else {
-                    throw PostProcessingError.invalidResponse("Post-processing service deallocated")
-                }
-                return try await self.processWithFallback(
-                    transcript: transcript,
-                    contextSummary: context.contextSummary,
-                    customVocabulary: vocabularyTerms,
-                    customSystemPrompt: customSystemPrompt,
-                    outputLanguage: outputLanguage
-                )
-            }
-
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-                throw PostProcessingError.requestTimedOut(timeoutSeconds)
-            }
-
-            do {
-                guard let result = try await group.next() else {
-                    throw PostProcessingError.invalidResponse("No post-processing result")
-                }
-                group.cancelAll()
-                return result
-            } catch {
-                group.cancelAll()
-                throw error
-            }
-        }
+        return try await processWithFallback(
+            transcript: transcript,
+            contextSummary: context.contextSummary,
+            customVocabulary: vocabularyTerms,
+            customSystemPrompt: customSystemPrompt,
+            outputLanguage: outputLanguage
+        )
     }
 
     func commandTransform(
@@ -512,37 +488,13 @@ Behavior:
             throw PostProcessingError.invalidInput("Voice command must not be empty")
         }
 
-        let timeoutSeconds = postProcessingTimeoutSeconds
-        return try await withThrowingTaskGroup(of: PostProcessingResult.self) { group in
-            group.addTask { [weak self] in
-                guard let self else {
-                    throw PostProcessingError.invalidResponse("Post-processing service deallocated")
-                }
-                return try await self.processCommandTransformWithFallback(
-                    selectedText: selectedText,
-                    voiceCommand: voiceCommand,
-                    contextSummary: context.contextSummary,
-                    customVocabulary: vocabularyTerms,
-                    outputLanguage: outputLanguage
-                )
-            }
-
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-                throw PostProcessingError.requestTimedOut(timeoutSeconds)
-            }
-
-            do {
-                guard let result = try await group.next() else {
-                    throw PostProcessingError.invalidResponse("No post-processing result")
-                }
-                group.cancelAll()
-                return result
-            } catch {
-                group.cancelAll()
-                throw error
-            }
-        }
+        return try await processCommandTransformWithFallback(
+            selectedText: selectedText,
+            voiceCommand: voiceCommand,
+            contextSummary: context.contextSummary,
+            customVocabulary: vocabularyTerms,
+            outputLanguage: outputLanguage
+        )
     }
 
     private func processWithFallback(
@@ -1160,6 +1112,33 @@ VOICE_COMMAND: "\(voiceCommand)"
 SELECTED_TEXT: "\(selectedText)"
 """
 
+        let config = ModelConfiguration.config(for: model)
+        let configuredCompletionCeiling = completionCeiling(
+            for: config,
+            model: model
+        )
+        let localCompletionCeiling: Int?
+        if endpoint.kind == .local {
+            let renderedPrompt = "[System]\n\(systemPrompt)\n\n[User]\n\(userMessage)"
+            guard let budget = try await LocalAITokenBudgeter(
+                contextWindow: 16_384,
+                tokenCounter: PostProcessingByteTokenCounter()
+            ).budget(
+                forRenderedChatPrompt: renderedPrompt,
+                role: .postProcessing(inputReservation: 8_000)
+            ) else {
+                throw PostProcessingError.invalidInput(
+                    "Command transform request exceeds the safe context budget"
+                )
+            }
+            localCompletionCeiling = min(
+                configuredCompletionCeiling ?? postProcessingMaxCompletionTokens,
+                budget.maxCompletionTokens
+            )
+        } else {
+            localCompletionCeiling = nil
+        }
+
         let promptForDisplay = """
 Model: \(model)
 
@@ -1184,18 +1163,13 @@ Model: \(model)
                 ]
             ]
         ]
-        let config = ModelConfiguration.config(for: model)
-        let configuredCompletionCeiling = completionCeiling(
-            for: config,
-            model: model
-        )
         if let configuredCompletionCeiling {
             payload["max_completion_tokens"] = configuredCompletionCeiling
         }
         applyLocalCompletionCompatibility(
             to: &payload,
             endpoint: endpoint,
-            ceiling: configuredCompletionCeiling
+            ceiling: localCompletionCeiling
         )
         if let effort = config.reasoningEffort {
             payload["reasoning_effort"] = effort

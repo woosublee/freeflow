@@ -8,6 +8,7 @@ struct PostProcessingOutputValidatorTests {
         try testMeaningfulTranscriptCannotBecomeEmptySentinel()
         try testKoreanOutputRejectsChineseReplacement()
         try testProtectedFlagsAndPathsMustSurvive()
+        try testProtectedEmailDateAndNumericFactsMustSurvive()
         try testPromptTemplateLeakIsRejected()
         try testDisproportionatelyCollapsedMeaningfulTranscriptIsRejected()
         print("PostProcessingOutputValidatorTests passed")
@@ -44,6 +45,86 @@ struct PostProcessingOutputValidatorTests {
         )
 
         try expectFailure(result, equals: .protectedAtomMissing)
+    }
+
+    private static func testProtectedEmailDateAndNumericFactsMustSurvive() throws {
+        let source = "Email alice@example.com by 2026-08-15 (08/15/2026): 42 seats, 1,250 credits, and 3.5 percent."
+        let validator = PostProcessingOutputValidator()
+        for output in [
+            "Email the owner by 2026-08-15 (08/15/2026): 42 seats, 1,250 credits, and 3.5 percent.",
+            "Email alice@example.com by tomorrow (08/15/2026): 42 seats, 1,250 credits, and 3.5 percent.",
+            "Email alice@example.com by 2026-08-15 (tomorrow): 42 seats, 1,250 credits, and 3.5 percent.",
+            "Email alice@example.com by 2026-08-15 (08/15/2026): 43 seats, 1,250 credits, and 3.5 percent.",
+            "Email alice@example.com by 2026-08-15 (08/15/2026): 42 seats, 1,300 credits, and 3.5 percent.",
+            "Email alice@example.com by 2026-08-15 (08/15/2026): 42 seats, 1,250 credits, and 3.6 percent."
+        ] {
+            try expectFailure(
+                validator.validate(
+                    source: source,
+                    output: output,
+                    outputLanguage: "",
+                    vocabulary: []
+                ),
+                equals: .protectedAtomMissing
+            )
+        }
+        switch validator.validate(
+            source: source,
+            output: source,
+            outputLanguage: "",
+            vocabulary: []
+        ) {
+        case .success:
+            break
+        case .failure(let failure):
+            throw PostProcessingOutputValidatorTestFailure(
+                "Expected protected facts to survive, got \(failure)"
+            )
+        }
+
+        let timestampAndRange = "Deploy at 2026-08-15T14:30:00Z; temperature range is -5 to +8 C."
+        for output in [
+            "Deploy at 2026-09-01T09:00:00Z; temperature range is -5 to +8 C.",
+            "Deploy at 2026-08-15T14:30:00Z; temperature range is 5 to +8 C.",
+            "Deploy at 2026-08-15T14:30:00Z; temperature range is -5 to +9 C."
+        ] {
+            try expectFailure(
+                validator.validate(
+                    source: timestampAndRange,
+                    output: output,
+                    outputLanguage: "",
+                    vocabulary: []
+                ),
+                equals: .protectedAtomMissing
+            )
+        }
+        switch validator.validate(
+            source: timestampAndRange,
+            output: timestampAndRange,
+            outputLanguage: "",
+            vocabulary: []
+        ) {
+        case .success:
+            break
+        case .failure(let failure):
+            throw PostProcessingOutputValidatorTestFailure(
+                "Expected timestamps and signed ranges to survive, got \(failure)"
+            )
+        }
+
+        switch validator.validate(
+            source: "Deploy v1.2.3 at 14:30.",
+            output: "Deploy v2.0.0 at 15:00.",
+            outputLanguage: "",
+            vocabulary: []
+        ) {
+        case .success:
+            break
+        case .failure(let failure):
+            throw PostProcessingOutputValidatorTestFailure(
+                "Version and time values must not be protected numeric facts: \(failure)"
+            )
+        }
     }
 
     private static func testPromptTemplateLeakIsRejected() throws {

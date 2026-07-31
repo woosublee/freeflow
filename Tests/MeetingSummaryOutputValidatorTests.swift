@@ -8,6 +8,9 @@ struct MeetingSummaryOutputValidatorTests {
         try testRejectsSourceQuoteOutsideTranscript()
         try testRejectsGeneratedPartialProseAsMergeEvidence()
         try testRejectsActionOwnerOutsideSourceQuote()
+        try testAcceptsKoreanDateGroundingForISODueDate()
+        try testAcceptsJapaneseDateGroundingForISODueDate()
+        try testRejectsYearlessLocalizedDateForISODueDate()
         try testRejectsWrongLanguageInGeneratedProse()
         try testPreservesSourceQuoteLanguageWhileValidatingGeneratedProse()
         print("MeetingSummaryOutputValidatorTests passed")
@@ -43,6 +46,32 @@ struct MeetingSummaryOutputValidatorTests {
             try MeetingSummaryOutputValidator().validate(
                 v2WithOwner("Jiyun", quote: "Minsu will send it"),
                 against: "Minsu will send it"
+            )
+        }
+    }
+
+    private static func testAcceptsKoreanDateGroundingForISODueDate() throws {
+        let quote = "민수는 2026년 8월 15일까지 배포합니다."
+        try MeetingSummaryOutputValidator().validate(
+            v2WithDueDate("2026-08-15", quote: quote),
+            against: quote
+        )
+    }
+
+    private static func testAcceptsJapaneseDateGroundingForISODueDate() throws {
+        let quote = "田中さんは2026年8月15日までに提出します。"
+        try MeetingSummaryOutputValidator().validate(
+            v2WithDueDate("2026-08-15", quote: quote),
+            against: quote
+        )
+    }
+
+    private static func testRejectsYearlessLocalizedDateForISODueDate() throws {
+        let quote = "민수는 8월 15일까지 배포합니다."
+        try expectFailure(.dueDateNotGrounded) {
+            try MeetingSummaryOutputValidator().validate(
+                v2WithDueDate("2026-08-15", quote: quote),
+                against: quote
             )
         }
     }
@@ -102,6 +131,31 @@ struct MeetingSummaryOutputValidatorTests {
                     task: "Send it",
                     owner: owner,
                     dueDate: nil,
+                    sourceQuote: quote,
+                    isCompleted: false
+                )
+            ],
+            openQuestions: []
+        )
+    }
+
+    private static func v2WithDueDate(
+        _ dueDate: String,
+        quote: String
+    ) -> MeetingSummaryDraftContentV2 {
+        MeetingSummaryDraftContentV2(
+            overview: MeetingSummaryEvidenceText(
+                text: "The team assigned the delivery task.",
+                sourceQuotes: [quote]
+            ),
+            keyPoints: [],
+            decisions: [],
+            actionItems: [
+                MeetingSummaryActionItem(
+                    id: UUID(),
+                    task: "Send it",
+                    owner: nil,
+                    dueDate: dueDate,
                     sourceQuote: quote,
                     isCompleted: false
                 )

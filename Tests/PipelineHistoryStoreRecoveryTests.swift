@@ -5,6 +5,7 @@ import Foundation
 struct PipelineHistoryStoreRecoveryTests {
     static func main() throws {
         try testRecoveryMovesAllSQLiteComponentsBeforeLoadingReplacementStore()
+        try testRecoveredStoreRemainsDurableAndReloadsNewHistory()
         try testFailedBackupKeepsRemainingOriginalFilesAndUsesInMemoryStore()
         print("PipelineHistoryStoreRecoveryTests passed")
     }
@@ -61,6 +62,56 @@ struct PipelineHistoryStoreRecoveryTests {
             "recovery never destroys originals first"
         )
         try expect(store.durability != .durable, "fallback state is observable")
+    }
+
+    private static func testRecoveredStoreRemainsDurableAndReloadsNewHistory() throws {
+        let fixture = try StoreFixture()
+        defer { fixture.remove() }
+        var loadAttempts = 0
+        let store = PipelineHistoryStore(
+            storeURL: fixture.storeURL,
+            persistentStoreLoader: { container in
+                loadAttempts += 1
+                if loadAttempts == 1 {
+                    return RecoveryTestFailure("Injected persistent-store load failure")
+                }
+                return PipelineHistoryStore.loadPersistentStoresSynchronously(
+                    container: container
+                )
+            }
+        )
+        guard case .recovered = store.durability else {
+            throw RecoveryTestFailure("Expected a recovered durable store")
+        }
+
+        let item = PipelineHistoryItem(
+            id: UUID(),
+            timestamp: Date(timeIntervalSince1970: 1_000),
+            rawTranscript: "Recovered history item.",
+            postProcessedTranscript: "Recovered history item.",
+            postProcessingPrompt: nil,
+            contextSummary: "",
+            contextScreenshotDataURL: nil,
+            contextScreenshotStatus: "No screenshot",
+            postProcessingStatus: "succeeded",
+            debugStatus: "",
+            customVocabulary: "",
+            usedPostProcessing: false
+        )
+        _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
+
+        let reopened = PipelineHistoryStore(
+            storeURL: fixture.storeURL,
+            persistentStoreLoader: PipelineHistoryStore.loadPersistentStoresSynchronously
+        )
+        try expect(
+            reopened.durability == .durable,
+            "new history store opens durably after recovery"
+        )
+        try expect(
+            reopened.loadAllHistory().contains(where: { $0.id == item.id }),
+            "new history written after recovery reloads from SQLite"
+        )
     }
 
     private static func testFailedBackupKeepsRemainingOriginalFilesAndUsesInMemoryStore() throws {

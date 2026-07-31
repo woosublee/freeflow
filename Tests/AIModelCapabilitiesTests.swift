@@ -7,6 +7,7 @@ struct AIModelCapabilitiesTests {
         try testQualityQwenFeatures()
         try testRetiredQwenHasNoCapabilities()
         try testCloudCapabilitiesAreExplicit()
+        try testProviderlessCloudVisionAliasIsCanonicalized()
         print("AIModelCapabilitiesTests passed")
     }
 
@@ -47,6 +48,18 @@ struct AIModelCapabilitiesTests {
             try expect(
                 !ModelConfiguration.capabilities(for: modelID).supportsContextCapture,
                 "\(modelID) is not Context-capable until explicitly declared"
+            )
+        }
+    }
+
+    private static func testProviderlessCloudVisionAliasIsCanonicalized() throws {
+        let canonical = ModelConfiguration.capabilities(
+            for: "qwen/qwen3.6-27b"
+        )
+        for alias in ["qwen3.6-27b", " QWEN3.6-27B "] {
+            try expect(
+                ModelConfiguration.capabilities(for: alias) == canonical,
+                "\(alias) shares the canonical Cloud vision capabilities"
             )
         }
     }

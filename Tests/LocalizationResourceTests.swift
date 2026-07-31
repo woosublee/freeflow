@@ -107,6 +107,7 @@ struct LocalizationResourceTests {
             "The previously selected on-device model is no longer available. Context requires an image-capable model.":
                 "이전에 선택한 온디바이스 모델을 더 이상 사용할 수 없습니다. Context에는 이미지 지원 모델이 필요합니다.",
             "Previously selected on-device model": "이전에 선택한 온디바이스 모델",
+            "This on-device model is no longer available and cannot be used.": "이 온디바이스 모델은 더 이상 제공되지 않으며 사용할 수 없습니다.",
             "Canceled": "취소됨"
         ]
         for (key, expected) in localAISettingsKorean {
@@ -114,6 +115,14 @@ struct LocalizationResourceTests {
             let korean = try localizedValue(key: key, language: "ko", root: root)
             assert(english == key)
             assert(korean == expected)
+        }
+        for retiredArtifactManagementKey in [
+            "Downloaded files remain on this Mac.",
+            "No downloaded files remain on this Mac.",
+            "Unable to delete the downloaded files. Try again.",
+            "This removes any downloaded files for this retired Local AI model. It cannot be downloaded again."
+        ] {
+            assert(strings[retiredArtifactManagementKey] == nil)
         }
 
         let cloudProgressEnglish = try localizedValue(

@@ -34,6 +34,28 @@ enum LocalAIRuntime: Hashable, Sendable, Codable {
     case visionChat(projectorArtifactFileName: String)
 }
 
+enum AIModelIDNormalizer {
+    static func normalizedCloudModelID(_ modelID: String) -> String {
+        let cleanModel = modelID.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).lowercased()
+        switch cleanModel {
+        case "qwen3-32b":
+            return "qwen/qwen3-32b"
+        case "qwen3.6-27b":
+            return "qwen/qwen3.6-27b"
+        case "gpt-oss-20b":
+            return "openai/gpt-oss-20b"
+        case "gpt-oss-120b":
+            return "openai/gpt-oss-120b"
+        case "gpt-oss-safeguard-20b":
+            return "openai/gpt-oss-safeguard-20b"
+        default:
+            return cleanModel
+        }
+    }
+}
+
 enum AIModelCapabilityCatalog {
     static let qwenTextCapabilities = AIModelCapabilities(
         features: [.postProcessing, .meetingSummary],
@@ -54,7 +76,8 @@ enum AIModelCapabilityCatalog {
     )
 
     static func capabilities(forCloudModelID modelID: String) -> AIModelCapabilities {
-        modelID == "qwen/qwen3.6-27b"
+        AIModelIDNormalizer.normalizedCloudModelID(modelID)
+            == "qwen/qwen3.6-27b"
             ? qwenCloudVisionCapabilities
             : cloudTextCapabilities
     }

@@ -148,7 +148,9 @@ struct MeetingSummaryOutputValidator: Sendable {
         let patterns = [
             #"\b\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)?\b"#,
             #"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b"#,
-            #"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+\d{1,2},?\s+\d{4}\b"#
+            #"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+\d{1,2},?\s+\d{4}\b"#,
+            #"(?<!\d)\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일(?!\d)"#,
+            #"(?<!\d)\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日(?!\d)"#
         ]
         return patterns.flatMap { pattern in
             guard let expression = try? NSRegularExpression(
@@ -169,6 +171,9 @@ struct MeetingSummaryOutputValidator: Sendable {
         if let date = iso.date(from: value) {
             return dayFormatter.string(from: date)
         }
+        if let date = localizedGregorianDate(from: value) {
+            return dayFormatter.string(from: date)
+        }
         for format in [
             "yyyy-MM-dd",
             "MMMM d, yyyy",
@@ -185,6 +190,43 @@ struct MeetingSummaryOutputValidator: Sendable {
             }
         }
         return nil
+    }
+
+    private func localizedGregorianDate(from value: String) -> Date? {
+        let pattern = #"^(\d{4})\s*(?:년|年)\s*(\d{1,2})\s*(?:월|月)\s*(\d{1,2})\s*(?:일|日)$"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(
+                in: value,
+                range: NSRange(value.startIndex..<value.endIndex, in: value)
+              ),
+              match.range.location == 0,
+              match.range.length == (value as NSString).length else {
+            return nil
+        }
+        let components = (1...3).compactMap { index -> Int? in
+            guard let range = Range(match.range(at: index), in: value) else {
+                return nil
+            }
+            return Int(value[range])
+        }
+        guard components.count == 3 else { return nil }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        var dateComponents = DateComponents()
+        dateComponents.calendar = calendar
+        dateComponents.timeZone = calendar.timeZone
+        dateComponents.year = components[0]
+        dateComponents.month = components[1]
+        dateComponents.day = components[2]
+        guard let date = calendar.date(from: dateComponents) else { return nil }
+        let resolved = calendar.dateComponents([.year, .month, .day], from: date)
+        guard resolved.year == components[0],
+              resolved.month == components[1],
+              resolved.day == components[2] else {
+            return nil
+        }
+        return date
     }
 
     private var dayFormatter: DateFormatter {

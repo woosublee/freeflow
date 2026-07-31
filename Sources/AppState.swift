@@ -2906,9 +2906,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.soundVolume = soundVolume
         self.voiceMacros = initialMacros
         self.pipelineHistory = savedHistory
-        if case .inMemoryFallback = pipelineHistoryStore.durability {
+        switch pipelineHistoryStore.durability {
+        case .durable:
+            self.historyPersistenceWarning = nil
+        case .inMemoryFallback:
             self.historyPersistenceWarning = QuillUserIssueRecord(
                 code: .historyPersistenceUnavailable
+            )
+        case .recovered:
+            self.historyPersistenceWarning = QuillUserIssueRecord(
+                code: .historyRecovered
             )
         }
         self.hasAccessibility = initialAccessibility
@@ -3522,20 +3529,29 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
 
         let unavailableReason: String
-        switch feature {
-        case .context:
+        let title: String
+        if modelID == "qwen2.5-1.5b-instruct" {
+            title = "Qwen2.5 1.5B Instruct"
             unavailableReason = localizedCatalogString(
-                "The previously selected on-device model is no longer available. Context requires an image-capable model."
+                "This on-device model is no longer available and cannot be used."
             )
-        case .postProcessing, .meetingSummary:
-            unavailableReason = localizedCatalogString(
-                "The previously selected on-device model is no longer available. Explicitly select Qwen2.5 7B to continue locally."
-            )
+        } else {
+            title = localizedCatalogString("Previously selected on-device model")
+            switch feature {
+            case .context:
+                unavailableReason = localizedCatalogString(
+                    "The previously selected on-device model is no longer available. Context requires an image-capable model."
+                )
+            case .postProcessing, .meetingSummary:
+                unavailableReason = localizedCatalogString(
+                    "The previously selected on-device model is no longer available. Explicitly select Qwen2.5 7B to continue locally."
+                )
+            }
         }
         return AIProcessingChoiceDisplay(
             choice: choice,
             section: "On This Mac",
-            title: localizedCatalogString("Previously selected on-device model"),
+            title: title,
             subtitle: unavailableReason,
             isAvailable: false,
             unavailableReason: unavailableReason,

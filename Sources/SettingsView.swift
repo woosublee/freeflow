@@ -1942,6 +1942,16 @@ struct ModelsSettingsView: View {
         }
     }
 
+    private func settingsUsesActiveLocalAI(
+        for feature: AIProcessingFeature
+    ) -> Bool {
+        guard case .localAI(let modelID) = settingsAIProcessingChoice(for: feature),
+              LocalAIModelCatalog.model(id: modelID) != nil else {
+            return false
+        }
+        return isAIProcessingChoiceCompatible(.localAI(modelID: modelID), for: feature)
+    }
+
     private func setAIProcessingChoiceDraft(
         _ choice: AIProcessingBackendChoice,
         for feature: AIProcessingFeature
@@ -2106,7 +2116,14 @@ struct ModelsSettingsView: View {
     private func managedLocalAIModel(
         for feature: AIProcessingFeature
     ) -> LocalAIModel? {
-        managedLocalAIResolution(for: feature).model
+        guard let model = managedLocalAIResolution(for: feature).model,
+              isAIProcessingChoiceCompatible(
+                .localAI(modelID: model.id),
+                for: feature
+              ) else {
+            return nil
+        }
+        return model
     }
 
     private func aiProcessingChoiceMenuLabel(
@@ -2324,7 +2341,7 @@ struct ModelsSettingsView: View {
     }
 
     private var postProcessingUsesLocal: Bool {
-        !postProcessingUsesCloud
+        settingsUsesActiveLocalAI(for: .postProcessing)
     }
 
     private var postProcessingFeatureSection: some View {
@@ -2413,7 +2430,7 @@ struct ModelsSettingsView: View {
     }
 
     private var contextUsesLocal: Bool {
-        !contextUsesCloud
+        settingsUsesActiveLocalAI(for: .context)
     }
 
     private var contextFeatureSection: some View {
@@ -2514,7 +2531,7 @@ struct ModelsSettingsView: View {
     }
 
     private var meetingSummaryUsesLocal: Bool {
-        !meetingSummaryUsesCloud
+        settingsUsesActiveLocalAI(for: .meetingSummary)
     }
 
     private var meetingSummaryFeatureSection: some View {

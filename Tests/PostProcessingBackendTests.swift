@@ -9,6 +9,9 @@ struct PostProcessingBackendTests {
         try await testCloudRequestOmitsLocalCompatibilityKey()
         try await testLocalFailureDoesNotInvokeCloudFallbackOrSetCooldown()
         try await testLocalCommandTransformUsesEndpointWithoutCloudFallback()
+        try await testSequentialChunksUsePerRequestTimeout()
+        try await testCommandFallbackUsesPerRequestTimeout()
+        try await testOversizedLocalCommandDoesNotReachTransport()
         try testLocalManagerErrorsMapToDedicatedIssues()
         try testInvalidCloudBaseURLIsNotRelabeledAsLocal()
         try await testLeakedRawTranscriptionTemplateIsTreatedAsFailure()
@@ -115,6 +118,142 @@ struct PostProcessingBackendTests {
             label: "command",
             expectedCompletionCeiling: 4_096
         )
+    }
+
+    private static func testSequentialChunksUsePerRequestTimeout() async throws {
+        let timeoutKey = "post_processing_timeout_seconds"
+        let previousTimeout = UserDefaults.standard.object(forKey: timeoutKey)
+        UserDefaults.standard.set(0.03, forKey: timeoutKey)
+        defer {
+            if let previousTimeout {
+                UserDefaults.standard.set(previousTimeout, forKey: timeoutKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: timeoutKey)
+            }
+        }
+
+        let recorder = PostProcessingRequestRecorder()
+        let service = PostProcessingService(
+            backendExecutor: AIProcessingBackendExecutor(
+                choice: .cloud(modelID: "primary/model"),
+                cloudBaseURL: "https://api.example.com/openai/v1",
+                cloudAPIKey: "cloud-secret"
+            ),
+            cloudFallbackModelID: nil,
+            instructionExecutionGuardEnabled: false,
+            transport: { request in
+                recorder.record(request)
+                try await Task.sleep(nanoseconds: 20_000_000)
+                return try successResponse(
+                    request: request,
+                    content: try transcriptFromPostProcessingRequest(request)
+                )
+            }
+        )
+        let transcript = String(repeating: "Alpha ", count: 5_000)
+        let start = Date()
+
+        let result = try await service.postProcess(
+            transcript: transcript,
+            context: testContext,
+            customVocabulary: ""
+        )
+        let elapsed = Date().timeIntervalSince(start)
+        let requests = recorder.capturedRequests()
+
+        try expect(!result.transcript.isEmpty, "delayed chunks produce a combined result")
+        try expect(requests.count > 1, "transcript is processed as sequential chunks")
+        try expect(elapsed > 0.03, "total chunk processing exceeds one request timeout")
+        for request in requests {
+            try expect(
+                abs(request.timeoutInterval - 0.03) < 0.001,
+                "each chunk retains the per-request timeout"
+            )
+        }
+    }
+
+    private static func testCommandFallbackUsesPerRequestTimeout() async throws {
+        let timeoutKey = "post_processing_timeout_seconds"
+        let previousTimeout = UserDefaults.standard.object(forKey: timeoutKey)
+        UserDefaults.standard.set(0.03, forKey: timeoutKey)
+        defer {
+            if let previousTimeout {
+                UserDefaults.standard.set(previousTimeout, forKey: timeoutKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: timeoutKey)
+            }
+        }
+
+        let recorder = PostProcessingRequestRecorder()
+        let service = PostProcessingService(
+            backendExecutor: AIProcessingBackendExecutor(
+                choice: .cloud(modelID: "primary/model"),
+                cloudBaseURL: "https://api.example.com/openai/v1",
+                cloudAPIKey: "cloud-secret"
+            ),
+            cloudFallbackModelID: "fallback/model",
+            instructionExecutionGuardEnabled: false,
+            transport: { request in
+                recorder.record(request)
+                try await Task.sleep(nanoseconds: 20_000_000)
+                let body = try requestBody(request)
+                if body["model"] as? String == "primary/model" {
+                    return rateLimitedResponse(request: request)
+                }
+                return try successResponse(
+                    request: request,
+                    content: "Cleaned fallback result."
+                )
+            }
+        )
+        let start = Date()
+
+        let result = try await service.commandTransform(
+            selectedText: "Original text",
+            voiceCommand: "Make it concise",
+            context: testContext,
+            customVocabulary: ""
+        )
+        let elapsed = Date().timeIntervalSince(start)
+
+        try expect(
+            result.transcript == "Cleaned fallback result.",
+            "command fallback completes after a rate limit"
+        )
+        try expect(
+            recorder.count() == 2,
+            "command fallback uses two independently timed requests"
+        )
+        try expect(
+            elapsed > 0.03,
+            "command fallback can exceed a single request timeout"
+        )
+    }
+
+    private static func testOversizedLocalCommandDoesNotReachTransport() async throws {
+        let recorder = PostProcessingRequestRecorder()
+        let service = makeLocalService { request in
+            recorder.record(request)
+            return try successResponse(request: request, content: "unexpected")
+        }
+
+        do {
+            _ = try await service.commandTransform(
+                selectedText: String(repeating: "x", count: 20_000),
+                voiceCommand: "Make it concise",
+                context: testContext,
+                customVocabulary: ""
+            )
+            throw PostProcessingBackendTestFailure("Expected oversized Local command failure")
+        } catch let error as PostProcessingError {
+            guard case .invalidInput = error else {
+                throw PostProcessingBackendTestFailure(
+                    "Expected invalid input for oversized Local command, got \(error)"
+                )
+            }
+        }
+
+        try expect(recorder.count() == 0, "oversized Local command makes no transport request")
     }
 
     private static func testLeakedRawTranscriptionTemplateIsTreatedAsFailure() async throws {
@@ -372,6 +511,34 @@ struct PostProcessingBackendTests {
         screenshotError: nil
     )
 
+    private static func requestBody(
+        _ request: URLRequest
+    ) throws -> [String: Any] {
+        guard let bodyData = request.httpBody,
+              let body = try JSONSerialization.jsonObject(with: bodyData)
+                as? [String: Any] else {
+            throw PostProcessingBackendTestFailure("request body")
+        }
+        return body
+    }
+
+    private static func transcriptFromPostProcessingRequest(
+        _ request: URLRequest
+    ) throws -> String {
+        guard let bodyData = request.httpBody,
+              let body = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
+              let messages = body["messages"] as? [[String: Any]],
+              let userMessage = messages.first(where: { $0["role"] as? String == "user" })?["content"] as? String,
+              let jsonStart = userMessage.firstIndex(of: "{"),
+              let envelopeData = String(userMessage[jsonStart...]).data(using: .utf8),
+              let envelope = try JSONSerialization.jsonObject(with: envelopeData) as? [String: Any],
+              let data = envelope["data"] as? [String: Any],
+              let transcript = data["transcript"] as? String else {
+            throw PostProcessingBackendTestFailure("post-processing request transcript")
+        }
+        return transcript
+    }
+
     private static func successResponse(
         request: URLRequest,
         content: String
@@ -441,6 +608,12 @@ private final class PostProcessingRequestRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return requests.count
+    }
+
+    func capturedRequests() -> [URLRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests
     }
 }
 

@@ -235,6 +235,10 @@ struct QuillUserIssueUIContractTests {
             "AppState uses the structured non-durable history warning"
         )
         try expect(
+            appState.contains(".historyRecovered"),
+            "AppState publishes a distinct warning after durable history recovery"
+        )
+        try expect(
             menuBar.contains("appState.historyPersistenceWarning"),
             "Menu Bar shows the non-durable history warning"
         )

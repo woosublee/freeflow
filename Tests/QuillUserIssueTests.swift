@@ -49,7 +49,8 @@ struct QuillUserIssueTests {
             .contextUnavailable,
             .meetingSummaryUnavailable,
             .meetingSummaryInvalidResponse,
-            .historyPersistenceUnavailable
+            .historyPersistenceUnavailable,
+            .historyRecovered
         ]
 
         for code in QuillUserIssueCode.allCases {
@@ -106,6 +107,21 @@ struct QuillUserIssueTests {
         try expect(
             QuillUserIssueRecord(code: .historyPersistenceUnavailable).recoveryAction == .none,
             "non-durable history is informational only"
+        )
+        let recoveredHistory = QuillUserIssueRecord(code: .historyRecovered)
+        try expect(
+            recoveredHistory.recoveryAction == .none,
+            "recovered durable history does not need recovery action"
+        )
+        let recoveredPresentation = recoveredHistory.presentation()
+        try expect(
+            recoveredPresentation.detailsRows.isEmpty,
+            "recovered history does not expose backup metadata"
+        )
+        try expect(
+            !recoveredPresentation.body.contains("History Recovery")
+                && !recoveredPresentation.body.contains("backupName"),
+            "recovered history copy does not expose a backup path or name"
         )
         try expect(
             QuillUserIssueRecord(code: .screenRecordingPermissionDenied).recoveryAction == .openScreenRecordingSettings,

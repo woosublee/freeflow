@@ -14725,6 +14725,22 @@
         }
       }
     },
+    "History was recovered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History was recovered"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기록을 복구했습니다"
+          }
+        }
+      }
+    },
     "Quill cannot save history for this session.": {
       "localizations": {
         "en": {
@@ -14753,6 +14769,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "작업하는 동안 Quill을 열어 두고, 사용 가능한 디스크 공간과 권한을 확인한 뒤 다시 시작하세요."
+          }
+        }
+      }
+    },
+    "Quill couldn't open earlier history. A recovery backup was retained, and new notes will keep saving.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill couldn't open earlier history. A recovery backup was retained, and new notes will keep saving."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill이 이전 기록을 열 수 없어 복구용 백업을 보관했습니다. 새 노트와 기록은 계속 저장됩니다."
+          }
+        }
+      }
+    },
+    "No action is needed. Your new notes and history are being saved.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No action is needed. Your new notes and history are being saved."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "별도의 조치는 필요하지 않습니다. 새 노트와 기록은 저장되고 있습니다."
           }
         }
       }
@@ -14817,6 +14865,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "이전에 선택한 온디바이스 모델"
+          }
+        }
+      }
+    },
+    "This on-device model is no longer available and cannot be used.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This on-device model is no longer available and cannot be used."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 온디바이스 모델은 더 이상 제공되지 않으며 사용할 수 없습니다."
           }
         }
       }

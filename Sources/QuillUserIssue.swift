@@ -30,6 +30,7 @@ enum QuillUserIssueCode: String, Codable, CaseIterable, Sendable {
     case meetingSummaryUnavailable = "meeting-summary-unavailable"
     case meetingSummaryInvalidResponse = "meeting-summary-invalid-response"
     case historyPersistenceUnavailable = "history-persistence-unavailable"
+    case historyRecovered = "history-recovered"
     case unknown
     case legacy
 }
@@ -140,7 +141,7 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
             return .openScreenRecordingSettings
         case .postProcessingGuardFallback, .contextUnavailable,
              .meetingSummaryUnavailable, .meetingSummaryInvalidResponse,
-             .historyPersistenceUnavailable:
+             .historyPersistenceUnavailable, .historyRecovered:
             return .none
         case .networkUnavailable, .requestTimedOut, .rateLimited,
              .providerUnavailable, .audioFileTooLarge,
@@ -402,7 +403,8 @@ private extension QuillUserIssueCode {
              .postProcessingGuardFallback, .localAIModelUnavailable,
              .localAIStartFailed, .localAIProcessExited,
              .contextUnavailable, .meetingSummaryUnavailable,
-             .meetingSummaryInvalidResponse, .historyPersistenceUnavailable:
+             .meetingSummaryInvalidResponse, .historyPersistenceUnavailable,
+             .historyRecovered:
             return .warning
         default:
             return .error
@@ -584,6 +586,12 @@ private extension QuillUserIssueCode {
                 titleKey: "History isn't being saved",
                 bodyKey: "Quill cannot save history for this session.",
                 suggestionKey: "Keep Quill open while you work, then restart it after checking available disk space and permissions."
+            )
+        case .historyRecovered:
+            return QuillUserIssueCopy(
+                titleKey: "History was recovered",
+                bodyKey: "Quill couldn't open earlier history. A recovery backup was retained, and new notes will keep saving.",
+                suggestionKey: "No action is needed. Your new notes and history are being saved."
             )
         case .unknown:
             return QuillUserIssueCopy(

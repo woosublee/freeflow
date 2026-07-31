@@ -12,6 +12,7 @@ struct MeetingSummaryServiceTests {
         try await testRateLimitUsesConfiguredFallback()
         try await testLongTranscriptExtractsEveryChunkThenMerges()
         try await testHierarchyUsesBoundedIntermediateMergesAndCompletionCeiling()
+        try await testHierarchyCarriesSingletonTailIntoNextMergeRound()
         try await testChunkFailureDoesNotReturnPartialSummary()
         try testUserIssueMapsToSummaryDomainCodes()
         print("MeetingSummaryServiceTests passed")
@@ -281,6 +282,36 @@ struct MeetingSummaryServiceTests {
         }
     }
 
+    private static func testHierarchyCarriesSingletonTailIntoNextMergeRound() async throws {
+        let recorder = MeetingSummaryRequestRecorder()
+        let service = makeCloudService(
+            chunker: MeetingSummaryTextChunker(maximumSourceBytes: 16),
+            tokenBudgeter: LocalAITokenBudgeter(
+                contextWindow: 2_000,
+                tokenCounter: SingletonTailTokenCounter()
+            )
+        ) { request in
+            recorder.record(request)
+            return try successResponse(request: request, content: largeEvidenceJSON)
+        }
+
+        _ = try await service.generate(
+            source: MeetingSummarySource(
+                transcript: "Evidence line.\n\nEvidence line.\n\nEvidence line.",
+                calendar: nil
+            )
+        )
+
+        let mergeRequests = try recorder.requests().filter {
+            try userMessage($0).contains("validatedPartials")
+        }
+        try expect(
+            recorder.requests().count == 5,
+            "three extractions, one intermediate merge, and one final merge"
+        )
+        try expect(mergeRequests.count == 2, "singleton tails do not create merge requests")
+    }
+
     private static func testChunkFailureDoesNotReturnPartialSummary() async throws {
         let requestCount = MeetingSummaryRequestRecorder()
         let service = makeCloudService(
@@ -425,6 +456,13 @@ struct MeetingSummaryServiceTests {
     private static let partialSecondJSON = #"{"overview":{"text":"Chunk findings","sourceQuotes":["Second paragraph has an action."]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
     private static let mergedJSON = #"{"overview":{"text":"Merged review","sourceQuotes":["First paragraph has a decision."]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
     private static let largeEvidenceJSON = #"{"overview":{"text":"The team reviewed the evidence and recorded the agreed release plan. The team reviewed the evidence and recorded the agreed release plan. The team reviewed the evidence and recorded the agreed release plan. The team reviewed the evidence and recorded the agreed release plan. The team reviewed the evidence and recorded the agreed release plan. The team reviewed the evidence and recorded the agreed release plan.","sourceQuotes":["Evidence line."]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
+}
+
+private struct SingletonTailTokenCounter: LocalAITokenCounting {
+    func tokenCount(forRenderedChatPrompt prompt: String) async throws -> Int {
+        let evidenceCount = prompt.components(separatedBy: "Evidence line.").count - 1
+        return evidenceCount >= 3 ? 465 : 1
+    }
 }
 
 private actor MeetingSummaryRecordingTokenCounter: LocalAITokenCounting {

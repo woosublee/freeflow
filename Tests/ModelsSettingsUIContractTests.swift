@@ -685,6 +685,16 @@ struct ModelsSettingsUIContractTests {
             from: ".onAppear {",
             to: "\n    private var hasConfiguredCloudAPIKey"
         )
+        let activeLocalAI = block(
+            in: models,
+            from: "private func settingsUsesActiveLocalAI(",
+            to: "\n    private func setAIProcessingChoiceDraft"
+        )
+        let managedLocalAI = block(
+            in: models,
+            from: "private func managedLocalAIModel(",
+            to: "\n    private func aiProcessingChoiceMenuLabel"
+        )
         precondition(appState.contains("extension AIProcessingFeature {"))
         precondition(appState.contains("case .postProcessing: .postProcessing"))
         precondition(appState.contains("case .context: .contextCapture"))
@@ -784,6 +794,18 @@ struct ModelsSettingsUIContractTests {
         precondition(context.contains("feature: .context"))
         precondition(context.contains("settingsAIProcessingChoice(for: .context)"))
         precondition(context.contains("Local Context uses app and window text only. Screenshots stay on this Mac."))
+        precondition(
+            activeLocalAI.contains(
+                "isAIProcessingChoiceCompatible(.localAI(modelID: modelID), for: feature)"
+            ),
+            "an incompatible Local Context choice does not present Local Context details"
+        )
+        precondition(
+            managedLocalAI.contains("isAIProcessingChoiceCompatible(")
+                && managedLocalAI.contains(".localAI(modelID: model.id)")
+                && managedLocalAI.contains("for: feature"),
+            "an incompatible Local Context choice does not present a model management row"
+        )
 
         precondition(postProcessingDetails.contains("customAIProcessingModelSetting("))
         precondition(postProcessingDetails.contains("draft: $postProcessingModelDraft"))
@@ -843,6 +865,14 @@ struct ModelsSettingsUIContractTests {
         precondition(localAIModelRow.contains(".accessibilityLabel(\"Delete Model\")"))
         precondition(localAIModelRow.contains("localizedCatalogString(isSelected ? \"Selected\" : \"Not selected\")"))
         precondition(localAIModelRow.contains("QuillUserIssueView("))
+
+        precondition(!models.contains("retiredLocalAIManagementRow"))
+        precondition(!models.contains("retiredLocalAIManagementModel"))
+        precondition(!models.contains("retiredLocalAIModel(for:"))
+        precondition(!localAIModelRow.contains("RetiredLocalAIModelRowView"))
+        precondition(models.contains("settingsUsesActiveLocalAI(for: .postProcessing)"))
+        precondition(models.contains("settingsUsesActiveLocalAI(for: .context)"))
+        precondition(models.contains("settingsUsesActiveLocalAI(for: .meetingSummary)"))
     }
 
     private static func testAutoPasteLivesInShortcutsClipboard(_ source: String) throws {
