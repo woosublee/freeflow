@@ -49,13 +49,21 @@ LOCALIZATION_INFO_DIR = Resources/Localization
 LOCALIZATION_BUILD_DIR = $(BUILD_DIR)/localization
 LOCALIZATION_STAMP = $(LOCALIZATION_BUILD_DIR)/.compiled
 TEST_BUILD_DIR = $(BUILD_DIR)/tests
+LOCAL_AI_INTEGRATION_MODEL_DIR ?= $(HOME)/Library/Application Support/Quill/LocalAI/Models
+LOCAL_AI_INTEGRATION_SHARD_ONE = qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf
+LOCAL_AI_INTEGRATION_SHARD_TWO = qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf
+LOCAL_AI_INTEGRATION_SHARD_ONE_SHA256 = dfce12e3862a5283ccfb88221b48480e58745165de856439950d0f22590580db
+LOCAL_AI_INTEGRATION_SHARD_TWO_SHA256 = 539cf93f78e887edea1c04e2d7d8cdaca9d01dae9c9025bcb8accbe29df3d72a
 FULL_SOURCE_TRANSCRIPTION_TESTS = \
 	Tests/CloudTranscriptionHistoryLifecycleTests.swift \
 	Tests/TranscriptionServiceCloudChunkingTests.swift \
 	Tests/TranscriptionServiceLocalIssueTests.swift \
 	Tests/PostProcessingUserIssueTests.swift \
 	Tests/PostProcessingBackendTests.swift \
+	Tests/PostProcessingOutputValidatorTests.swift \
+	Tests/PostProcessingChunkingTests.swift \
 	Tests/AppContextBackendTests.swift \
+	Tests/MeetingSummaryOutputValidatorTests.swift \
 	Tests/MeetingSummaryServiceTests.swift
 FULL_SOURCE_APP_STATE_TESTS = \
 	Tests/AudioImportFileCopyTests.swift \
@@ -83,7 +91,7 @@ ICON_ICNS = Resources/AppIcon.icns
 endif
 
 # Usage: make install CODESIGN_IDENTITY="Apple Development: you@example.com (TEAMID)"
-.PHONY: all clean run icon dmg codesign-dmg notarize install reset-permissions install-and-run check-test-wiring test test-core test-recording test-transcription _test-core _test-recording _test-transcription localization-bundle-test native-whisper-helper-test llama-server-helper-test print-app-version print-build-number print-build-tag print-version-metadata FORCE
+.PHONY: all clean run icon dmg codesign-dmg notarize install reset-permissions install-and-run check-test-wiring test test-core test-recording test-transcription test-local-ai-integration _test-core _test-recording _test-transcription localization-bundle-test native-whisper-helper-test llama-server-helper-test print-app-version print-build-number print-build-tag print-version-metadata FORCE
 
 all: $(APP_EXECUTABLE_TARGET)
 
@@ -355,7 +363,7 @@ FORCE:
 check-test-wiring:
 	@plan_file="$$(mktemp -t quill-test-plan)"; \
 		trap 'rm -f "$$plan_file"' EXIT; \
-		$(MAKE) -Bn --no-print-directory _test-core _test-recording _test-transcription > "$$plan_file"; \
+		$(MAKE) -Bn --no-print-directory _test-core _test-recording _test-transcription test-local-ai-integration > "$$plan_file"; \
 		grouped_sources=" $(GROUPED_TEST_SOURCES) $(GROUPED_RUNNER_SOURCES) "; \
 		for test_file in Tests/*.swift; do \
 			compile_count="$$(grep -F -- "$$test_file" "$$plan_file" | grep -c 'swiftc ' || true)"; \
@@ -368,7 +376,7 @@ check-test-wiring:
 			esac; \
 			test_name="$${test_file##*/}"; \
 			test_name="$${test_name%.swift}"; \
-			if ! grep -Eq "^$(TEST_BUILD_DIR)/$$test_name([[:space:];]|$$)" "$$plan_file"; then \
+			if ! grep -Fv 'swiftc ' "$$plan_file" | grep -Eq "(^|[[:space:]])$(TEST_BUILD_DIR)/$$test_name([[:space:];]|$$)"; then \
 				echo "Test executable is not run: $(TEST_BUILD_DIR)/$$test_name" >&2; \
 				exit 1; \
 			fi; \
@@ -396,6 +404,9 @@ $(TEST_BUILD_DIR)/MeetingSummaryTextChunkerTests: Sources/MeetingSummaryTextChun
 $(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests: Sources/RecordingJournalFailure.swift Sources/RecoveredRecordingContext.swift Sources/RecoveredRecordingMode.swift Sources/RecordingJournalModels.swift Sources/LocalizedStringLookup.swift Sources/AppName.swift Sources/CalendarIntegrationModels.swift Sources/QuillUserIssue.swift Sources/MeetingSummaryModels.swift Sources/PipelineHistoryItem.swift Sources/PipelineHistoryItem+MeetingSummary.swift Sources/TranscriptionModel.swift Sources/PipelineHistoryStore.swift Tests/PipelineHistoryMeetingSummaryTests.swift | $(TEST_BUILD_DIR)
 	@swiftc -parse-as-library Sources/RecordingJournalFailure.swift Sources/RecoveredRecordingContext.swift Sources/RecoveredRecordingMode.swift Sources/RecordingJournalModels.swift Sources/LocalizedStringLookup.swift Sources/AppName.swift Sources/CalendarIntegrationModels.swift Sources/QuillUserIssue.swift Sources/MeetingSummaryModels.swift Sources/PipelineHistoryItem.swift Sources/PipelineHistoryItem+MeetingSummary.swift Sources/TranscriptionModel.swift Sources/PipelineHistoryStore.swift Tests/PipelineHistoryMeetingSummaryTests.swift -o "$@"
 
+$(TEST_BUILD_DIR)/PipelineHistoryStoreRecoveryTests: Sources/RecordingJournalFailure.swift Sources/RecoveredRecordingContext.swift Sources/RecoveredRecordingMode.swift Sources/RecordingJournalModels.swift Sources/LocalizedStringLookup.swift Sources/AppName.swift Sources/CalendarIntegrationModels.swift Sources/QuillUserIssue.swift Sources/PipelineHistoryItem.swift Sources/TranscriptionModel.swift Sources/PipelineHistoryStore.swift Tests/PipelineHistoryStoreRecoveryTests.swift | $(TEST_BUILD_DIR)
+	@swiftc -parse-as-library Sources/RecordingJournalFailure.swift Sources/RecoveredRecordingContext.swift Sources/RecoveredRecordingMode.swift Sources/RecordingJournalModels.swift Sources/LocalizedStringLookup.swift Sources/AppName.swift Sources/CalendarIntegrationModels.swift Sources/QuillUserIssue.swift Sources/PipelineHistoryItem.swift Sources/TranscriptionModel.swift Sources/PipelineHistoryStore.swift Tests/PipelineHistoryStoreRecoveryTests.swift -o "$@"
+
 $(TEST_BUILD_DIR)/MeetingSummaryUIContractTests: Tests/MeetingSummaryUIContractTests.swift | $(TEST_BUILD_DIR)
 	@swiftc -parse-as-library Tests/MeetingSummaryUIContractTests.swift -o "$@"
 
@@ -408,6 +419,9 @@ $(FULL_SOURCE_TRANSCRIPTION_RUNNER): $(filter-out Sources/App.swift,$(SOURCES)) 
 $(FULL_SOURCE_APP_STATE_RUNNER): $(filter-out Sources/App.swift,$(SOURCES)) $(FULL_SOURCE_APP_STATE_TESTS) Tests/FullSourceAppStateTestRunner.swift Makefile $(SPARKLE_STAMP) | $(TEST_BUILD_DIR)
 	@framework="$$(cat "$(SPARKLE_STAMP)")"; framework_parent="$$(dirname "$$framework")"; swiftc -parse-as-library -D QUILL_GROUPED_TEST_RUNNER -F "$$framework_parent" -framework Sparkle -Xlinker -rpath -Xlinker "$$framework_parent" -target $(TEST_ARCH)-apple-macosx13.0 $(filter-out Sources/App.swift,$(SOURCES)) $(FULL_SOURCE_APP_STATE_TESTS) Tests/FullSourceAppStateTestRunner.swift -o "$@"
 
+$(TEST_BUILD_DIR)/LocalAIIntegrationTests: Sources/LocalizedStringLookup.swift Sources/AIModelCapabilities.swift Sources/LocalAIModel.swift Sources/AIProcessingEnvelope.swift Sources/AIOutputLanguageValidator.swift Sources/PostProcessingOutputValidator.swift Sources/MeetingSummaryModels.swift Sources/MeetingSummaryPrompt.swift Sources/MeetingSummaryTextChunker.swift Sources/MeetingSummaryOutputValidator.swift Sources/LocalAITokenBudgeter.swift Sources/LocalAIDiagnostics.swift Sources/LocalAIServerProcess.swift Sources/LLMAPITransport.swift Sources/LocalAIServerManager.swift Sources/ModelConfiguration.swift Sources/QuillUserIssue.swift Sources/LLMCooldownManager.swift Sources/AIProcessingBackend.swift Sources/MeetingSummaryService.swift Tests/LocalAIIntegrationTests.swift | $(TEST_BUILD_DIR)
+	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/AIModelCapabilities.swift Sources/LocalAIModel.swift Sources/AIProcessingEnvelope.swift Sources/AIOutputLanguageValidator.swift Sources/PostProcessingOutputValidator.swift Sources/MeetingSummaryModels.swift Sources/MeetingSummaryPrompt.swift Sources/MeetingSummaryTextChunker.swift Sources/MeetingSummaryOutputValidator.swift Sources/LocalAITokenBudgeter.swift Sources/LocalAIDiagnostics.swift Sources/LocalAIServerProcess.swift Sources/LLMAPITransport.swift Sources/LocalAIServerManager.swift Sources/ModelConfiguration.swift Sources/QuillUserIssue.swift Sources/LLMCooldownManager.swift Sources/AIProcessingBackend.swift Sources/MeetingSummaryService.swift Tests/LocalAIIntegrationTests.swift -o "$@"
+
 localization-bundle-test: $(TEST_BUILD_DIR)/LocalizationResourceTests $(APP_EXECUTABLE_TARGET)
 	@$(TEST_BUILD_DIR)/LocalizationResourceTests --bundle "$(APP_BUNDLE)"
 
@@ -419,6 +433,59 @@ test-recording: check-test-wiring
 
 test-transcription: check-test-wiring
 	@$(call RUN_TIMED_TARGET,_test-transcription,transcription)
+
+test-local-ai-integration: $(TEST_BUILD_DIR)/LocalAIIntegrationTests
+	@set -eu; \
+		if ! command -v python3 >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v shasum >/dev/null 2>&1; then \
+			printf '[skip] Local AI integration prerequisites unavailable: python3, curl, and shasum are required.\n'; \
+			exit 0; \
+		fi; \
+		helper="$(APP_BUNDLE)/Contents/Resources/llama/llama-server"; \
+		if [ ! -x "$$helper" ]; then \
+			printf '[skip] Local AI integration prerequisite unavailable: built app llama-server is missing or not executable at %s.\n' "$$helper"; \
+			exit 0; \
+		fi; \
+		model_dir="$(LOCAL_AI_INTEGRATION_MODEL_DIR)"; \
+		shard_one="$$model_dir/$(LOCAL_AI_INTEGRATION_SHARD_ONE)"; \
+		shard_two="$$model_dir/$(LOCAL_AI_INTEGRATION_SHARD_TWO)"; \
+		for shard in "$$shard_one" "$$shard_two"; do \
+			if [ ! -f "$$shard" ]; then \
+				printf '[skip] Local AI integration prerequisite unavailable: Quality Qwen shard is missing at %s.\n' "$$shard"; \
+				exit 0; \
+			fi; \
+		done; \
+		actual_one="$$(shasum -a 256 "$$shard_one" | cut -d ' ' -f 1)"; \
+		actual_two="$$(shasum -a 256 "$$shard_two" | cut -d ' ' -f 1)"; \
+		if [ "$$actual_one" != "$(LOCAL_AI_INTEGRATION_SHARD_ONE_SHA256)" ] || [ "$$actual_two" != "$(LOCAL_AI_INTEGRATION_SHARD_TWO_SHA256)" ]; then \
+			printf '[skip] Local AI integration prerequisite unavailable: Quality Qwen checksum does not match the catalog.\n'; \
+			exit 0; \
+		fi; \
+		port="$$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"; \
+		log_file="$$(mktemp -t quill-local-ai-integration)"; \
+		server_pid=''; \
+		cleanup() { \
+			if [ -n "$$server_pid" ] && kill -0 "$$server_pid" 2>/dev/null; then \
+				kill "$$server_pid" 2>/dev/null || true; \
+				wait "$$server_pid" 2>/dev/null || true; \
+			fi; \
+			rm -f "$$log_file"; \
+		}; \
+		trap cleanup EXIT INT TERM; \
+		"$$helper" --host 127.0.0.1 --port "$$port" --model "$$shard_one" --ctx-size 16384 --no-webui >"$$log_file" 2>&1 & \
+		server_pid="$$!"; \
+		ready=0; \
+		for attempt in $$(seq 1 150); do \
+			if curl --fail --silent --show-error --max-time 1 "http://127.0.0.1:$$port/health" >/dev/null 2>&1; then ready=1; break; fi; \
+			if ! kill -0 "$$server_pid" 2>/dev/null; then break; fi; \
+			sleep 1; \
+		done; \
+		if [ "$$ready" -ne 1 ]; then \
+			printf 'Local AI integration server did not become healthy.\n' >&2; \
+			cat "$$log_file" >&2; \
+			exit 1; \
+		fi; \
+		export QUILL_LOCAL_AI_INTEGRATION_BASE_URL="http://127.0.0.1:$$port/v1"; \
+		$(TEST_BUILD_DIR)/LocalAIIntegrationTests
 
 test: check-test-wiring
 	@$(call RUN_TIMED_TARGET,_test-core,core)
@@ -464,7 +531,7 @@ _test-core: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(TEST_BUILD_DIR)/Localizatio
 	@$(TEST_BUILD_DIR)/LocalizedStringLookupTests
 	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/LocalizedUserMessage.swift Tests/LocalizedUserMessageTests.swift -o $(TEST_BUILD_DIR)/LocalizedUserMessageTests
 	@$(TEST_BUILD_DIR)/LocalizedUserMessageTests
-	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/QuillUserIssue.swift Tests/QuillUserIssueTests.swift -o $(TEST_BUILD_DIR)/QuillUserIssueTests
+	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/LocalAIDiagnostics.swift Sources/QuillUserIssue.swift Tests/QuillUserIssueTests.swift -o $(TEST_BUILD_DIR)/QuillUserIssueTests
 	@$(TEST_BUILD_DIR)/QuillUserIssueTests
 	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/QuillUserIssue.swift Sources/NoteBrowserRecovery.swift Tests/NoteBrowserRecoveryTests.swift -o $(TEST_BUILD_DIR)/NoteBrowserRecoveryTests
 	@$(TEST_BUILD_DIR)/NoteBrowserRecoveryTests
@@ -562,8 +629,9 @@ _test-recording: | $(TEST_BUILD_DIR)
 	@$(TEST_BUILD_DIR)/AudioWaveformHeightsTests
 	@swiftc -parse-as-library Sources/AudioInputDevice.swift Tests/SystemAudioAppStateRoutingTests.swift -o $(TEST_BUILD_DIR)/SystemAudioAppStateRoutingTests
 	@$(TEST_BUILD_DIR)/SystemAudioAppStateRoutingTests
-_test-transcription: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(FULL_SOURCE_TRANSCRIPTION_RUNNER) $(FULL_SOURCE_APP_STATE_RUNNER) $(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests | $(TEST_BUILD_DIR)
+_test-transcription: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(FULL_SOURCE_TRANSCRIPTION_RUNNER) $(FULL_SOURCE_APP_STATE_RUNNER) $(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests $(TEST_BUILD_DIR)/PipelineHistoryStoreRecoveryTests | $(TEST_BUILD_DIR)
 	@$(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests
+	@$(TEST_BUILD_DIR)/PipelineHistoryStoreRecoveryTests
 	@swiftc -parse-as-library Sources/RecordingJournalFailure.swift Sources/RecoveredRecordingContext.swift Sources/RecoveredRecordingMode.swift Sources/RecordingJournalModels.swift Sources/LocalizedStringLookup.swift Sources/AppName.swift Sources/CalendarIntegrationModels.swift Sources/QuillUserIssue.swift Sources/PipelineHistoryItem.swift Sources/TranscriptionModel.swift Sources/PipelineHistoryStore.swift Tests/PipelineHistoryCalendarMetadataTests.swift -o $(TEST_BUILD_DIR)/PipelineHistoryCalendarMetadataTests
 	@$(TEST_BUILD_DIR)/PipelineHistoryCalendarMetadataTests
 	@swiftc -parse-as-library Sources/CalendarIntegrationModels.swift Sources/GoogleCalendarTokenStore.swift Sources/GoogleCalendarAuthService.swift Sources/GoogleCalendarService.swift Tests/GoogleCalendarServiceTests.swift -o $(TEST_BUILD_DIR)/GoogleCalendarServiceTests
@@ -578,17 +646,27 @@ _test-transcription: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(FULL_SOURCE_TRANSC
 	@$(TEST_BUILD_DIR)/AudioImportOptionsTests
 	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/NativeWhisperModel.swift Tests/NativeWhisperModelTests.swift -o $(TEST_BUILD_DIR)/NativeWhisperModelTests
 	@$(TEST_BUILD_DIR)/NativeWhisperModelTests
-	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/LocalAIModel.swift Tests/LocalAIModelTests.swift -o $(TEST_BUILD_DIR)/LocalAIModelTests
+	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/AIModelCapabilities.swift Sources/LocalAIModel.swift Sources/ModelConfiguration.swift Tests/AIModelCapabilitiesTests.swift -o $(TEST_BUILD_DIR)/AIModelCapabilitiesTests
+	@$(TEST_BUILD_DIR)/AIModelCapabilitiesTests
+	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/AIModelCapabilities.swift Sources/LocalAIModel.swift Tests/LocalAIModelTests.swift -o $(TEST_BUILD_DIR)/LocalAIModelTests
 	@$(TEST_BUILD_DIR)/LocalAIModelTests
-	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/LocalAIModel.swift Tests/LocalAIModelStoreTests.swift -o $(TEST_BUILD_DIR)/LocalAIModelStoreTests
+	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/AIModelCapabilities.swift Sources/LocalAIModel.swift Tests/LocalAIModelStoreTests.swift -o $(TEST_BUILD_DIR)/LocalAIModelStoreTests
 	@$(TEST_BUILD_DIR)/LocalAIModelStoreTests
-	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/LocalAIModel.swift Sources/LocalAIInstaller.swift Tests/LocalAIInstallerTests.swift -o $(TEST_BUILD_DIR)/LocalAIInstallerTests
+	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/AIModelCapabilities.swift Sources/LocalAIModel.swift Sources/LocalAIInstaller.swift Tests/LocalAIInstallerTests.swift -o $(TEST_BUILD_DIR)/LocalAIInstallerTests
 	@$(TEST_BUILD_DIR)/LocalAIInstallerTests
-	@swiftc -parse-as-library Sources/LocalAIServerProcess.swift Tests/LocalAIServerProcessTests.swift -o $(TEST_BUILD_DIR)/LocalAIServerProcessTests
+	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/AIModelCapabilities.swift Sources/LocalAIModel.swift Sources/LocalAIDiagnostics.swift Sources/LocalAIServerProcess.swift Tests/LocalAIServerProcessTests.swift -o $(TEST_BUILD_DIR)/LocalAIServerProcessTests
 	@$(TEST_BUILD_DIR)/LocalAIServerProcessTests
-	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/LocalAIModel.swift Sources/LocalAIServerProcess.swift Sources/LLMAPITransport.swift Sources/LocalAIServerManager.swift Tests/LocalAIServerManagerTests.swift -o $(TEST_BUILD_DIR)/LocalAIServerManagerTests
+	@swiftc -parse-as-library Sources/LocalAIDiagnostics.swift Tests/LocalAIDiagnosticsTests.swift -o $(TEST_BUILD_DIR)/LocalAIDiagnosticsTests
+	@$(TEST_BUILD_DIR)/LocalAIDiagnosticsTests
+	@swiftc -parse-as-library Sources/AIProcessingEnvelope.swift Sources/MeetingSummaryModels.swift Tests/AIProcessingEnvelopeTests.swift -o $(TEST_BUILD_DIR)/AIProcessingEnvelopeTests
+	@$(TEST_BUILD_DIR)/AIProcessingEnvelopeTests
+	@swiftc -parse-as-library Sources/LocalAITokenBudgeter.swift Tests/LocalAITokenBudgeterTests.swift -o $(TEST_BUILD_DIR)/LocalAITokenBudgeterTests
+	@$(TEST_BUILD_DIR)/LocalAITokenBudgeterTests
+	@swiftc -parse-as-library Sources/AIOutputLanguageValidator.swift Tests/AIOutputLanguageValidatorTests.swift -o $(TEST_BUILD_DIR)/AIOutputLanguageValidatorTests
+	@$(TEST_BUILD_DIR)/AIOutputLanguageValidatorTests
+	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/AIModelCapabilities.swift Sources/LocalAIModel.swift Sources/LocalAIDiagnostics.swift Sources/LocalAIServerProcess.swift Sources/LLMAPITransport.swift Sources/LocalAIServerManager.swift Tests/LocalAIServerManagerTests.swift -o $(TEST_BUILD_DIR)/LocalAIServerManagerTests
 	@$(TEST_BUILD_DIR)/LocalAIServerManagerTests
-	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/QuillUserIssue.swift Sources/LocalAIModel.swift Sources/LocalAIServerProcess.swift Sources/LLMAPITransport.swift Sources/LocalAIServerManager.swift Sources/AIProcessingBackend.swift Tests/AIProcessingBackendTests.swift -o $(TEST_BUILD_DIR)/AIProcessingBackendTests
+	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/QuillUserIssue.swift Sources/AIModelCapabilities.swift Sources/LocalAIModel.swift Sources/LocalAIDiagnostics.swift Sources/LocalAIServerProcess.swift Sources/LLMAPITransport.swift Sources/LocalAIServerManager.swift Sources/ModelConfiguration.swift Sources/AIProcessingBackend.swift Tests/AIProcessingBackendTests.swift -o $(TEST_BUILD_DIR)/AIProcessingBackendTests
 	@$(TEST_BUILD_DIR)/AIProcessingBackendTests
 	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/QuillUserIssue.swift Sources/NativeWhisperModel.swift Sources/NativeWhisperRuntime.swift Tests/NativeWhisperRuntimeTests.swift -o $(TEST_BUILD_DIR)/NativeWhisperRuntimeTests
 	@$(TEST_BUILD_DIR)/NativeWhisperRuntimeTests

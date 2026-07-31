@@ -30,6 +30,7 @@ struct ModelsSettingsUIContractTests {
         testMeetingSummaryUsesIndependentCardAndSharedModelUX(settings)
         testAIProcessingBackendPickersAndLocalRows(
             settings: settings,
+            appState: appState,
             modelDropdown: modelDropdown,
             localAIModelRow: localAIModelRow
         )
@@ -590,6 +591,7 @@ struct ModelsSettingsUIContractTests {
 
     private static func testAIProcessingBackendPickersAndLocalRows(
         settings: String,
+        appState: String,
         modelDropdown: String,
         localAIModelRow: String
     ) {
@@ -683,6 +685,27 @@ struct ModelsSettingsUIContractTests {
             from: ".onAppear {",
             to: "\n    private var hasConfiguredCloudAPIKey"
         )
+        let activeLocalAI = block(
+            in: models,
+            from: "private func settingsUsesActiveLocalAI(",
+            to: "\n    private func setAIProcessingChoiceDraft"
+        )
+        let managedLocalAI = block(
+            in: models,
+            from: "private func managedLocalAIModel(",
+            to: "\n    private func aiProcessingChoiceMenuLabel"
+        )
+        precondition(appState.contains("extension AIProcessingFeature {"))
+        precondition(appState.contains("case .postProcessing: .postProcessing"))
+        precondition(appState.contains("case .context: .contextCapture"))
+        precondition(appState.contains("case .meetingSummary: .meetingSummary"))
+        precondition(appState.contains("func isAIProcessingChoiceCompatible("))
+        precondition(appState.contains("choice.capabilities.supports(feature.modelFeature)"))
+        precondition(appState.contains("contextModelCapabilityWarning"))
+        precondition(processingPicker.contains("appState.aiProcessingChoiceDisplays(for: feature)"))
+        precondition(localAIModelRow.contains("localizedCatalogString(\"Post-processing\")"))
+        precondition(localAIModelRow.contains("localizedCatalogString(\"Meeting Summary\")"))
+        precondition(localAIModelRow.contains("joined(separator: \" · \")"))
         let cloudChoiceSelection = block(
             in: choiceSelection,
             from: "case .cloud(let modelID):",
@@ -743,7 +766,7 @@ struct ModelsSettingsUIContractTests {
         precondition(retainedResolver.contains("retainedProgressIsCancelled: retainedState?.progress.isCancelled ?? false"))
         precondition(retainedResolver.contains("retainedHasIssue: retainedState?.issue != nil"))
         precondition(retainedResolver.contains("resolution.reconciledRetainedModelID"))
-        precondition(retainedResolver.contains("aiProcessingChoiceDisplays(for: feature).contains"))
+        precondition(!retainedResolver.contains("aiProcessingChoiceDisplays(for: feature).contains"))
         precondition(!retainedResolver.contains("selectedOrPendingLocalAIModel"))
 
         precondition(pureResolver.contains("struct Input: Equatable"))
@@ -771,6 +794,16 @@ struct ModelsSettingsUIContractTests {
         precondition(context.contains("feature: .context"))
         precondition(context.contains("settingsAIProcessingChoice(for: .context)"))
         precondition(context.contains("Local Context uses app and window text only. Screenshots stay on this Mac."))
+        precondition(
+            activeLocalAI.contains("isAIProcessingChoiceCompatible(choice, for: feature)")
+                && activeLocalAI.contains("appState.isAIProcessingChoiceAvailable(choice, for: feature)"),
+            "an unavailable Local choice does not present Local Context details"
+        )
+        precondition(
+            managedLocalAI.contains("isAIProcessingChoiceCompatible(choice, for: feature)")
+                && managedLocalAI.contains("appState.isAIProcessingChoiceAvailable(choice, for: feature)"),
+            "an incompatible or unavailable Local choice does not present a model management row"
+        )
 
         precondition(postProcessingDetails.contains("customAIProcessingModelSetting("))
         precondition(postProcessingDetails.contains("draft: $postProcessingModelDraft"))
@@ -830,6 +863,20 @@ struct ModelsSettingsUIContractTests {
         precondition(localAIModelRow.contains(".accessibilityLabel(\"Delete Model\")"))
         precondition(localAIModelRow.contains("localizedCatalogString(isSelected ? \"Selected\" : \"Not selected\")"))
         precondition(localAIModelRow.contains("QuillUserIssueView("))
+        precondition(models.contains("private var cleanupOnlyLocalAIModels: [LocalAIModel]"))
+        precondition(models.contains("private var localAIArtifactCleanupSection: some View"))
+        precondition(models.contains("presentation: .cleanupOnly"))
+        precondition(localAIModelRow.contains("enum LocalAIModelRowPresentation"))
+        precondition(localAIModelRow.contains("if presentation == .cleanupOnly"))
+        precondition(localAIModelRow.contains("This installed model is unavailable"))
+
+        precondition(!models.contains("retiredLocalAIManagementRow"))
+        precondition(!models.contains("retiredLocalAIManagementModel"))
+        precondition(!models.contains("retiredLocalAIModel(for:"))
+        precondition(!localAIModelRow.contains("RetiredLocalAIModelRowView"))
+        precondition(models.contains("settingsUsesActiveLocalAI(for: .postProcessing)"))
+        precondition(models.contains("settingsUsesActiveLocalAI(for: .context)"))
+        precondition(models.contains("settingsUsesActiveLocalAI(for: .meetingSummary)"))
     }
 
     private static func testAutoPasteLivesInShortcutsClipboard(_ source: String) throws {

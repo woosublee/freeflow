@@ -1578,6 +1578,11 @@ struct ModelsSettingsView: View {
                 SettingsCard("Meeting Summary", icon: "text.document") {
                     meetingSummaryFeatureSection
                 }
+                if !cleanupOnlyLocalAIModels.isEmpty {
+                    SettingsCard("On-device model storage", icon: "internaldrive") {
+                        localAIArtifactCleanupSection
+                    }
+                }
             }
             .padding(24)
         }
@@ -1689,6 +1694,29 @@ struct ModelsSettingsView: View {
 
     private var hasConfiguredCloudAPIKey: Bool {
         !appState.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var cleanupOnlyLocalAIModels: [LocalAIModel] {
+        LocalAIModelCatalog.all.filter { model in
+            appState.localAIInstallState(for: model).status == .ready
+                && !appState.isLocalAIModelAvailable(model)
+        }
+    }
+
+    private var localAIArtifactCleanupSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Installed models that cannot run on this Mac can be removed here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(cleanupOnlyLocalAIModels) { model in
+                LocalAIModelRowView(
+                    feature: .postProcessing,
+                    model: model,
+                    isSelected: false,
+                    presentation: .cleanupOnly
+                )
+            }
+        }
     }
 
     private var cloudProviderSection: some View {
@@ -1942,6 +1970,18 @@ struct ModelsSettingsView: View {
         }
     }
 
+    private func settingsUsesActiveLocalAI(
+        for feature: AIProcessingFeature
+    ) -> Bool {
+        guard case .localAI(let modelID) = settingsAIProcessingChoice(for: feature),
+              LocalAIModelCatalog.model(id: modelID) != nil else {
+            return false
+        }
+        let choice = AIProcessingBackendChoice.localAI(modelID: modelID)
+        return isAIProcessingChoiceCompatible(choice, for: feature)
+            && appState.isAIProcessingChoiceAvailable(choice, for: feature)
+    }
+
     private func setAIProcessingChoiceDraft(
         _ choice: AIProcessingBackendChoice,
         for feature: AIProcessingFeature
@@ -1987,7 +2027,7 @@ struct ModelsSettingsView: View {
         switch choice {
         case .cloud(let modelID):
             appState.discardPendingLocalAISelection(for: feature)
-            if appState.isAIProcessingChoiceReady(choice) {
+            if appState.isAIProcessingChoiceReady(choice, for: feature) {
                 appState.selectAIProcessingBackendChoice(choice, for: feature)
                 setAIProcessingFeatureEnabled(true, for: feature)
             }
@@ -2106,10 +2146,12 @@ struct ModelsSettingsView: View {
     private func managedLocalAIModel(
         for feature: AIProcessingFeature
     ) -> LocalAIModel? {
-        guard let model = managedLocalAIResolution(for: feature).model,
-              appState.aiProcessingChoiceDisplays(for: feature).contains(where: {
-                  $0.choice == .localAI(modelID: model.id)
-              }) else {
+        guard let model = managedLocalAIResolution(for: feature).model else {
+            return nil
+        }
+        let choice = AIProcessingBackendChoice.localAI(modelID: model.id)
+        guard isAIProcessingChoiceCompatible(choice, for: feature),
+              appState.isAIProcessingChoiceAvailable(choice, for: feature) else {
             return nil
         }
         return model
@@ -2308,7 +2350,8 @@ struct ModelsSettingsView: View {
                     return
                 }
                 guard appState.isAIProcessingChoiceReady(
-                    settingsAIProcessingChoice(for: .postProcessing)
+                    settingsAIProcessingChoice(for: .postProcessing),
+                    for: .postProcessing
                 ) else {
                     return
                 }
@@ -2329,7 +2372,7 @@ struct ModelsSettingsView: View {
     }
 
     private var postProcessingUsesLocal: Bool {
-        !postProcessingUsesCloud
+        settingsUsesActiveLocalAI(for: .postProcessing)
     }
 
     private var postProcessingFeatureSection: some View {
@@ -2396,7 +2439,8 @@ struct ModelsSettingsView: View {
                     return
                 }
                 guard appState.isAIProcessingChoiceReady(
-                    settingsAIProcessingChoice(for: .context)
+                    settingsAIProcessingChoice(for: .context),
+                    for: .context
                 ) else {
                     return
                 }
@@ -2417,7 +2461,7 @@ struct ModelsSettingsView: View {
     }
 
     private var contextUsesLocal: Bool {
-        !contextUsesCloud
+        settingsUsesActiveLocalAI(for: .context)
     }
 
     private var contextFeatureSection: some View {
@@ -2435,6 +2479,12 @@ struct ModelsSettingsView: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 aiProcessingChoicePicker(for: .context)
+
+                if let warning = appState.contextModelCapabilityWarning {
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
 
                 if let model = managedLocalAIModel(for: .context) {
                     LocalAIModelRowView(
@@ -2490,7 +2540,8 @@ struct ModelsSettingsView: View {
                     return
                 }
                 guard appState.isAIProcessingChoiceReady(
-                    settingsAIProcessingChoice(for: .meetingSummary)
+                    settingsAIProcessingChoice(for: .meetingSummary),
+                    for: .meetingSummary
                 ) else {
                     return
                 }
@@ -2511,7 +2562,7 @@ struct ModelsSettingsView: View {
     }
 
     private var meetingSummaryUsesLocal: Bool {
-        !meetingSummaryUsesCloud
+        settingsUsesActiveLocalAI(for: .meetingSummary)
     }
 
     private var meetingSummaryFeatureSection: some View {

@@ -23,12 +23,17 @@ struct AppContextBackendTests {
         print("AppContextBackendTests passed")
     }
 
+    private static let successfulReadinessProbe: LocalAIServerManager.ReadinessProbe = { request in
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8), response)
+    }
+
     private static func testLocalContextOmitsScreenshotAndAuthorization() async throws {
         let recorder = ContextRequestRecorder()
         let service = AppContextService(
             backendExecutor: localExecutor(manager: readyManager()),
             customContextPrompt: "",
-            contextModel: LocalAIModelCatalog.fast.id,
+            contextModel: LocalAIModelCatalog.quality.id,
             screenshotMaxDimension: 1024,
             transport: { request in
                 recorder.record(request)
@@ -65,7 +70,7 @@ struct AppContextBackendTests {
             apiKey: "cloud-key",
             baseURL: "https://api.example.com/openai/v1",
             customContextPrompt: "",
-            contextModel: "provider/context",
+            contextModel: "qwen/qwen3.6-27b",
             transport: { request in
                 recorder.record(request)
                 if recorder.count() == 1 {
@@ -109,7 +114,7 @@ struct AppContextBackendTests {
             apiKey: "cloud-key",
             baseURL: "https://api.example.com/openai/v1",
             customContextPrompt: "",
-            contextModel: "provider/context",
+            contextModel: "qwen/qwen3.6-27b",
             transport: { request in
                 recorder.record(request)
                 if recorder.count() == 1 {
@@ -144,12 +149,12 @@ struct AppContextBackendTests {
         let issues = ContextIssueRecorder()
         let service = AppContextService(
             backendExecutor: AIProcessingBackendExecutor(
-                choice: .cloud(modelID: "provider/context"),
+                choice: .cloud(modelID: "qwen/qwen3.6-27b"),
                 cloudBaseURL: "https://api.example.com/openai/v1",
                 cloudAPIKey: "cloud-key"
             ),
             customContextPrompt: "",
-            contextModel: "provider/context",
+            contextModel: "qwen/qwen3.6-27b",
             transport: { request in
                 recorder.record(request)
                 throw URLError(.cannotConnectToHost)
@@ -179,12 +184,12 @@ struct AppContextBackendTests {
         let issues = ContextIssueRecorder()
         let service = AppContextService(
             backendExecutor: AIProcessingBackendExecutor(
-                choice: .cloud(modelID: "provider/context"),
+                choice: .cloud(modelID: "qwen/qwen3.6-27b"),
                 cloudBaseURL: "https://api.example.com/openai/v1",
                 cloudAPIKey: "  "
             ),
             customContextPrompt: "",
-            contextModel: "provider/context",
+            contextModel: "qwen/qwen3.6-27b",
             transport: { request in
                 recorder.record(request)
                 return try successResponse(
@@ -280,12 +285,12 @@ struct AppContextBackendTests {
         let gate = ContextCancellationGate()
         let service = AppContextService(
             backendExecutor: AIProcessingBackendExecutor(
-                choice: .cloud(modelID: "provider/context"),
+                choice: .cloud(modelID: "qwen/qwen3.6-27b"),
                 cloudBaseURL: "https://api.example.com/openai/v1",
                 cloudAPIKey: "cloud-key"
             ),
             customContextPrompt: "",
-            contextModel: "provider/context",
+            contextModel: "qwen/qwen3.6-27b",
             transport: { request in
                 recorder.record(request)
                 await gate.waitForRelease()
@@ -325,7 +330,12 @@ struct AppContextBackendTests {
                 choice: .localAI(modelID: selectedModelID),
                 cloudBaseURL: "https://api.example.com/openai/v1",
                 cloudAPIKey: "cloud-key",
-                localServerManager: readyManager()
+                localServerManager: readyManager(),
+                localAIAvailability: LocalAIProcessingAvailability(
+                    isAppleSilicon: true,
+                    runnerIsExecutable: true,
+                    physicalMemory: 16 * 1024 * 1024 * 1024
+                )
             ),
             customContextPrompt: "",
             contextModel: selectedModelID,
@@ -541,7 +551,7 @@ struct AppContextBackendTests {
         let service = AppContextService(
             backendExecutor: localExecutor(manager: readyManager()),
             customContextPrompt: "",
-            contextModel: LocalAIModelCatalog.fast.id,
+            contextModel: LocalAIModelCatalog.quality.id,
             screenshotMaxDimension: 1024,
             transport: { _ in throw URLError(.cannotConnectToHost) },
             issueSink: { issue in issues.record(issue) }
@@ -566,7 +576,7 @@ struct AppContextBackendTests {
         let service = AppContextService(
             backendExecutor: localExecutor(manager: readyManager(process: process)),
             customContextPrompt: "",
-            contextModel: LocalAIModelCatalog.fast.id,
+            contextModel: LocalAIModelCatalog.quality.id,
             screenshotMaxDimension: 1024,
             transport: { _ in
                 process.simulateExit()
@@ -590,10 +600,15 @@ struct AppContextBackendTests {
 
     private static func localExecutor(manager: LocalAIServerManager) -> AIProcessingBackendExecutor {
         AIProcessingBackendExecutor(
-            choice: .localAI(modelID: LocalAIModelCatalog.fast.id),
+            choice: .localAI(modelID: LocalAIModelCatalog.quality.id),
             cloudBaseURL: AppState.defaultAPIBaseURL,
             cloudAPIKey: "cloud-secret",
-            localServerManager: manager
+            localServerManager: manager,
+            localAIAvailability: LocalAIProcessingAvailability(
+                isAppleSilicon: true,
+                runnerIsExecutable: true,
+                physicalMemory: 16 * 1024 * 1024 * 1024
+            )
         )
     }
 
@@ -601,6 +616,7 @@ struct AppContextBackendTests {
         LocalAIServerManager(
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready }
         )
     }

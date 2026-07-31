@@ -54,16 +54,34 @@ struct LocalAIManagedModelResolver {
     }
 }
 
+enum LocalAIModelRowPresentation {
+    case managed
+    case cleanupOnly
+}
+
 struct LocalAIModelRowView: View {
     @EnvironmentObject var appState: AppState
 
     let feature: AIProcessingFeature
     let model: LocalAIModel
     let isSelected: Bool
+    let presentation: LocalAIModelRowPresentation
 
     @State private var showDeleteConfirmation = false
     @State private var isHoveringProgress = false
     @FocusState private var isCancelFocused: Bool
+
+    init(
+        feature: AIProcessingFeature,
+        model: LocalAIModel,
+        isSelected: Bool,
+        presentation: LocalAIModelRowPresentation = .managed
+    ) {
+        self.feature = feature
+        self.model = model
+        self.isSelected = isSelected
+        self.presentation = presentation
+    }
 
     private var state: LocalAIModelInstallViewState {
         appState.localAIInstallState(for: model)
@@ -78,8 +96,16 @@ struct LocalAIModelRowView: View {
                 actionView
             }
 
-            if appState.pendingLocalAIModelID(for: feature) == model.id {
+            if presentation == .managed,
+               appState.pendingLocalAIModelID(for: feature) == model.id {
                 Text("This model will become active when the download finishes.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if presentation == .cleanupOnly {
+                Text("This installed model is unavailable and cannot be used on this Mac.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -123,6 +149,29 @@ struct LocalAIModelRowView: View {
         }
     }
 
+    private func localizedFeatureName(_ feature: AIModelFeature) -> String {
+        switch feature {
+        case .postProcessing:
+            localizedCatalogString("Post-processing")
+        case .contextCapture:
+            localizedCatalogString("Context")
+        case .meetingSummary:
+            localizedCatalogString("Meeting Summary")
+        }
+    }
+
+    private var supportedFeatureDescription: String {
+        [
+            AIModelFeature.postProcessing,
+            .contextCapture,
+            .meetingSummary
+        ].compactMap { feature in
+            model.capabilities.supports(feature)
+                ? localizedFeatureName(feature)
+                : nil
+        }.joined(separator: " · ")
+    }
+
     private var modelDescription: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(verbatim: model.displayName)
@@ -139,34 +188,49 @@ struct LocalAIModelRowView: View {
             )
             .font(.caption2)
             .foregroundStyle(.secondary)
+            Text(supportedFeatureDescription)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 
     @ViewBuilder
     private var actionView: some View {
-        if state.isInstalling, state.progress.isCancelled {
+        if presentation == .cleanupOnly {
+            if state.status == .ready {
+                installedActionView
+            } else {
+                Text("Unavailable")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        } else if state.isInstalling, state.progress.isCancelled {
             cancellingView
         } else if state.isInstalling {
             progressView
         } else if state.progress.isCancelled {
             downloadButton
         } else if state.status == .ready {
-            HStack(spacing: 8) {
-                Label("Installed", systemImage: "checkmark.circle.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.green)
-                Button {
-                    showDeleteConfirmation = true
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .font(.caption)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityLabel("Delete Model")
-            }
+            installedActionView
         } else {
             downloadButton
+        }
+    }
+
+    private var installedActionView: some View {
+        HStack(spacing: 8) {
+            Label("Installed", systemImage: "checkmark.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(.green)
+            Button {
+                showDeleteConfirmation = true
+            } label: {
+                Image(systemName: "trash")
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .accessibilityLabel("Delete Model")
         }
     }
 

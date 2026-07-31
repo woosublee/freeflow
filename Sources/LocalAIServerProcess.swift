@@ -5,6 +5,7 @@ enum LocalAIServerProcessError: LocalizedError, Equatable {
     case runnerNotFound(String)
     case modelNotFound(String)
     case portReservationFailed(String)
+    case projectorNotFound(String)
 
     var errorDescription: String? {
         switch self {
@@ -14,6 +15,8 @@ enum LocalAIServerProcessError: LocalizedError, Equatable {
             return "Local AI model is not installed yet."
         case .portReservationFailed:
             return "Could not reserve a local network port for the local AI runtime."
+        case .projectorNotFound:
+            return "The local AI vision projector artifact is unavailable."
         }
     }
 }
@@ -62,18 +65,27 @@ func reserveEphemeralLoopbackPort() throws -> UInt16 {
 
 protocol LocalAIServerProcess: AnyObject {
     var isRunning: Bool { get }
+    func recentDiagnostics() -> LocalAIDiagnostics
     func terminate()
     func forceTerminate()
     func setTerminationHandler(_ handler: @escaping () -> Void)
 }
 
+extension LocalAIServerProcess {
+    func recentDiagnostics() -> LocalAIDiagnostics {
+        LocalAIDiagnostics(category: .none, trailingLines: [])
+    }
+}
+
 final class RealLocalAIServerProcess: LocalAIServerProcess {
     private let process: Process
     private let terminationRelay: TerminationRelay
+    private let diagnostics: LocalAIDiagnosticsBuffer
     let launchArguments: [String]
 
     init(
         runnerURL: URL,
+        model: LocalAIModel,
         modelURL: URL,
         port: UInt16,
         contextSize: Int
@@ -85,32 +97,76 @@ final class RealLocalAIServerProcess: LocalAIServerProcess {
             throw LocalAIServerProcessError.modelNotFound(modelURL.path)
         }
 
-        let arguments = [
+        var arguments = [
             "--host", "127.0.0.1",
             "--port", String(port),
             "--model", modelURL.path,
             "--ctx-size", String(contextSize),
             "--no-webui"
         ]
+        switch model.runtime {
+        case .textChat:
+            break
+        case let .visionChat(projectorArtifactFileName):
+            guard model.artifacts.contains(where: {
+                $0.expectedFileName == projectorArtifactFileName
+            }) else {
+                throw LocalAIServerProcessError.projectorNotFound(projectorArtifactFileName)
+            }
+            let projectorURL = modelURL
+                .deletingLastPathComponent()
+                .appendingPathComponent(projectorArtifactFileName, isDirectory: false)
+            guard FileManager.default.fileExists(atPath: projectorURL.path) else {
+                throw LocalAIServerProcessError.projectorNotFound(projectorArtifactFileName)
+            }
+            arguments.append(contentsOf: ["--mmproj", projectorURL.path])
+        }
         self.launchArguments = arguments
 
+        let diagnostics = LocalAIDiagnosticsBuffer()
+        let standardOutput = Pipe()
+        let standardError = Pipe()
         let process = Process()
         process.executableURL = runnerURL
         process.arguments = arguments
+        process.standardOutput = standardOutput
+        process.standardError = standardError
         process.environment = [
             "PATH": "/usr/bin:/bin",
             "HOME": FileManager.default.homeDirectoryForCurrentUser.path
         ]
+        standardOutput.fileHandleForReading.readabilityHandler = { handle in
+            diagnostics.append(handle.availableData, from: .standardOutput)
+        }
+        standardError.fileHandleForReading.readabilityHandler = { handle in
+            diagnostics.append(handle.availableData, from: .standardError)
+        }
         let terminationRelay = TerminationRelay()
         process.terminationHandler = { _ in
+            standardOutput.fileHandleForReading.readabilityHandler = nil
+            standardError.fileHandleForReading.readabilityHandler = nil
+            diagnostics.append(
+                standardOutput.fileHandleForReading.readDataToEndOfFile(),
+                from: .standardOutput
+            )
+            diagnostics.append(
+                standardError.fileHandleForReading.readDataToEndOfFile(),
+                from: .standardError
+            )
+            diagnostics.finish()
             terminationRelay.signal()
         }
         self.process = process
         self.terminationRelay = terminationRelay
+        self.diagnostics = diagnostics
         try process.run()
     }
 
     var isRunning: Bool { process.isRunning }
+
+    func recentDiagnostics() -> LocalAIDiagnostics {
+        diagnostics.snapshot()
+    }
 
     func terminate() {
         guard process.isRunning else { return }

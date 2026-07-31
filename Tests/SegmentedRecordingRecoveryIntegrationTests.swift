@@ -225,7 +225,9 @@ struct SegmentedRecordingRecoveryIntegrationTests {
             journalStore: RecordingJournalStore(
                 audioDirectory: root.appendingPathComponent("audio", isDirectory: true)
             ),
-            historyStore: PipelineHistoryStore(inMemory: true)
+            historyStore: PipelineHistoryStore(
+                storeURL: root.appendingPathComponent("PipelineHistory.sqlite")
+            )
         ))
     }
 

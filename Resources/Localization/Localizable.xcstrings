@@ -11701,6 +11701,22 @@
         }
       }
     },
+    "Post-processing was not applied; the original transcript was kept.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Post-processing was not applied; the original transcript was kept."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "후처리를 적용하지 않고 원문을 유지했습니다."
+          }
+        }
+      }
+    },
     "Review the original transcript before using it.": {
       "localizations": {
         "en": {
@@ -13557,22 +13573,6 @@
         }
       }
     },
-    "Faster and lighter. Good for lower-memory Macs.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Faster and lighter. Good for lower-memory Macs."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "더 빠르고 가볍습니다. 메모리가 적은 Mac에 적합합니다."
-          }
-        }
-      }
-    },
     "Canceled": {
       "localizations": {
         "en": {
@@ -14677,6 +14677,134 @@
         }
       }
     },
+    "This model does not support screen Context.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This model does not support screen Context."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 모델은 화면 컨텍스트를 지원하지 않습니다."
+          }
+        }
+      }
+    },
+    "Choose an image-capable model to enable Context.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose an image-capable model to enable Context."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Context를 활성화하려면 이미지를 지원하는 모델을 선택하세요."
+          }
+        }
+      }
+    },
+    "History isn't being saved": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History isn't being saved"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기록이 저장되지 않고 있습니다"
+          }
+        }
+      }
+    },
+    "History was recovered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History was recovered"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기록을 복구했습니다"
+          }
+        }
+      }
+    },
+    "Quill cannot save history for this session.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill cannot save history for this session."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이번 세션에서는 Quill이 기록을 저장할 수 없습니다."
+          }
+        }
+      }
+    },
+    "Keep Quill open while you work, then restart it after checking available disk space and permissions.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep Quill open while you work, then restart it after checking available disk space and permissions."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "작업하는 동안 Quill을 열어 두고, 사용 가능한 디스크 공간과 권한을 확인한 뒤 다시 시작하세요."
+          }
+        }
+      }
+    },
+    "Quill couldn't open earlier history. A recovery backup was retained, and new notes will keep saving.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill couldn't open earlier history. A recovery backup was retained, and new notes will keep saving."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill이 이전 기록을 열 수 없어 복구용 백업을 보관했습니다. 새 노트와 기록은 계속 저장됩니다."
+          }
+        }
+      }
+    },
+    "No action is needed. Your new notes and history are being saved.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No action is needed. Your new notes and history are being saved."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "별도의 조치는 필요하지 않습니다. 새 노트와 기록은 저장되고 있습니다."
+          }
+        }
+      }
+    },
     "Could not update action item.": {
       "localizations": {
         "en": {
@@ -14689,6 +14817,150 @@
           "stringUnit": {
             "state": "translated",
             "value": "할 일을 업데이트하지 못했습니다."
+          }
+        }
+      }
+    },
+    "The previously selected on-device model is no longer available. Explicitly select Qwen2.5 7B to continue locally.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The previously selected on-device model is no longer available. Explicitly select Qwen2.5 7B to continue locally."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전에 선택한 온디바이스 모델을 더 이상 사용할 수 없습니다. 로컬에서 계속하려면 Qwen2.5 7B를 직접 선택하세요."
+          }
+        }
+      }
+    },
+    "The previously selected on-device model is no longer available. Context requires an image-capable model.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The previously selected on-device model is no longer available. Context requires an image-capable model."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전에 선택한 온디바이스 모델을 더 이상 사용할 수 없습니다. Context에는 이미지 지원 모델이 필요합니다."
+          }
+        }
+      }
+    },
+    "Previously selected on-device model": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Previously selected on-device model"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전에 선택한 온디바이스 모델"
+          }
+        }
+      }
+    },
+    "This on-device model is no longer available and cannot be used.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This on-device model is no longer available and cannot be used."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 온디바이스 모델은 더 이상 제공되지 않으며 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "On-device model storage": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On-device model storage"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "온디바이스 모델 저장 공간"
+          }
+        }
+      }
+    },
+    "Installed models that cannot run on this Mac can be removed here.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Installed models that cannot run on this Mac can be removed here."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 Mac에서 실행할 수 없는 설치된 모델은 여기에서 삭제할 수 있습니다."
+          }
+        }
+      }
+    },
+    "This installed model is unavailable and cannot be used on this Mac.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This installed model is unavailable and cannot be used on this Mac."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 설치된 모델은 이 Mac에서 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "This on-device model is unavailable and cannot be used on this Mac.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This on-device model is unavailable and cannot be used on this Mac."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 온디바이스 모델은 이 Mac에서 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "Unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unavailable"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사용할 수 없음"
           }
         }
       }

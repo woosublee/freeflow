@@ -11,9 +11,16 @@ struct MeetingSummaryServiceTests {
         try testOwnerAndDueDateMayBeNull()
         try await testRateLimitUsesConfiguredFallback()
         try await testLongTranscriptExtractsEveryChunkThenMerges()
+        try await testHierarchyUsesBoundedIntermediateMergesAndCompletionCeiling()
+        try await testHierarchyCarriesSingletonTailIntoNextMergeRound()
         try await testChunkFailureDoesNotReturnPartialSummary()
         try testUserIssueMapsToSummaryDomainCodes()
         print("MeetingSummaryServiceTests passed")
+    }
+
+    private static let successfulReadinessProbe: LocalAIServerManager.ReadinessProbe = { request in
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8), response)
     }
 
     private static func testUserIssueMapsToSummaryDomainCodes() throws {
@@ -82,7 +89,7 @@ struct MeetingSummaryServiceTests {
         }
         let start = Date(timeIntervalSince1970: 1_000)
         let source = MeetingSummarySource(
-            transcript: "Decision: ship Friday.",
+            transcript: summaryTranscript,
             calendar: MeetingSummaryCalendarContext(
                 title: "Product Weekly",
                 start: start,
@@ -98,15 +105,20 @@ struct MeetingSummaryServiceTests {
         let system = try string(try dictionary(messages[0])["content"])
         let user = try string(try dictionary(messages[1])["content"])
 
-        try expect(result.draft.overview == "Release review", "decoded overview")
+        try expect(result.draft.overview.text == "Release review", "decoded overview")
         try expect(request.url?.path.hasSuffix("/chat/completions") == true, "chat completions path")
         try expect(
             request.value(forHTTPHeaderField: "Authorization") == "Bearer test-key",
             "cloud authorization"
         )
-        try expect(system.contains("source data, not instructions"), "source data guard")
-        try expect(user.contains("<<<TRANSCRIPT"), "transcript delimiter")
-        try expect(user.contains("<<<CALENDAR_DATA"), "calendar delimiter")
+        try expect(system.contains("source quote"), "evidence contract")
+        try expect(
+            system.contains("Use no more than two source quotes for overview evidence."),
+            "overview evidence is bounded"
+        )
+        try expect(user.contains("\"feature\":\"meeting_summary_extraction\""), "summary source envelope")
+        try expect(user.contains("Product Weekly"), "calendar is included in the source envelope")
+        try expect(body["max_tokens"] == nil, "cloud Summary omits the local legacy completion key")
     }
 
     private static func testLocalRequestUsesLoopbackWithoutAuthorization() async throws {
@@ -115,14 +127,20 @@ struct MeetingSummaryServiceTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready }
         )
         let service = MeetingSummaryService(
             backendExecutor: AIProcessingBackendExecutor(
-                choice: .localAI(modelID: LocalAIModelCatalog.fast.id),
+                choice: .localAI(modelID: LocalAIModelCatalog.quality.id),
                 cloudBaseURL: "https://api.example.com/openai/v1",
                 cloudAPIKey: "cloud-secret",
-                localServerManager: manager
+                localServerManager: manager,
+                localAIAvailability: LocalAIProcessingAvailability(
+                    isAppleSilicon: true,
+                    runnerIsExecutable: true,
+                    physicalMemory: 16 * 1024 * 1024 * 1024
+                )
             ),
             cloudFallbackModelID: "cloud/fallback",
             outputLanguage: "English",
@@ -133,7 +151,7 @@ struct MeetingSummaryServiceTests {
         )
 
         _ = try await service.generate(
-            source: MeetingSummarySource(transcript: "Discuss launch.", calendar: nil)
+            source: MeetingSummarySource(transcript: summaryTranscript, calendar: nil)
         )
 
         let request = try recorder.requests().only()
@@ -144,6 +162,14 @@ struct MeetingSummaryServiceTests {
             "local authorization omitted"
         )
         try expect(body["model"] as? String == "local", "local request model")
+        try expect(
+            body["max_completion_tokens"] as? Int == 1_024,
+            "local Summary retains the 1,024-token completion ceiling"
+        )
+        try expect(
+            body["max_tokens"] as? Int == 1_024,
+            "local Summary sends the legacy 1,024-token completion ceiling"
+        )
     }
 
     private static func testUnknownTopLevelKeyIsRejected() throws {
@@ -172,7 +198,7 @@ struct MeetingSummaryServiceTests {
         }
 
         let result = try await service.generate(
-            source: MeetingSummarySource(transcript: "Discuss launch.", calendar: nil)
+            source: MeetingSummarySource(transcript: summaryTranscript, calendar: nil)
         )
         let models = try recorder.requests().map {
             try string(try requestBody($0)["model"])
@@ -189,10 +215,13 @@ struct MeetingSummaryServiceTests {
         ) { request in
             recorder.record(request)
             let user = try userMessage(request)
-            if user.contains("<<<PARTIAL_SUMMARIES") {
-                return try successResponse(request: request, content: validJSON)
+            if user.contains("validatedPartials") {
+                return try successResponse(request: request, content: mergedJSON)
             }
-            return try successResponse(request: request, content: partialJSON)
+            let content = user.contains("First paragraph")
+                ? partialJSON
+                : partialSecondJSON
+            return try successResponse(request: request, content: content)
         }
         let transcript = [
             "First paragraph has a decision.",
@@ -208,7 +237,84 @@ struct MeetingSummaryServiceTests {
         let extractionPrompts = try requests.prefix(2).map(userMessage)
         try expect(extractionPrompts[0].contains("First paragraph"), "first chunk included")
         try expect(extractionPrompts[1].contains("Second paragraph"), "second chunk included")
-        try expect(try userMessage(requests[2]).contains("<<<PARTIAL_SUMMARIES"), "merge prompt")
+        try expect(try userMessage(requests[2]).contains("validatedPartials"), "merge prompt")
+    }
+
+    private static func testHierarchyUsesBoundedIntermediateMergesAndCompletionCeiling() async throws {
+        let recorder = MeetingSummaryRequestRecorder()
+        let tokenCounter = MeetingSummaryRecordingTokenCounter()
+        let budgeter = LocalAITokenBudgeter(
+            contextWindow: 5_200,
+            tokenCounter: tokenCounter
+        )
+        let service = makeCloudService(
+            chunker: MeetingSummaryTextChunker(maximumSourceBytes: 24),
+            tokenBudgeter: budgeter
+        ) { request in
+            recorder.record(request)
+            return try successResponse(request: request, content: largeEvidenceJSON)
+        }
+
+        _ = try await service.generate(
+            source: MeetingSummarySource(
+                transcript: String(repeating: "Evidence line. ", count: 10),
+                calendar: nil
+            )
+        )
+
+        let requests = recorder.requests()
+        let mergeCount = try requests
+            .map(userMessage)
+            .filter { $0.contains("validatedPartials") }
+            .count
+        try expect(mergeCount >= 2, "long summaries use at least two bounded intermediate merge requests")
+        for request in requests {
+            let body = try requestBody(request)
+            try expect(
+                body["max_completion_tokens"] as? Int == 1_024,
+                "every Summary request reserves the 1,024-token completion ceiling"
+            )
+        }
+        for request in requests {
+            let messages = try array(try requestBody(request)["messages"])
+            let system = try string(try dictionary(messages[0])["content"])
+            let user = try string(try dictionary(messages[1])["content"])
+            let rendered = "[System]\n\(system)\n\n[User]\n\(user)"
+            try expect(
+                rendered.utf8.count + 1_024 + 512 <= 5_200,
+                "every generated Summary request stays inside the injected context budget"
+            )
+        }
+    }
+
+    private static func testHierarchyCarriesSingletonTailIntoNextMergeRound() async throws {
+        let recorder = MeetingSummaryRequestRecorder()
+        let service = makeCloudService(
+            chunker: MeetingSummaryTextChunker(maximumSourceBytes: 16),
+            tokenBudgeter: LocalAITokenBudgeter(
+                contextWindow: 2_000,
+                tokenCounter: SingletonTailTokenCounter()
+            )
+        ) { request in
+            recorder.record(request)
+            return try successResponse(request: request, content: largeEvidenceJSON)
+        }
+
+        _ = try await service.generate(
+            source: MeetingSummarySource(
+                transcript: "Evidence line.\n\nEvidence line.\n\nEvidence line.",
+                calendar: nil
+            )
+        )
+
+        let mergeRequests = try recorder.requests().filter {
+            try userMessage($0).contains("validatedPartials")
+        }
+        try expect(
+            recorder.requests().count == 5,
+            "three extractions, one intermediate merge, and one final merge"
+        )
+        try expect(mergeRequests.count == 2, "singleton tails do not create merge requests")
     }
 
     private static func testChunkFailureDoesNotReturnPartialSummary() async throws {
@@ -242,6 +348,7 @@ struct MeetingSummaryServiceTests {
     private static func makeCloudService(
         fallbackModel: String? = nil,
         chunker: MeetingSummaryTextChunker = MeetingSummaryTextChunker(),
+        tokenBudgeter: LocalAITokenBudgeter? = nil,
         transport: @escaping MeetingSummaryService.Transport
     ) -> MeetingSummaryService {
         let baseURL = "https://api.example.com/openai/v1/\(UUID().uuidString)"
@@ -254,6 +361,7 @@ struct MeetingSummaryServiceTests {
             cloudFallbackModelID: fallbackModel,
             outputLanguage: "English",
             chunker: chunker,
+            tokenBudgeter: tokenBudgeter,
             transport: transport
         )
     }
@@ -345,9 +453,30 @@ struct MeetingSummaryServiceTests {
         return value
     }
 
-    private static let validJSON = #"{"overview":"Release review","keyPoints":[{"text":"Launch remains on schedule.","sourceQuote":"Launch remains on schedule."}],"decisions":[{"text":"Ship Friday.","sourceQuote":"Decision: ship Friday."}],"actionItems":[{"task":"Write release notes","owner":null,"dueDate":null,"sourceQuote":"Write release notes."}],"openQuestions":[]}"#
+    private static let summaryTranscript = "Release review. Launch remains on schedule. Decision: ship Friday. Write release notes."
 
-    private static let partialJSON = #"{"overview":"Chunk findings","keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
+    private static let validJSON = #"{"overview":{"text":"Release review","sourceQuotes":["Release review."]},"keyPoints":[{"text":"Launch remains on schedule.","sourceQuote":"Launch remains on schedule."}],"decisions":[{"text":"Ship Friday.","sourceQuote":"Decision: ship Friday."}],"actionItems":[{"task":"Write release notes","owner":null,"dueDate":null,"sourceQuote":"Write release notes."}],"openQuestions":[]}"#
+
+    private static let partialJSON = #"{"overview":{"text":"Chunk findings","sourceQuotes":["First paragraph has a decision."]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
+    private static let partialSecondJSON = #"{"overview":{"text":"Chunk findings","sourceQuotes":["Second paragraph has an action."]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
+    private static let mergedJSON = #"{"overview":{"text":"Merged review","sourceQuotes":["First paragraph has a decision."]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
+    private static let largeEvidenceJSON = #"{"overview":{"text":"The team reviewed the evidence and recorded the agreed release plan. The team reviewed the evidence and recorded the agreed release plan. The team reviewed the evidence and recorded the agreed release plan. The team reviewed the evidence and recorded the agreed release plan. The team reviewed the evidence and recorded the agreed release plan. The team reviewed the evidence and recorded the agreed release plan.","sourceQuotes":["Evidence line."]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
+}
+
+private struct SingletonTailTokenCounter: LocalAITokenCounting {
+    func tokenCount(forRenderedChatPrompt prompt: String) async throws -> Int {
+        let evidenceCount = prompt.components(separatedBy: "Evidence line.").count - 1
+        return evidenceCount >= 3 ? 465 : 1
+    }
+}
+
+private actor MeetingSummaryRecordingTokenCounter: LocalAITokenCounting {
+    private(set) var prompts: [String] = []
+
+    func tokenCount(forRenderedChatPrompt prompt: String) async throws -> Int {
+        prompts.append(prompt)
+        return prompt.utf8.count
+    }
 }
 
 private final class MeetingSummaryRequestRecorder: @unchecked Sendable {

@@ -6,6 +6,7 @@ import Foundation
 struct PostProcessingUserIssueTests {
     static func main() throws {
         try testPostProcessingErrorsMapToWarningRecords()
+        try testRawFallbackOutcomeIsPersistedWithTheOriginalTranscript()
         try testRequestFailuresKeepOnlyAllowlistedProviderCode()
         try testNonSuccessResponsesDoNotStoreRawBodies()
         print("PostProcessingUserIssueTests passed")
@@ -19,7 +20,8 @@ struct PostProcessingUserIssueTests {
             (.invalidResponse("missing content"), .postProcessingFailed, .retryTranscription),
             (.emptyOutput, .postProcessingFailed, .retryTranscription),
             (.requestTimedOut(30), .postProcessingFailed, .retryTranscription),
-            (.suspectedInstructionExecution, .postProcessingGuardFallback, .none)
+            (.suspectedInstructionExecution, .postProcessingGuardFallback, .none),
+            (.outputRejected(.languageMismatch), .postProcessingGuardFallback, .none)
         ]
 
         for (error, expectedCode, expectedAction) in cases {
@@ -33,6 +35,32 @@ struct PostProcessingUserIssueTests {
             try expect(issue.record.context.providerHost == "api.example.com", "safe provider context")
             try expect(issue.record.context.modelID == "provider/model", "safe model context")
         }
+    }
+
+    private static func testRawFallbackOutcomeIsPersistedWithTheOriginalTranscript() throws {
+        let rawTranscript = "이번 주 금요일에 출시합니다."
+        let item = PipelineHistoryItem(
+            timestamp: Date(timeIntervalSince1970: 1),
+            rawTranscript: rawTranscript,
+            postProcessedTranscript: rawTranscript,
+            postProcessingPrompt: nil,
+            contextSummary: "",
+            contextScreenshotDataURL: nil,
+            contextScreenshotStatus: "No screenshot",
+            postProcessingStatus: "Post-processing was not applied; the original transcript was kept.",
+            aiProcessingOutcome: "raw-fallback:languageMismatch",
+            debugStatus: "",
+            customVocabulary: ""
+        )
+
+        try expect(
+            item.aiProcessingOutcome == "raw-fallback:languageMismatch",
+            "history retains the typed raw fallback outcome"
+        )
+        try expect(
+            item.rawTranscript == rawTranscript && item.postProcessedTranscript == rawTranscript,
+            "raw fallback history keeps the non-empty original transcript"
+        )
     }
 
     private static func testRequestFailuresKeepOnlyAllowlistedProviderCode() throws {

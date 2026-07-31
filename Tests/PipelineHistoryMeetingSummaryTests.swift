@@ -5,6 +5,7 @@ struct PipelineHistoryMeetingSummaryTests {
     static func main() throws {
         try testLegacyItemDecodesMissingSummaryAsNil()
         try testSummaryRoundTripsThroughCodable()
+        try testSummaryPersistsEvidenceBearingV2()
         try testSummaryRoundTripsThroughCoreDataStore()
         testItemCopyHelpersPreserveSummary()
         print("PipelineHistoryMeetingSummaryTests passed")
@@ -30,6 +31,18 @@ struct PipelineHistoryMeetingSummaryTests {
         )
 
         precondition(decoded.meetingSummary == item.meetingSummary)
+    }
+
+    private static func testSummaryPersistsEvidenceBearingV2() throws {
+        let item = makeItem().withMeetingSummary(.fixture(actions: []))
+        let summaryJSON = try unwrap(item.meetingSummaryJSON)
+        let root = try JSONSerialization.jsonObject(with: summaryJSON) as? [String: Any]
+        let content = root?["content"] as? [String: Any]
+        let overview = content?["overview"] as? [String: Any]
+
+        precondition(root?["schemaVersion"] as? Int == 2)
+        precondition(overview?["text"] as? String == "Release review")
+        precondition(overview?["sourceQuotes"] as? [String] == ["Decision: ship Friday."])
     }
 
     private static func testSummaryRoundTripsThroughCoreDataStore() throws {
@@ -102,7 +115,10 @@ private extension MeetingSummaryEnvelope {
             modelID: "test/model",
             backendKind: .cloud,
             content: MeetingSummaryContent(
-                overview: "Release review",
+                overview: MeetingSummaryEvidenceText(
+                    text: "Release review",
+                    sourceQuotes: ["Decision: ship Friday."]
+                ),
                 keyPoints: [],
                 decisions: [],
                 actionItems: actions,

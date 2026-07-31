@@ -2,9 +2,11 @@ import Foundation
 
 @main
 struct MeetingSummaryModelsTests {
-    static func main() {
+    static func main() throws {
         testFingerprintIsDeterministicAndChangesWithTranscript()
         testFingerprintIncludesCalendarMetadata()
+        try testLegacyV1EnvelopeDecodesDisplayOnlyEvidence()
+        testNewSummariesUseSchemaVersion2()
         testCompletionStateSurvivesEquivalentRegeneration()
         testMarkdownRendererIncludesAllSections()
         testSourceLocatorFindsExactQuote()
@@ -49,6 +51,32 @@ struct MeetingSummaryModelsTests {
         )
 
         precondition(withoutCalendar.fingerprint != withCalendar.fingerprint)
+    }
+
+    private static func testLegacyV1EnvelopeDecodesDisplayOnlyEvidence() throws {
+        let legacyOverview = "The team reviewed the release."
+        let legacyJSON = #"{"schemaVersion":1,"promptVersion":1,"generatedAt":0,"sourceFingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","modelID":"legacy/model","backendKind":"cloud","content":{"overview":"The team reviewed the release.","keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}}"#
+
+        let decoded = try JSONDecoder().decode(
+            MeetingSummaryEnvelope.self,
+            from: Data(legacyJSON.utf8)
+        )
+
+        precondition(
+            decoded.content.overview.text == legacyOverview,
+            "legacy saved summaries remain readable as display-only evidence"
+        )
+        precondition(
+            decoded.content.overview.sourceQuotes.isEmpty,
+            "legacy overview does not invent source evidence"
+        )
+    }
+
+    private static func testNewSummariesUseSchemaVersion2() {
+        precondition(
+            MeetingSummaryEnvelope.currentSchemaVersion == 2,
+            "new summaries persist evidence-bearing schema v2"
+        )
     }
 
     private static func testCompletionStateSurvivesEquivalentRegeneration() {
@@ -131,7 +159,10 @@ private extension MeetingSummaryEnvelope {
             modelID: "test/model",
             backendKind: .cloud,
             content: MeetingSummaryContent(
-                overview: "The team reviewed the release.",
+                overview: MeetingSummaryEvidenceText(
+                    text: "The team reviewed the release.",
+                    sourceQuotes: ["The team reviewed the release."]
+                ),
                 keyPoints: [
                     MeetingSummaryPoint(
                         id: UUID(uuidString: "00000000-0000-0000-0000-000000000010")!,

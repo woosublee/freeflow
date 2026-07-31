@@ -102,8 +102,12 @@ struct LocalizationResourceTests {
                 "종료하면 완료되지 않은 모델 다운로드가 취소되고 부분 다운로드 파일이 삭제됩니다.",
             "Quit and Cancel Downloads": "종료하고 다운로드 취소",
             "Best quality. Needs more memory.": "최고 품질입니다. 더 많은 메모리가 필요합니다.",
-            "Faster and lighter. Good for lower-memory Macs.":
-                "더 빠르고 가볍습니다. 메모리가 적은 Mac에 적합합니다.",
+            "The previously selected on-device model is no longer available. Explicitly select Qwen2.5 7B to continue locally.":
+                "이전에 선택한 온디바이스 모델을 더 이상 사용할 수 없습니다. 로컬에서 계속하려면 Qwen2.5 7B를 직접 선택하세요.",
+            "The previously selected on-device model is no longer available. Context requires an image-capable model.":
+                "이전에 선택한 온디바이스 모델을 더 이상 사용할 수 없습니다. Context에는 이미지 지원 모델이 필요합니다.",
+            "Previously selected on-device model": "이전에 선택한 온디바이스 모델",
+            "This on-device model is no longer available and cannot be used.": "이 온디바이스 모델은 더 이상 제공되지 않으며 사용할 수 없습니다.",
             "Canceled": "취소됨"
         ]
         for (key, expected) in localAISettingsKorean {
@@ -111,6 +115,14 @@ struct LocalizationResourceTests {
             let korean = try localizedValue(key: key, language: "ko", root: root)
             assert(english == key)
             assert(korean == expected)
+        }
+        for retiredArtifactManagementKey in [
+            "Downloaded files remain on this Mac.",
+            "No downloaded files remain on this Mac.",
+            "Unable to delete the downloaded files. Try again.",
+            "This removes any downloaded files for this retired Local AI model. It cannot be downloaded again."
+        ] {
+            assert(strings[retiredArtifactManagementKey] == nil)
         }
 
         let cloudProgressEnglish = try localizedValue(

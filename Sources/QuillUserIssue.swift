@@ -29,6 +29,8 @@ enum QuillUserIssueCode: String, Codable, CaseIterable, Sendable {
     case contextUnavailable = "context-unavailable"
     case meetingSummaryUnavailable = "meeting-summary-unavailable"
     case meetingSummaryInvalidResponse = "meeting-summary-invalid-response"
+    case historyPersistenceUnavailable = "history-persistence-unavailable"
+    case historyRecovered = "history-recovered"
     case unknown
     case legacy
 }
@@ -138,7 +140,8 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
         case .screenRecordingPermissionDenied:
             return .openScreenRecordingSettings
         case .postProcessingGuardFallback, .contextUnavailable,
-             .meetingSummaryUnavailable, .meetingSummaryInvalidResponse:
+             .meetingSummaryUnavailable, .meetingSummaryInvalidResponse,
+             .historyPersistenceUnavailable, .historyRecovered:
             return .none
         case .networkUnavailable, .requestTimedOut, .rateLimited,
              .providerUnavailable, .audioFileTooLarge,
@@ -244,6 +247,10 @@ struct QuillUserIssueError: Error, Sendable {
         self.privateDiagnostic = String(
             privateDiagnostic.suffix(Self.diagnosticCharacterLimit)
         )
+    }
+
+    static func historyPersistenceUnavailable() -> Self {
+        Self(record: QuillUserIssueRecord(code: .historyPersistenceUnavailable))
     }
 
     static func missingProviderAPIKey(
@@ -366,6 +373,27 @@ struct QuillUserIssueError: Error, Sendable {
             privateDiagnostic: diagnostic
         )
     }
+
+    static func local(
+        code: QuillUserIssueCode,
+        backend: String,
+        modelID: String? = nil,
+        processExitCode: Int32? = nil,
+        diagnosticCategory: String,
+        diagnosticExcerpt: String
+    ) -> Self {
+        let category = "[\(diagnosticCategory)]"
+        let maximumExcerptLength = max(0, diagnosticCharacterLimit - category.count - 1)
+        let excerpt = String(diagnosticExcerpt.suffix(maximumExcerptLength))
+        let diagnostic = excerpt.isEmpty ? category : "\(category) \(excerpt)"
+        return local(
+            code: code,
+            backend: backend,
+            modelID: modelID,
+            processExitCode: processExitCode,
+            diagnostic: diagnostic
+        )
+    }
 }
 
 private extension QuillUserIssueCode {
@@ -375,7 +403,8 @@ private extension QuillUserIssueCode {
              .postProcessingGuardFallback, .localAIModelUnavailable,
              .localAIStartFailed, .localAIProcessExited,
              .contextUnavailable, .meetingSummaryUnavailable,
-             .meetingSummaryInvalidResponse:
+             .meetingSummaryInvalidResponse, .historyPersistenceUnavailable,
+             .historyRecovered:
             return .warning
         default:
             return .error
@@ -531,7 +560,7 @@ private extension QuillUserIssueCode {
         case .postProcessingGuardFallback:
             return QuillUserIssueCopy(
                 titleKey: "Original transcript kept",
-                bodyKey: "Quill detected that cleanup may have changed the intended meaning.",
+                bodyKey: "Post-processing was not applied; the original transcript was kept.",
                 suggestionKey: "Review the original transcript before using it."
             )
         case .contextUnavailable:
@@ -551,6 +580,18 @@ private extension QuillUserIssueCode {
                 titleKey: "Summary response could not be read",
                 bodyKey: "The provider returned a response Quill could not use for the summary.",
                 suggestionKey: "Try Regenerate again. If it continues, check the provider configuration."
+            )
+        case .historyPersistenceUnavailable:
+            return QuillUserIssueCopy(
+                titleKey: "History isn't being saved",
+                bodyKey: "Quill cannot save history for this session.",
+                suggestionKey: "Keep Quill open while you work, then restart it after checking available disk space and permissions."
+            )
+        case .historyRecovered:
+            return QuillUserIssueCopy(
+                titleKey: "History was recovered",
+                bodyKey: "Quill couldn't open earlier history. A recovery backup was retained, and new notes will keep saving.",
+                suggestionKey: "No action is needed. Your new notes and history are being saved."
             )
         case .unknown:
             return QuillUserIssueCopy(

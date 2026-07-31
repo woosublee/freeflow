@@ -15,6 +15,29 @@ struct LocalAIModel: Identifiable, Hashable, Codable, Sendable {
     let description: String
     let artifacts: [LocalAIModelArtifact]
     let approximateResidentRAMBytes: Int64
+    let minimumPhysicalMemoryBytes: UInt64
+    let capabilities: AIModelCapabilities
+    let runtime: LocalAIRuntime
+
+    init(
+        id: String,
+        displayName: String,
+        description: String,
+        artifacts: [LocalAIModelArtifact],
+        approximateResidentRAMBytes: Int64,
+        minimumPhysicalMemoryBytes: UInt64 = 0,
+        capabilities: AIModelCapabilities = AIModelCapabilityCatalog.qwenTextCapabilities,
+        runtime: LocalAIRuntime = .textChat
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.description = description
+        self.artifacts = artifacts
+        self.approximateResidentRAMBytes = approximateResidentRAMBytes
+        self.minimumPhysicalMemoryBytes = minimumPhysicalMemoryBytes
+        self.capabilities = capabilities
+        self.runtime = runtime
+    }
 
     var approximateBytes: Int64 {
         artifacts.reduce(0) { $0 + $1.approximateBytes }
@@ -50,33 +73,20 @@ struct LocalAIModelCatalog {
                 checksumSHA256: "539cf93f78e887edea1c04e2d7d8cdaca9d01dae9c9025bcb8accbe29df3d72a"
             )
         ],
-        approximateResidentRAMBytes: 6_400_000_000
+        approximateResidentRAMBytes: 6_400_000_000,
+        minimumPhysicalMemoryBytes: 16 * 1024 * 1024 * 1024,
+        capabilities: AIModelCapabilityCatalog.qwenTextCapabilities,
+        runtime: .textChat
     )
 
-    static let fast = LocalAIModel(
-        id: "qwen2.5-1.5b-instruct",
-        displayName: "Qwen2.5 1.5B Instruct",
-        description: "Faster and lighter. Good for lower-memory Macs.",
-        artifacts: [
-            LocalAIModelArtifact(
-                downloadURL: URL(string: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf")!,
-                expectedFileName: "qwen2.5-1.5b-instruct-q4_k_m.gguf",
-                approximateBytes: 1_117_320_736,
-                checksumSHA256: "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"
-            )
-        ],
-        approximateResidentRAMBytes: 2_500_000_000
-    )
-
-    static let recommended = quality
-    static let all: [LocalAIModel] = [quality, fast]
-
-    static func find(id: String) -> LocalAIModel {
-        all.first { $0.id == id } ?? recommended
-    }
+    static let all: [LocalAIModel] = [quality]
 
     static func model(id: String) -> LocalAIModel? {
         all.first { $0.id == id }
+    }
+
+    static func capabilities(for id: String) -> AIModelCapabilities? {
+        model(id: id)?.capabilities
     }
 }
 

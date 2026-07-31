@@ -8,6 +8,7 @@ struct RecordingRecoveryHistoryTests {
             try recoveredSystemAudioArtifactCreatesIdempotentRetryableHistory()
             try combinedRecoveryModesPersistIdempotently()
             try partialSegmentedRecoveryPersistsIdempotently()
+            try inMemoryHistoryDoesNotFinalizePromotedRecording()
             try missingRecoveredAudioPreservesPromotedJournal()
             try invalidRecoveredAudioReportsPromotionConflict()
             try mismatchedRecoveredPromotionReportsPromotionConflict()
@@ -111,7 +112,9 @@ struct RecordingRecoveryHistoryTests {
             sourceKind,
             "recovered source kind"
         )
-        let historyStore = PipelineHistoryStore(inMemory: true)
+        let historyStore = PipelineHistoryStore(
+            storeURL: root.appendingPathComponent("PipelineHistory.sqlite")
+        )
         let bridge = RecordingRecoveryHistory(
             journalStore: store,
             historyStore: historyStore
@@ -159,7 +162,11 @@ struct RecordingRecoveryHistoryTests {
             .systemAudioOnly
         ] {
             try withCombinedRecoveredFixture(mode: mode) { fixture in
-                let historyStore = PipelineHistoryStore(inMemory: true)
+                let historyStore = PipelineHistoryStore(
+                    storeURL: fixture.artifact.audioURL
+                        .deletingLastPathComponent()
+                        .appendingPathComponent("PipelineHistory.sqlite")
+                )
                 let bridge = RecordingRecoveryHistory(
                     journalStore: fixture.store,
                     historyStore: historyStore
@@ -254,7 +261,9 @@ struct RecordingRecoveryHistoryTests {
         )
         try expectEqual(artifact.mode, .partial, "partial artifact mode")
 
-        let historyStore = PipelineHistoryStore(inMemory: true)
+        let historyStore = PipelineHistoryStore(
+            storeURL: root.appendingPathComponent("PipelineHistory.sqlite")
+        )
         let bridge = RecordingRecoveryHistory(
             journalStore: store,
             historyStore: historyStore
@@ -280,6 +289,36 @@ struct RecordingRecoveryHistoryTests {
             atPath: store.recordingDirectory(recordingID: recordingID).path
         ) else {
             throw TestFailure("partial history must remove inflight directory")
+        }
+    }
+
+    private static func inMemoryHistoryDoesNotFinalizePromotedRecording() throws {
+        try withCombinedRecoveredFixture(mode: .microphoneOnly) { fixture in
+            let historyStore = PipelineHistoryStore(inMemory: true)
+            let bridge = RecordingRecoveryHistory(
+                journalStore: fixture.store,
+                historyStore: historyStore
+            )
+
+            do {
+                _ = try bridge.persist(fixture.artifact, maxCount: 50)
+                throw TestFailure("in-memory history must reject recording recovery")
+            } catch PipelineHistoryStoreError.durableStoreUnavailable {
+                // expected
+            }
+
+            try expectEqual(
+                try fixture.store.loadManifest(recordingID: fixture.recordingID).state,
+                .promoted,
+                "in-memory history keeps the promoted journal retryable"
+            )
+            guard FileManager.default.fileExists(
+                atPath: fixture.store.recordingDirectory(
+                    recordingID: fixture.recordingID
+                ).path
+            ) else {
+                throw TestFailure("in-memory history must retain the inflight directory")
+            }
         }
     }
 

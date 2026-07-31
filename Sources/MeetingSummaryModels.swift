@@ -56,8 +56,13 @@ struct MeetingSummarySource: Equatable, Sendable {
     }
 }
 
+struct MeetingSummaryEvidenceText: Codable, Equatable, Sendable {
+    let text: String
+    let sourceQuotes: [String]
+}
+
 struct MeetingSummaryEnvelope: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     let schemaVersion: Int
     let promptVersion: Int
@@ -85,8 +90,7 @@ struct MeetingSummaryEnvelope: Codable, Equatable, Sendable {
             ] else {
                 return action
             }
-            var preserved = action
-            preserved = MeetingSummaryActionItem(
+            return MeetingSummaryActionItem(
                 id: previousAction.id,
                 task: action.task,
                 owner: action.owner,
@@ -94,18 +98,66 @@ struct MeetingSummaryEnvelope: Codable, Equatable, Sendable {
                 sourceQuote: action.sourceQuote,
                 isCompleted: previousAction.isCompleted
             )
-            return preserved
         }
         return copy
     }
 }
 
 struct MeetingSummaryContent: Codable, Equatable, Sendable {
-    let overview: String
+    let overview: MeetingSummaryEvidenceText
     let keyPoints: [MeetingSummaryPoint]
     let decisions: [MeetingSummaryPoint]
     var actionItems: [MeetingSummaryActionItem]
     let openQuestions: [MeetingSummaryPoint]
+
+    private enum CodingKeys: String, CodingKey {
+        case overview
+        case keyPoints
+        case decisions
+        case actionItems
+        case openQuestions
+    }
+
+    init(
+        overview: MeetingSummaryEvidenceText,
+        keyPoints: [MeetingSummaryPoint],
+        decisions: [MeetingSummaryPoint],
+        actionItems: [MeetingSummaryActionItem],
+        openQuestions: [MeetingSummaryPoint]
+    ) {
+        self.overview = overview
+        self.keyPoints = keyPoints
+        self.decisions = decisions
+        self.actionItems = actionItems
+        self.openQuestions = openQuestions
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let evidence = try? container.decode(
+            MeetingSummaryEvidenceText.self,
+            forKey: .overview
+        ) {
+            overview = evidence
+        } else {
+            // Summary v1 stored overview as a plain string. Keep that text visible
+            // while deliberately withholding any invented source evidence.
+            overview = MeetingSummaryEvidenceText(
+                text: try container.decode(String.self, forKey: .overview),
+                sourceQuotes: []
+            )
+        }
+        keyPoints = try container.decode([MeetingSummaryPoint].self, forKey: .keyPoints)
+        decisions = try container.decode([MeetingSummaryPoint].self, forKey: .decisions)
+        actionItems = try container.decode(
+            [MeetingSummaryActionItem].self,
+            forKey: .actionItems
+        )
+        openQuestions = try container.decode(
+            [MeetingSummaryPoint].self,
+            forKey: .openQuestions
+        )
+    }
 }
 
 struct MeetingSummaryPoint: Codable, Equatable, Identifiable, Sendable {
@@ -146,7 +198,10 @@ struct MeetingSummaryDraftContent: Codable, Equatable, Sendable {
         id: () -> UUID = UUID.init
     ) -> MeetingSummaryContent {
         MeetingSummaryContent(
-            overview: overview,
+            overview: MeetingSummaryEvidenceText(
+                text: overview,
+                sourceQuotes: []
+            ),
             keyPoints: keyPoints.map {
                 MeetingSummaryPoint(
                     id: id(),
@@ -182,11 +237,73 @@ struct MeetingSummaryDraftContent: Codable, Equatable, Sendable {
     }
 }
 
+struct MeetingSummaryDraftContentV2: Codable, Equatable, Sendable {
+    let overview: MeetingSummaryEvidenceText
+    let keyPoints: [MeetingSummaryPoint]
+    let decisions: [MeetingSummaryPoint]
+    let actionItems: [MeetingSummaryActionItem]
+    let openQuestions: [MeetingSummaryPoint]
+
+    func materialized() -> MeetingSummaryContent {
+        MeetingSummaryContent(
+            overview: overview,
+            keyPoints: keyPoints,
+            decisions: decisions,
+            actionItems: actionItems,
+            openQuestions: openQuestions
+        )
+    }
+
+    var validatedSourceTexts: [String] {
+        var texts = overview.sourceQuotes
+        for point in keyPoints + decisions + openQuestions {
+            if let sourceQuote = point.sourceQuote {
+                texts.append(sourceQuote)
+            }
+        }
+        for action in actionItems {
+            if let sourceQuote = action.sourceQuote {
+                texts.append(sourceQuote)
+            }
+        }
+        return texts
+    }
+}
+
+/// Decodes both the pre-evidence draft shape and the evidence-bearing v2
+/// shape. The application only creates and persists v2 drafts going forward.
+enum PersistedMeetingSummaryDraft: Codable, Equatable, Sendable {
+    case v1(MeetingSummaryDraftContent)
+    case v2(MeetingSummaryDraftContentV2)
+
+    private enum CodingKeys: String, CodingKey {
+        case overview
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if (try? container.decode(MeetingSummaryEvidenceText.self, forKey: .overview)) != nil {
+            self = .v2(try MeetingSummaryDraftContentV2(from: decoder))
+        } else {
+            self = .v1(try MeetingSummaryDraftContent(from: decoder))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        switch self {
+        case .v1(let draft):
+            try draft.encode(to: encoder)
+        case .v2(let draft):
+            try draft.encode(to: encoder)
+        }
+    }
+}
+
 enum MeetingSummaryMarkdownRenderer {
     static func render(_ envelope: MeetingSummaryEnvelope) -> String {
         let content = envelope.content
         return [
-            section(title: "Overview", body: content.overview),
+            section(title: "Overview", body: content.overview.text),
             listSection(title: "Key Points", points: content.keyPoints),
             listSection(title: "Decisions", points: content.decisions),
             actionSection(content.actionItems),

@@ -4,10 +4,11 @@ import Foundation
 struct LocalAIModelTests {
     static func main() throws {
         try testQualityModelMetadata()
-        try testFastModelMetadata()
+        try testModelsDeclareTextOnlyCapabilitiesAndRuntime()
+        try testCapabilityLookupUsesStoredModelDescriptors()
         try testCatalogArtifactsAreCompleteAndValid()
-        try testCatalogContainsBothModelsWithQualityRecommended()
-        try testFindReturnsMatchingModelOrFallsBackToRecommended()
+        try testCatalogContainsOnlyQualityModel()
+        try testRetiredModelDoesNotHaveProductStorageMetadata()
         try testDownloadProgressDisplayText()
         try testLocalizedModelMetadataAndDownloadProgress()
         print("LocalAIModelTests passed")
@@ -36,23 +37,20 @@ struct LocalAIModelTests {
         assert(model.approximateResidentRAMBytes > model.approximateBytes)
     }
 
-    private static func testFastModelMetadata() throws {
-        let model = LocalAIModelCatalog.fast
-        assert(model.id == "qwen2.5-1.5b-instruct")
-        assert(model.displayName == "Qwen2.5 1.5B Instruct")
-        assert(model.artifacts.count == 1)
+    private static func testModelsDeclareTextOnlyCapabilitiesAndRuntime() throws {
+        for model in LocalAIModelCatalog.all {
+            assert(model.runtime == .textChat)
+            assert(model.capabilities.supports(.postProcessing))
+            assert(model.capabilities.supports(.meetingSummary))
+            assert(!model.capabilities.supportsContextCapture)
+        }
+    }
 
-        let artifact = model.artifacts[0]
-        assert(artifact.downloadURL.absoluteString == "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf")
-        assert(artifact.expectedFileName == "qwen2.5-1.5b-instruct-q4_k_m.gguf")
-        assert(artifact.approximateBytes == 1_117_320_736)
-        assert(artifact.checksumSHA256 == "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e")
-
-        assert(model.approximateBytes == 1_117_320_736)
-        assert(model.approximateResidentRAMBytes == 2_500_000_000)
-        assert(model.approximateResidentRAMBytes > model.approximateBytes)
-        assert(model.approximateBytes < LocalAIModelCatalog.quality.approximateBytes)
-        assert(model.primaryArtifact == artifact)
+    private static func testCapabilityLookupUsesStoredModelDescriptors() throws {
+        for model in LocalAIModelCatalog.all {
+            assert(LocalAIModelCatalog.capabilities(for: model.id) == model.capabilities)
+        }
+        assert(LocalAIModelCatalog.capabilities(for: "does-not-exist") == nil)
     }
 
     private static func testCatalogArtifactsAreCompleteAndValid() throws {
@@ -66,14 +64,30 @@ struct LocalAIModelTests {
         }
     }
 
-    private static func testCatalogContainsBothModelsWithQualityRecommended() throws {
-        assert(LocalAIModelCatalog.all.map(\.id) == ["qwen2.5-7b-instruct", "qwen2.5-1.5b-instruct"])
-        assert(LocalAIModelCatalog.recommended.id == LocalAIModelCatalog.quality.id)
+    private static func testCatalogContainsOnlyQualityModel() throws {
+        assert(LocalAIModelCatalog.all.map(\.id) == ["qwen2.5-7b-instruct"])
+        assert(LocalAIModelCatalog.model(id: "qwen2.5-7b-instruct") == LocalAIModelCatalog.quality)
+        assert(LocalAIModelCatalog.model(id: "does-not-exist") == nil)
     }
 
-    private static func testFindReturnsMatchingModelOrFallsBackToRecommended() throws {
-        assert(LocalAIModelCatalog.find(id: "qwen2.5-1.5b-instruct").id == "qwen2.5-1.5b-instruct")
-        assert(LocalAIModelCatalog.find(id: "does-not-exist").id == LocalAIModelCatalog.recommended.id)
+    private static func testRetiredModelDoesNotHaveProductStorageMetadata() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let retiredModelID = "qwen2.5-1.5b-instruct"
+        let retiredArtifactName = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+        let productSources = try [
+            "Sources/LocalAIModel.swift",
+            "Sources/AIModelCapabilities.swift",
+            "Sources/LocalAIInstaller.swift",
+            "Sources/LocalAIServerManager.swift"
+        ].map { try String(contentsOf: root.appendingPathComponent($0), encoding: .utf8) }
+
+        assert(LocalAIModelCatalog.model(id: retiredModelID) == nil)
+        assert(LocalAIModelCatalog.capabilities(for: retiredModelID) == nil)
+        for source in productSources {
+            assert(!source.contains(retiredModelID))
+            assert(!source.contains(retiredArtifactName))
+            assert(!source.contains("Qwen2.5-1.5B-Instruct-GGUF"))
+        }
     }
 
     private static func testDownloadProgressDisplayText() throws {
@@ -90,12 +104,6 @@ struct LocalAIModelTests {
                 language: "ko",
                 bundle: bundle
             ) == "최고 품질입니다. 더 많은 메모리가 필요합니다."
-        )
-        assert(
-            LocalAIModelCatalog.fast.localizedDescription(
-                language: "ko",
-                bundle: bundle
-            ) == "더 빠르고 가볍습니다. 메모리가 적은 Mac에 적합합니다."
         )
         assert(
             LocalAIDownloadProgress(

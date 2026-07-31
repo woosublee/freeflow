@@ -12,6 +12,13 @@ enum PipelineHistoryStoreError: Error {
     case durableStoreUnavailable
 }
 
+enum PipelineHistoryDurability: Equatable, Sendable {
+    case durable
+    case recovered(backupName: String)
+    case inMemory
+    case inMemoryFallback
+}
+
 final class PipelineHistoryStore {
     /// Built once and treated as immutable after static initialization. Sharing
     /// the schema prevents multiple entity descriptions from claiming the same
@@ -19,80 +26,118 @@ final class PipelineHistoryStore {
     nonisolated(unsafe) private static let managedObjectModel = makeModel()
 
     private let container: NSPersistentContainer
-    private let isStoreLoaded: Bool
-    private let isDurableStore: Bool
+    private var isStoreLoaded: Bool
+    private(set) var durability: PipelineHistoryDurability
+
+    private var isDurableStore: Bool {
+        switch durability {
+        case .durable, .recovered:
+            true
+        case .inMemory, .inMemoryFallback:
+            false
+        }
+    }
 
     convenience init() {
         self.init(inMemory: false)
     }
 
-    init(inMemory: Bool) {
+    convenience init(inMemory: Bool) {
+        self.init(
+            storeURL: inMemory ? nil : Self.defaultStoreURL(),
+            usesInMemoryStore: inMemory,
+            persistentStoreLoader: Self.loadPersistentStoresSynchronously,
+            moveItem: Self.moveFile
+        )
+    }
+
+    convenience init(storeURL: URL) {
+        self.init(
+            storeURL: storeURL,
+            persistentStoreLoader: Self.loadPersistentStoresSynchronously
+        )
+    }
+
+    convenience init(
+        storeURL: URL,
+        persistentStoreLoader: @escaping (NSPersistentContainer) -> Error?,
+        moveItem: @escaping (URL, URL) throws -> Void = PipelineHistoryStore.moveFile
+    ) {
+        self.init(
+            storeURL: storeURL,
+            usesInMemoryStore: false,
+            persistentStoreLoader: persistentStoreLoader,
+            moveItem: moveItem
+        )
+    }
+
+    private init(
+        storeURL: URL?,
+        usesInMemoryStore: Bool,
+        persistentStoreLoader: @escaping (NSPersistentContainer) -> Error?,
+        moveItem: @escaping (URL, URL) throws -> Void
+    ) {
         container = NSPersistentContainer(
             name: "PipelineHistory",
             managedObjectModel: Self.managedObjectModel
         )
+        isStoreLoaded = false
+        durability = usesInMemoryStore ? .inMemory : .durable
 
-        if inMemory {
-            let description = NSPersistentStoreDescription()
-            description.type = NSInMemoryStoreType
-            container.persistentStoreDescriptions = [description]
-            isStoreLoaded = Self.loadPersistentStoresSynchronously(container: container) == nil
-            isDurableStore = true
-            return
-        }
+        var loaded = false
+        var recoveredBackupName: String?
 
-        var storeURL: URL?
-        if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            let appName = AppName.displayName
-            let baseURL = appSupport.appendingPathComponent(appName, isDirectory: true)
-            try? FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
-            storeURL = baseURL.appendingPathComponent("PipelineHistory.sqlite")
-        }
-
-        if let storeURL {
-            let description = NSPersistentStoreDescription(url: storeURL)
-            description.shouldMigrateStoreAutomatically = true
-            description.shouldInferMappingModelAutomatically = true
-            container.persistentStoreDescriptions = [description]
+        if usesInMemoryStore {
+            configureInMemoryStore()
+            loaded = persistentStoreLoader(container) == nil
         } else {
-            container.persistentStoreDescriptions = [NSPersistentStoreDescription()]
-        }
-
-        if Self.loadPersistentStoresSynchronously(container: container) == nil {
-            isStoreLoaded = true
-            isDurableStore = true
-        } else {
-            if let storeURL {
-                print("[PipelineHistoryStore] Failed to load persistent store at \(storeURL.path). Attempting recovery.")
-                Self.destroySQLiteStoreFiles(at: storeURL)
-
-                // Clear any partially loaded stores and reset descriptions before retrying.
-                let coordinator = container.persistentStoreCoordinator
-                for store in coordinator.persistentStores {
-                    try? coordinator.remove(store)
+            configurePersistentStore(at: storeURL)
+            if persistentStoreLoader(container) == nil {
+                loaded = true
+            } else if let storeURL {
+                print("[PipelineHistoryStore] Failed to load persistent store. Attempting recovery.")
+                do {
+                    recoveredBackupName = try Self.moveSQLiteStoreFilesToRecovery(
+                        at: storeURL,
+                        moveItem: moveItem
+                    )
+                    removeLoadedPersistentStores()
+                    configurePersistentStore(at: storeURL)
+                    loaded = persistentStoreLoader(container) == nil
+                } catch {
+                    print("[PipelineHistoryStore] Failed to preserve persistent history. Falling back to in-memory history.")
+                    configureInMemoryStore()
+                    loaded = persistentStoreLoader(container) == nil
+                    durability = .inMemoryFallback
+                    isStoreLoaded = loaded
+                    return
                 }
 
-                let recoveryDescription = NSPersistentStoreDescription(url: storeURL)
-                recoveryDescription.shouldMigrateStoreAutomatically = true
-                recoveryDescription.shouldInferMappingModelAutomatically = true
-                container.persistentStoreDescriptions = [recoveryDescription]
-            }
-
-            if Self.loadPersistentStoresSynchronously(container: container) == nil {
-                isStoreLoaded = true
-                isDurableStore = true
+                if !loaded {
+                    print("[PipelineHistoryStore] Failed to recover persistent store. Falling back to in-memory history.")
+                    configureInMemoryStore()
+                    loaded = persistentStoreLoader(container) == nil
+                    durability = .inMemoryFallback
+                    isStoreLoaded = loaded
+                    return
+                }
             } else {
-                print("[PipelineHistoryStore] Failed to recover persistent store. Falling back to in-memory history.")
-                let coordinator = container.persistentStoreCoordinator
-                for store in coordinator.persistentStores {
-                    try? coordinator.remove(store)
+                loaded = persistentStoreLoader(container) == nil
+                if !loaded {
+                    configureInMemoryStore()
+                    loaded = persistentStoreLoader(container) == nil
+                    durability = .inMemoryFallback
+                    isStoreLoaded = loaded
+                    return
                 }
-                let description = NSPersistentStoreDescription()
-                description.type = NSInMemoryStoreType
-                container.persistentStoreDescriptions = [description]
-                isStoreLoaded = Self.loadPersistentStoresSynchronously(container: container) == nil
-                isDurableStore = false
             }
+        }
+
+        isStoreLoaded = loaded
+        if usesInMemoryStore {
+            durability = .inMemory
+        } else {
+            durability = recoveredBackupName.map(PipelineHistoryDurability.recovered) ?? .durable
         }
     }
 
@@ -143,8 +188,14 @@ final class PipelineHistoryStore {
         return try trim(to: maxCount)
     }
 
-    func update(_ item: PipelineHistoryItem) throws {
+    func update(
+        _ item: PipelineHistoryItem,
+        requiresDurableStore: Bool = false
+    ) throws {
         guard isStoreLoaded else { return }
+        if requiresDurableStore, !isDurableStore {
+            throw PipelineHistoryStoreError.durableStoreUnavailable
+        }
 
         var thrownError: Error?
         container.viewContext.performAndWait {
@@ -284,6 +335,7 @@ final class PipelineHistoryStore {
         entity.contextScreenshotDataURL = item.contextScreenshotDataURL
         entity.contextScreenshotStatus = item.contextScreenshotStatus
         entity.postProcessingStatus = item.postProcessingStatus
+        entity.aiProcessingOutcome = item.aiProcessingOutcome
         entity.debugStatus = item.debugStatus
         entity.customVocabulary = item.customVocabulary
         entity.customSystemPrompt = item.customSystemPrompt
@@ -323,8 +375,51 @@ final class PipelineHistoryStore {
         )
     }
 
+    private func configurePersistentStore(at storeURL: URL?) {
+        if let storeURL {
+            let description = NSPersistentStoreDescription(url: storeURL)
+            description.shouldMigrateStoreAutomatically = true
+            description.shouldInferMappingModelAutomatically = true
+            container.persistentStoreDescriptions = [description]
+        } else {
+            container.persistentStoreDescriptions = [NSPersistentStoreDescription()]
+        }
+    }
+
+    private func configureInMemoryStore() {
+        removeLoadedPersistentStores()
+        let description = NSPersistentStoreDescription()
+        description.type = NSInMemoryStoreType
+        container.persistentStoreDescriptions = [description]
+    }
+
+    private func removeLoadedPersistentStores() {
+        let coordinator = container.persistentStoreCoordinator
+        for store in coordinator.persistentStores {
+            try? coordinator.remove(store)
+        }
+    }
+
+    private static func defaultStoreURL() -> URL? {
+        guard let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            return nil
+        }
+        let baseURL = appSupport.appendingPathComponent(
+            AppName.displayName,
+            isDirectory: true
+        )
+        try? FileManager.default.createDirectory(
+            at: baseURL,
+            withIntermediateDirectories: true
+        )
+        return baseURL.appendingPathComponent("PipelineHistory.sqlite")
+    }
+
     // Safe: loadPersistentStores calls back on a private queue, not the calling thread.
-    private static func loadPersistentStoresSynchronously(container: NSPersistentContainer) -> Error? {
+    static func loadPersistentStoresSynchronously(container: NSPersistentContainer) -> Error? {
         let semaphore = DispatchSemaphore(value: 0)
         let lock = NSLock()
         var capturedError: Error?
@@ -348,12 +443,61 @@ final class PipelineHistoryStore {
         return capturedError
     }
 
-    private static func destroySQLiteStoreFiles(at storeURL: URL) {
-        let basePath = storeURL.path
+    private static func moveFile(from sourceURL: URL, to destinationURL: URL) throws {
+        try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
+    }
+
+    private static func moveSQLiteStoreFilesToRecovery(
+        at storeURL: URL,
+        moveItem: (URL, URL) throws -> Void
+    ) throws -> String? {
         let fileManager = FileManager.default
-        for path in [basePath, basePath + "-wal", basePath + "-shm"] {
-            try? fileManager.removeItem(atPath: path)
+        let components = [
+            storeURL,
+            URL(fileURLWithPath: storeURL.path + "-wal"),
+            URL(fileURLWithPath: storeURL.path + "-shm")
+        ].filter { fileManager.fileExists(atPath: $0.path) }
+        guard !components.isEmpty else { return nil }
+
+        let recoveryRootURL = storeURL.deletingLastPathComponent()
+            .appendingPathComponent("History Recovery", isDirectory: true)
+        let backupName = "\(recoveryTimestamp())-\(UUID().uuidString)"
+        let backupURL = recoveryRootURL.appendingPathComponent(
+            backupName,
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: backupURL,
+            withIntermediateDirectories: true
+        )
+
+        var movedComponents: [URL] = []
+        do {
+            for component in components {
+                try moveItem(
+                    component,
+                    backupURL.appendingPathComponent(component.lastPathComponent)
+                )
+                movedComponents.append(component)
+            }
+        } catch {
+            for component in movedComponents.reversed() {
+                let backupComponent = backupURL.appendingPathComponent(
+                    component.lastPathComponent
+                )
+                try? moveItem(backupComponent, component)
+            }
+            throw error
         }
+        return backupName
+    }
+
+    private static func recoveryTimestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: Date())
     }
 
     private static func encodeCalendarMatch(_ match: CalendarEventMatch?) -> String? {
@@ -386,6 +530,7 @@ final class PipelineHistoryStore {
             contextScreenshotDataURL: entity.contextScreenshotDataURL,
             contextScreenshotStatus: entity.contextScreenshotStatus ?? "available (image)",
             postProcessingStatus: entity.postProcessingStatus ?? "",
+            aiProcessingOutcome: entity.aiProcessingOutcome ?? "succeeded",
             debugStatus: entity.debugStatus ?? "",
             customVocabulary: entity.customVocabulary ?? "",
             customSystemPrompt: entity.customSystemPrompt ?? "",
@@ -430,6 +575,7 @@ final class PipelineHistoryStore {
             makeAttribute(name: "contextScreenshotDataURL", type: .stringAttributeType, isOptional: true),
             makeAttribute(name: "contextScreenshotStatus", type: .stringAttributeType, isOptional: false),
             makeAttribute(name: "postProcessingStatus", type: .stringAttributeType, isOptional: false),
+            makeAttribute(name: "aiProcessingOutcome", type: .stringAttributeType, isOptional: true),
             makeAttribute(name: "debugStatus", type: .stringAttributeType, isOptional: false),
             makeAttribute(name: "customVocabulary", type: .stringAttributeType, isOptional: false),
             makeAttribute(name: "customSystemPrompt", type: .stringAttributeType, isOptional: false, defaultValue: ""),
@@ -486,6 +632,7 @@ final class PipelineHistoryEntry: NSManagedObject {
     @NSManaged var contextScreenshotDataURL: String?
     @NSManaged var contextScreenshotStatus: String?
     @NSManaged var postProcessingStatus: String?
+    @NSManaged var aiProcessingOutcome: String?
     @NSManaged var debugStatus: String?
     @NSManaged var customVocabulary: String?
     @NSManaged var customSystemPrompt: String?

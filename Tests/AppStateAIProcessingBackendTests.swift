@@ -36,7 +36,13 @@ struct AppStateAIProcessingBackendTests {
         await testWhitespaceCloudIDsFallbackToRememberedOrDefaultModels()
         await testStoredCloudChoicesReconcileRememberedModels()
         await testStoredLocalChoicesPreserveRememberedCloudModels()
-        await testStartupNormalizesUnavailableLocalChoices()
+        await testIncompatibleLegacyContextSelectionIsPreservedAndDisabled()
+        await testProviderlessQwenVisionCloudChoiceSupportsContext()
+        await testLegacyUninstalledContextDownloadDoesNotQueueOrActivateIt()
+        await testStartupPreservesUnavailableCompatibleLocalChoiceWithoutCloudFallback()
+        await testSettingsDismissalPreservesUnavailableLocalChoiceWithoutCloudFallback()
+        await testStartupPreservesRetiredLocalChoicesWithoutSubstitution()
+        await testSelectingReadyQualityModelRecoversRetiredPostProcessingChoice()
         await testChangingCloudModelWhileLocalPreservesLocalChoice()
         await testDirectCloudChoiceSynchronizesRememberedModel()
         await testPostProcessingAndContextChoicesStayIndependent()
@@ -47,15 +53,14 @@ struct AppStateAIProcessingBackendTests {
         await testSettingsDismissalDisablesAIWithoutReadyModels()
         await testSettingsDismissalFallsBackToReadyLocalAIModel()
         await testSameModelDownloadCoalescesAndSelectsBothFeatures()
-        await testDifferentModelsStartIndependentDownloads()
         await testNativeWhisperProgressCoalescesAndCancellationWins()
-        await testLocalAIProgressCoalescesPerModelAndCompletionWins()
+        await testLocalAIProgressCoalescesAndCompletionWins()
         await testChoosingCloudClearsOnlyOnePendingSelection()
         await testCancelPendingSelectionClearsOnlyOneConsumer()
         await testPendingSelectionChangesPublishObjectWillChange()
         await testCancellationWaitsForCompletionAndRetriesAfterQuiescence()
         try await testIdleShutdownMonitoringIsIdempotentAndStops()
-        await testLocalAIInstallQuiescenceWaitsForEveryWorker()
+        await testLocalAIInstallQuiescenceWaitsForActiveWorker()
         try await testTerminationWaitsForLocalAIQuiescenceAndSuppressesDuplicates()
         try await testNativeWhisperTerminationWaitsForWorkerQuiescence()
         try await testCombinedNativeAndLocalTerminationWaitsForBothWorkers()
@@ -66,6 +71,7 @@ struct AppStateAIProcessingBackendTests {
         await testInstallerSuccessRechecksHardwareAvailability()
         await testInstallerFailureClearsPendingAndSetsIssue()
         await testUnsupportedHardwareRejectsLocalSelection()
+        await testLowMemoryPreservesStoredLocalChoiceWithoutStartingIt()
         await testCanonicalModelValidationRejectsForgedModels()
         await testAIProcessingChoiceDisplayMetadata()
         testManagedLocalAIModelResolutionReconcilesRetainedLifecycle()
@@ -74,7 +80,7 @@ struct AppStateAIProcessingBackendTests {
         await testBackgroundStatusRefreshIgnoresStaleGeneration()
         try await testDeleteDuringInstallWaitsAndCannotAutoSelect()
         try await testDeleteFailureAndSuccessStateReset()
-        try await testDeleteFallsBackToInstalledLocalThenCloudThenDisabled()
+        try await testDeletingOnlyLocalModelDoesNotSubstituteCloud()
         try testEveryPostProcessingConstructionUsesCentralFactory()
         try testCloudResumeCapturesPostProcessingServiceBeforeTaskStarts()
         try testContextCaptureUsesServiceSnapshotAndKeepsCancellationGuards()
@@ -84,6 +90,11 @@ struct AppStateAIProcessingBackendTests {
         await testWarningBannerDismissalIsScopedToNoteAndResetsOnRetryGeneration()
         try testDeletingNotesForgetsWarningBannerState()
         print("AppStateAIProcessingBackendTests passed")
+    }
+
+    private static let successfulReadinessProbe: LocalAIServerManager.ReadinessProbe = { request in
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8), response)
     }
 
     private static func testLegacyModelsMigrateToIndependentCloudChoices() async {
@@ -172,7 +183,7 @@ struct AppStateAIProcessingBackendTests {
         defaults.set("remembered/post", forKey: "post_processing_model")
         defaults.set("remembered/context", forKey: "context_model")
         let postChoice = AIProcessingBackendChoice.localAI(
-            modelID: LocalAIModelCatalog.fast.id
+            modelID: LocalAIModelCatalog.quality.id
         )
         let contextChoice = AIProcessingBackendChoice.localAI(
             modelID: LocalAIModelCatalog.quality.id
@@ -192,43 +203,275 @@ struct AppStateAIProcessingBackendTests {
         assert(defaults.string(forKey: "context_model") == "remembered/context")
     }
 
-    private static func testStartupNormalizesUnavailableLocalChoices() async {
+    private static func testIncompatibleLegacyContextSelectionIsPreservedAndDisabled() async {
         resetAIProcessingDefaults()
+        let statusHarness = LocalAIStatusHarness(defaultStatus: .ready)
+        let seams = LocalAISeamSnapshot()
+        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
+        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
+        defer { seams.restore() }
+
+        let legacyChoice = AIProcessingBackendChoice.localAI(
+            modelID: LocalAIModelCatalog.quality.id
+        )
+        storeChoice(legacyChoice, forKey: "context_backend_choice")
+        UserDefaults.standard.set(false, forKey: "disable_context_capture")
+
+        let appState = await makeRefreshedAppState()
+        await MainActor.run {
+            precondition(
+                appState.disableContextCapture,
+                "text-only legacy Context choice disables Context"
+            )
+            precondition(
+                appState.contextBackendChoice == legacyChoice,
+                "legacy choice is preserved instead of silently selecting Cloud"
+            )
+            precondition(
+                appState.contextModelCapabilityWarning != nil,
+                "Settings receives an explicit incompatibility reason"
+            )
+        }
+    }
+
+    private static func testProviderlessQwenVisionCloudChoiceSupportsContext() async {
+        resetAIProcessingDefaults()
+        let appState = await makeRefreshedAppState()
+        let choice = AIProcessingBackendChoice.cloud(modelID: "qwen3.6-27b")
+
+        await MainActor.run {
+            precondition(
+                appState.isAIProcessingChoiceAvailable(choice, for: .context),
+                "the providerless Qwen vision alias is available for Context"
+            )
+            appState.selectAIProcessingBackendChoice(choice, for: .context)
+            precondition(
+                appState.contextBackendChoice == choice,
+                "the providerless Qwen vision alias is retained as the Context choice"
+            )
+            precondition(
+                appState.contextModelCapabilityWarning == nil,
+                "the providerless Qwen vision alias does not show a Context capability warning"
+            )
+        }
+    }
+
+    private static func testLegacyUninstalledContextDownloadDoesNotQueueOrActivateIt() async {
+        resetAIProcessingDefaults()
+        let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
+        let installHarness = LocalAIInstallHarness()
+        let seams = LocalAISeamSnapshot()
+        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
+        AppState.localAIInstallStarter = installHarness.start
+        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
+        defer { seams.restore() }
+
+        let legacyChoice = AIProcessingBackendChoice.localAI(
+            modelID: LocalAIModelCatalog.quality.id
+        )
+        storeChoice(legacyChoice, forKey: "context_backend_choice")
+        let appState = await makeRefreshedAppState()
+        await MainActor.run {
+            precondition(appState.disableContextCapture)
+            precondition(appState.contextBackendChoice == legacyChoice)
+
+            appState.installLocalAIModel(
+                LocalAIModelCatalog.quality,
+                autoSelectFor: .context
+            )
+
+            precondition(
+                appState.pendingLocalAIModelID(for: .context) == nil,
+                "incompatible legacy Context download is not queued for activation"
+            )
+            precondition(appState.localAIInstallState(for: LocalAIModelCatalog.quality).isInstalling)
+        }
+
+        statusHarness.set(.ready, for: LocalAIModelCatalog.quality)
+        installHarness.complete(model: LocalAIModelCatalog.quality, with: .success(()))
+        await waitUntil {
+            !appState.localAIInstallState(for: LocalAIModelCatalog.quality).isInstalling
+        }
+        await MainActor.run {
+            precondition(appState.contextBackendChoice == legacyChoice)
+            precondition(appState.disableContextCapture)
+        }
+    }
+
+    private static func testStartupPreservesUnavailableCompatibleLocalChoiceWithoutCloudFallback() async {
+        resetAIProcessingDefaults()
+        let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
+        let seams = LocalAISeamSnapshot()
+        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
+        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
+        defer { seams.restore() }
+
+        let localChoice = AIProcessingBackendChoice.localAI(
+            modelID: LocalAIModelCatalog.quality.id
+        )
+        storeChoice(localChoice, forKey: "post_processing_backend_choice")
+        AppSettingsStorage.save("configured-key", account: "groq_api_key")
+
+        let appState = await makeRefreshedAppState()
+        await MainActor.run {
+            precondition(
+                appState.postProcessingBackendChoice == localChoice,
+                "unavailable Local backend is preserved instead of silently selecting Cloud"
+            )
+            precondition(appState.disablePostProcessing)
+        }
+        precondition(
+            storedChoice(forKey: "post_processing_backend_choice") == localChoice
+        )
+    }
+
+    private static func testSettingsDismissalPreservesUnavailableLocalChoiceWithoutCloudFallback() async {
+        resetAIProcessingDefaults()
+        let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
+        let seams = LocalAISeamSnapshot()
+        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
+        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
+        defer { seams.restore() }
+
+        let localChoice = AIProcessingBackendChoice.localAI(
+            modelID: LocalAIModelCatalog.quality.id
+        )
+        let appState = await makeRefreshedAppState()
+        await MainActor.run {
+            appState.apiKey = "configured-key"
+            appState.postProcessingBackendChoice = localChoice
+            appState.disablePostProcessing = false
+
+            appState.reconcileModelSelectionsAfterSettingsDismissal()
+
+            precondition(
+                appState.postProcessingBackendChoice == localChoice,
+                "Settings dismissal preserves an unavailable Local backend instead of selecting Cloud"
+            )
+            precondition(appState.disablePostProcessing)
+        }
+    }
+
+    private static func testStartupPreservesRetiredLocalChoicesWithoutSubstitution() async {
+        resetAIProcessingDefaults()
+        let retiredModelID = "qwen2.5-1.5b-instruct"
+        let retiredChoice = AIProcessingBackendChoice.localAI(modelID: retiredModelID)
         let statusHarness = LocalAIStatusHarness(
-            statuses: [
-                LocalAIModelCatalog.quality.id: .notInstalled,
-                LocalAIModelCatalog.fast.id: .ready
-            ],
+            statuses: [LocalAIModelCatalog.quality.id: .ready],
+            defaultStatus: .notInstalled
+        )
+        let installHarness = LocalAIInstallHarness()
+        let deletionHarness = LocalAIDeletionHarness()
+        let seams = LocalAISeamSnapshot()
+        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
+        AppState.localAIInstallStarter = installHarness.start
+        AppState.localAIModelDelete = { model in
+            deletionHarness.record(modelID: model.id, managerWasStopped: true)
+        }
+        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
+        defer {
+            seams.restore()
+            AppSettingsStorage.delete(account: "groq_api_key")
+        }
+
+        UserDefaults.standard.set("remembered/post", forKey: "post_processing_model")
+        UserDefaults.standard.set("remembered/context", forKey: "context_model")
+        storeChoice(retiredChoice, forKey: "post_processing_backend_choice")
+        storeChoice(retiredChoice, forKey: "context_backend_choice")
+        AppSettingsStorage.save("configured-cloud-key", account: "groq_api_key")
+
+        let appState = await makeRefreshedAppState()
+        await MainActor.run {
+            precondition(appState.postProcessingBackendChoice == retiredChoice)
+            precondition(appState.contextBackendChoice == retiredChoice)
+            precondition(
+                appState.meetingSummaryBackendChoice == retiredChoice,
+                "first-run Meeting Summary retains its retired Post-processing choice"
+            )
+            precondition(appState.disablePostProcessing)
+            precondition(appState.disableContextCapture)
+            precondition(appState.disableMeetingSummary)
+            precondition(appState.postProcessingModel == "remembered/post")
+            precondition(appState.contextModel == "remembered/context")
+            precondition(appState.meetingSummaryModel == "remembered/post")
+            for feature in AIProcessingFeature.allCases {
+                precondition(
+                    !appState.isAIProcessingChoiceAvailable(retiredChoice, for: feature)
+                )
+                let display = appState.aiProcessingChoiceDisplays(for: feature).first {
+                    $0.choice == retiredChoice
+                }
+                precondition(display?.isAvailable == false)
+                precondition(display?.unavailableReason?.isEmpty == false)
+                precondition(
+                    display?.title == "Qwen2.5 1.5B Instruct",
+                    "known retired models use their human-readable Settings label"
+                )
+            }
+            let contextCloudDisplays = appState.aiProcessingChoiceDisplays(for: .context)
+                .filter { $0.choice == .cloud(modelID: "qwen/qwen3.6-27b") }
+            precondition(
+                contextCloudDisplays.count == 1
+                    && contextCloudDisplays[0].isAvailable,
+                "a retired Context choice does not hide the compatible Cloud Context model"
+            )
+            let postLocalDisplays = appState.aiProcessingChoiceDisplays(for: .postProcessing)
+                .filter { $0.choice.isLocal && $0.isAvailable }
+            precondition(
+                postLocalDisplays.map(\.choice)
+                    == [.localAI(modelID: LocalAIModelCatalog.quality.id)]
+            )
+            precondition(appState.pendingLocalAIModelID(for: .postProcessing) == nil)
+            precondition(appState.pendingLocalAIModelID(for: .context) == nil)
+            precondition(appState.pendingLocalAIModelID(for: .meetingSummary) == nil)
+        }
+        precondition(installHarness.starts(for: LocalAIModelCatalog.quality) == 0)
+        precondition(deletionHarness.callCount == 0)
+        for key in [
+            "post_processing_backend_choice",
+            "context_backend_choice",
+            "meeting_summary_backend_choice"
+        ] {
+            precondition(storedChoice(forKey: key) == retiredChoice)
+        }
+    }
+
+    private static func testSelectingReadyQualityModelRecoversRetiredPostProcessingChoice() async {
+        resetAIProcessingDefaults()
+        let retiredChoice = AIProcessingBackendChoice.localAI(
+            modelID: "qwen2.5-1.5b-instruct"
+        )
+        let statusHarness = LocalAIStatusHarness(
+            statuses: [LocalAIModelCatalog.quality.id: .ready],
             defaultStatus: .notInstalled
         )
         let seams = LocalAISeamSnapshot()
         AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
-
-        UserDefaults.standard.set("remembered/post", forKey: "post_processing_model")
-        UserDefaults.standard.set("remembered/context", forKey: "context_model")
-        storeChoice(
-            .localAI(modelID: LocalAIModelCatalog.quality.id),
-            forKey: "post_processing_backend_choice"
-        )
-        storeChoice(
-            .localAI(modelID: LocalAIModelCatalog.quality.id),
-            forKey: "context_backend_choice"
-        )
+        storeChoice(retiredChoice, forKey: "post_processing_backend_choice")
 
         let appState = await makeRefreshedAppState()
-        let expected = AIProcessingBackendChoice.localAI(
-            modelID: LocalAIModelCatalog.fast.id
-        )
         await MainActor.run {
-            precondition(appState.postProcessingBackendChoice == expected)
-            precondition(appState.contextBackendChoice == expected)
-            precondition(appState.postProcessingModel == "remembered/post")
-            precondition(appState.contextModel == "remembered/context")
+            precondition(appState.postProcessingBackendChoice == retiredChoice)
+            precondition(appState.disablePostProcessing)
+
+            let qualityChoice = AIProcessingBackendChoice.localAI(
+                modelID: LocalAIModelCatalog.quality.id
+            )
+            appState.selectAIProcessingBackendChoice(
+                qualityChoice,
+                for: .postProcessing
+            )
+            precondition(appState.postProcessingBackendChoice == qualityChoice)
+            precondition(appState.postProcessingBackendChoice != .cloud(
+                modelID: AppState.defaultPostProcessingModel
+            ))
         }
-        precondition(storedChoice(forKey: "post_processing_backend_choice") == expected)
-        precondition(storedChoice(forKey: "context_backend_choice") == expected)
+        precondition(
+            storedChoice(forKey: "post_processing_backend_choice")
+                == .localAI(modelID: LocalAIModelCatalog.quality.id)
+        )
     }
 
     private static func testChangingCloudModelWhileLocalPreservesLocalChoice() async {
@@ -236,7 +479,7 @@ struct AppStateAIProcessingBackendTests {
         let appState = await makeRefreshedAppState()
         await MainActor.run {
             appState.postProcessingBackendChoice = .localAI(
-                modelID: LocalAIModelCatalog.fast.id
+                modelID: LocalAIModelCatalog.quality.id
             )
             appState.contextBackendChoice = .localAI(
                 modelID: LocalAIModelCatalog.quality.id
@@ -245,7 +488,7 @@ struct AppStateAIProcessingBackendTests {
             appState.contextModel = "new/context-cloud-model"
             assert(
                 appState.postProcessingBackendChoice
-                    == .localAI(modelID: LocalAIModelCatalog.fast.id)
+                    == .localAI(modelID: LocalAIModelCatalog.quality.id)
             )
             assert(
                 appState.contextBackendChoice
@@ -276,7 +519,7 @@ struct AppStateAIProcessingBackendTests {
         let appState = await makeRefreshedAppState()
         await MainActor.run {
             appState.postProcessingBackendChoice = .localAI(
-                modelID: LocalAIModelCatalog.fast.id
+                modelID: LocalAIModelCatalog.quality.id
             )
             appState.contextBackendChoice = .cloud(modelID: "context/cloud")
             assert(appState.postProcessingBackendChoice.isLocal)
@@ -341,7 +584,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         await MainActor.run {
             appState.apiKey = "configured-key"
@@ -358,7 +601,7 @@ struct AppStateAIProcessingBackendTests {
                 for: .context
             )
             precondition(appState.pendingLocalAIModelID(for: .postProcessing) == model.id)
-            precondition(appState.pendingLocalAIModelID(for: .context) == model.id)
+            precondition(appState.pendingLocalAIModelID(for: .context) == nil)
 
             appState.commitModelSettingsDrafts(
                 transcriptionEnabled: appState.transcriptionEnabled,
@@ -376,7 +619,7 @@ struct AppStateAIProcessingBackendTests {
             precondition(appState.postProcessingBackendChoice == originalPostChoice)
             precondition(appState.contextBackendChoice == originalContextChoice)
             precondition(!appState.disablePostProcessing)
-            precondition(!appState.disableContextCapture)
+            precondition(appState.disableContextCapture)
         }
     }
 
@@ -390,7 +633,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         await MainActor.run {
             appState.selectAIProcessingBackendChoice(
@@ -435,7 +678,7 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let seams = LocalAISeamSnapshot()
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         statusHarness.set(.ready, for: model)
         AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
@@ -455,11 +698,16 @@ struct AppStateAIProcessingBackendTests {
 
             appState.reconcileModelSelectionsAfterSettingsDismissal()
 
-            let expected = AIProcessingBackendChoice.localAI(modelID: model.id)
-            precondition(appState.postProcessingBackendChoice == expected)
-            precondition(appState.contextBackendChoice == expected)
+            let expectedPostProcessingChoice = AIProcessingBackendChoice.localAI(
+                modelID: model.id
+            )
+            precondition(appState.postProcessingBackendChoice == expectedPostProcessingChoice)
+            precondition(
+                appState.contextBackendChoice
+                    == .cloud(modelID: AppState.defaultContextModel)
+            )
             precondition(!appState.disablePostProcessing)
-            precondition(!appState.disableContextCapture)
+            precondition(appState.disableContextCapture)
         }
     }
 
@@ -473,7 +721,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         await MainActor.run {
             let originalPostChoice = appState.postProcessingBackendChoice
@@ -496,7 +744,7 @@ struct AppStateAIProcessingBackendTests {
             precondition(appState.contextBackendChoice == originalContextChoice)
             precondition(appState.meetingSummaryBackendChoice == originalSummaryChoice)
             precondition(appState.pendingLocalAIModelID(for: .postProcessing) == model.id)
-            precondition(appState.pendingLocalAIModelID(for: .context) == model.id)
+            precondition(appState.pendingLocalAIModelID(for: .context) == nil)
             precondition(appState.pendingLocalAIModelID(for: .meetingSummary) == model.id)
             precondition(appState.selectedOrPendingLocalAIModel(for: .postProcessing) == model)
             precondition(!appState.localAIInstallState(for: model).isInstalling)
@@ -518,64 +766,17 @@ struct AppStateAIProcessingBackendTests {
         await MainActor.run {
             let expected = AIProcessingBackendChoice.localAI(modelID: model.id)
             precondition(appState.postProcessingBackendChoice == expected)
-            precondition(appState.contextBackendChoice == expected)
+            precondition(
+                appState.contextBackendChoice
+                    == .cloud(modelID: AppState.defaultContextModel)
+            )
             precondition(appState.meetingSummaryBackendChoice == expected)
+            precondition(appState.disableContextCapture)
             precondition(appState.pendingLocalAIModelID(for: .postProcessing) == nil)
             precondition(appState.pendingLocalAIModelID(for: .context) == nil)
             precondition(appState.pendingLocalAIModelID(for: .meetingSummary) == nil)
             precondition(appState.localAIInstallState(for: model).status == .ready)
             precondition(appState.localAIInstallState(for: model).issue == nil)
-        }
-    }
-
-    private static func testDifferentModelsStartIndependentDownloads() async {
-        resetAIProcessingDefaults()
-        let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
-        let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIPartialModelDelete = { _ in }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
-
-        let appState = await makeRefreshedAppState()
-        await MainActor.run {
-            appState.selectAIProcessingBackendChoice(
-                .localAI(modelID: LocalAIModelCatalog.quality.id),
-                for: .postProcessing
-            )
-            appState.selectAIProcessingBackendChoice(
-                .localAI(modelID: LocalAIModelCatalog.fast.id),
-                for: .context
-            )
-            precondition(
-                appState.pendingLocalAIModelID(for: .postProcessing)
-                    == LocalAIModelCatalog.quality.id
-            )
-            precondition(
-                appState.pendingLocalAIModelID(for: .context)
-                    == LocalAIModelCatalog.fast.id
-            )
-        }
-
-        precondition(installHarness.starts(for: LocalAIModelCatalog.quality) == 0)
-        precondition(installHarness.starts(for: LocalAIModelCatalog.fast) == 0)
-        await MainActor.run {
-            appState.installLocalAIModel(
-                LocalAIModelCatalog.quality,
-                autoSelectFor: .postProcessing
-            )
-            appState.installLocalAIModel(
-                LocalAIModelCatalog.fast,
-                autoSelectFor: .context
-            )
-        }
-        precondition(installHarness.starts(for: LocalAIModelCatalog.quality) == 1)
-        precondition(installHarness.starts(for: LocalAIModelCatalog.fast) == 1)
-        await MainActor.run {
-            appState.cancelLocalAIInstall(LocalAIModelCatalog.quality)
-            appState.cancelLocalAIInstall(LocalAIModelCatalog.fast)
         }
     }
 
@@ -645,7 +846,7 @@ struct AppStateAIProcessingBackendTests {
         await appState.waitForNativeWhisperInstallToQuiesce()
     }
 
-    private static func testLocalAIProgressCoalescesPerModelAndCompletionWins() async {
+    private static func testLocalAIProgressCoalescesAndCompletionWins() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
@@ -657,75 +858,47 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProgressSchedule = scheduler.schedule
         defer { seams.restore() }
 
-        let first = LocalAIModelCatalog.fast
-        let second = LocalAIModelCatalog.quality
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         await MainActor.run {
-            appState.installLocalAIModel(first)
-            appState.installLocalAIModel(second)
+            appState.installLocalAIModel(model)
         }
 
         for value in 1...10_000 {
             installHarness.sendProgress(
-                model: first,
+                model: model,
                 progress: LocalAIDownloadProgress(
                     downloadedBytes: Int64(value),
                     totalBytes: 10_000
                 )
             )
-            installHarness.sendProgress(
-                model: second,
-                progress: LocalAIDownloadProgress(
-                    downloadedBytes: Int64(value * 2),
-                    totalBytes: 20_000
-                )
-            )
         }
 
-        precondition(scheduler.scheduledCount == 2)
+        precondition(scheduler.scheduledCount == 1)
         await MainActor.run { scheduler.runAll() }
         let coalescedBytes = await MainActor.run {
-            (
-                appState.localAIInstallState(for: first).progress.downloadedBytes,
-                appState.localAIInstallState(for: second).progress.downloadedBytes
-            )
+            appState.localAIInstallState(for: model).progress.downloadedBytes
         }
-        precondition(coalescedBytes.0 == 10_000)
-        precondition(coalescedBytes.1 == 20_000)
+        precondition(coalescedBytes == 10_000)
 
         installHarness.sendProgress(
-            model: first,
+            model: model,
             progress: LocalAIDownloadProgress(
                 downloadedBytes: 10_001,
                 totalBytes: 20_000
             )
         )
-        installHarness.sendProgress(
-            model: second,
-            progress: LocalAIDownloadProgress(
-                downloadedBytes: 20_001,
-                totalBytes: 30_000
-            )
-        )
-        precondition(scheduler.scheduledCount == 2)
-        statusHarness.set(.ready, for: first)
-        statusHarness.set(.ready, for: second)
-        installHarness.complete(model: first, with: .success(()))
-        installHarness.complete(model: second, with: .success(()))
+        precondition(scheduler.scheduledCount == 1)
+        statusHarness.set(.ready, for: model)
+        installHarness.complete(model: model, with: .success(()))
         await appState.waitForLocalAIInstallsToQuiesce()
         await MainActor.run { scheduler.runAll() }
-        let finalStates = await MainActor.run {
-            (
-                appState.localAIInstallState(for: first),
-                appState.localAIInstallState(for: second)
-            )
+        let finalState = await MainActor.run {
+            appState.localAIInstallState(for: model)
         }
-        precondition(finalStates.0.status == .ready)
-        precondition(finalStates.1.status == .ready)
-        precondition(!finalStates.0.isInstalling)
-        precondition(!finalStates.1.isInstalling)
-        precondition(finalStates.0.progress.downloadedBytes == 10_000)
-        precondition(finalStates.1.progress.downloadedBytes == 20_000)
+        precondition(finalState.status == .ready)
+        precondition(!finalState.isInstalling)
+        precondition(finalState.progress.downloadedBytes == 10_000)
     }
 
     private static func testChoosingCloudClearsOnlyOnePendingSelection() async {
@@ -738,7 +911,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         await MainActor.run {
             appState.selectAIProcessingBackendChoice(
@@ -747,16 +920,16 @@ struct AppStateAIProcessingBackendTests {
             )
             appState.selectAIProcessingBackendChoice(
                 .localAI(modelID: model.id),
-                for: .context
+                for: .meetingSummary
             )
-            appState.installLocalAIModel(model, autoSelectFor: .context)
+            appState.installLocalAIModel(model, autoSelectFor: .meetingSummary)
             appState.selectAIProcessingBackendChoice(
                 .cloud(modelID: "cloud/override"),
                 for: .postProcessing
             )
 
             precondition(appState.pendingLocalAIModelID(for: .postProcessing) == nil)
-            precondition(appState.pendingLocalAIModelID(for: .context) == model.id)
+            precondition(appState.pendingLocalAIModelID(for: .meetingSummary) == model.id)
             precondition(
                 appState.postProcessingBackendChoice
                     == .cloud(modelID: "cloud/override")
@@ -775,7 +948,7 @@ struct AppStateAIProcessingBackendTests {
                     == .cloud(modelID: "cloud/override")
             )
             precondition(
-                appState.contextBackendChoice
+                appState.meetingSummaryBackendChoice
                     == .localAI(modelID: model.id)
             )
         }
@@ -791,7 +964,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         let originalPostChoice = await MainActor.run {
             let originalPostChoice = appState.postProcessingBackendChoice
@@ -801,12 +974,12 @@ struct AppStateAIProcessingBackendTests {
             )
             appState.selectAIProcessingBackendChoice(
                 .localAI(modelID: model.id),
-                for: .context
+                for: .meetingSummary
             )
-            appState.installLocalAIModel(model, autoSelectFor: .context)
+            appState.installLocalAIModel(model, autoSelectFor: .meetingSummary)
             appState.cancelPendingLocalAISelection(for: .postProcessing)
             precondition(appState.pendingLocalAIModelID(for: .postProcessing) == nil)
-            precondition(appState.pendingLocalAIModelID(for: .context) == model.id)
+            precondition(appState.pendingLocalAIModelID(for: .meetingSummary) == model.id)
             precondition(appState.localAIInstallState(for: model).isInstalling)
             return originalPostChoice
         }
@@ -819,7 +992,7 @@ struct AppStateAIProcessingBackendTests {
         await MainActor.run {
             precondition(appState.postProcessingBackendChoice == originalPostChoice)
             precondition(
-                appState.contextBackendChoice
+                appState.meetingSummaryBackendChoice
                     == .localAI(modelID: model.id)
             )
         }
@@ -835,7 +1008,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         await MainActor.run {
             appState.selectAIProcessingBackendChoice(
@@ -852,23 +1025,23 @@ struct AppStateAIProcessingBackendTests {
 
             appState.selectAIProcessingBackendChoice(
                 .localAI(modelID: model.id),
-                for: .context
+                for: .meetingSummary
             )
             precondition(publications > 0)
             publications = 0
 
-            appState.cancelPendingLocalAISelection(for: .context)
+            appState.cancelPendingLocalAISelection(for: .meetingSummary)
             precondition(publications > 0)
             publications = 0
 
             appState.selectAIProcessingBackendChoice(
                 .localAI(modelID: model.id),
-                for: .context
+                for: .meetingSummary
             )
             publications = 0
             appState.selectAIProcessingBackendChoice(
                 .cloud(modelID: "cloud/pending-clear"),
-                for: .context
+                for: .meetingSummary
             )
             precondition(publications > 0)
             withExtendedLifetime(cancellable) {}
@@ -892,7 +1065,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         let originalChoices = await MainActor.run { () -> (AIProcessingBackendChoice, AIProcessingBackendChoice) in
             let choices = (
@@ -984,6 +1157,7 @@ struct AppStateAIProcessingBackendTests {
             idleTimeout: 0,
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready },
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true }
@@ -995,7 +1169,7 @@ struct AppStateAIProcessingBackendTests {
         }
         defer { seams.restore() }
 
-        _ = try await manager.withBaseURL(for: LocalAIModelCatalog.fast) { $0 }
+        _ = try await manager.withBaseURL(for: LocalAIModelCatalog.quality) { $0 }
         precondition(process.isRunning)
         let appState = await makeRefreshedAppState()
 
@@ -1017,7 +1191,7 @@ struct AppStateAIProcessingBackendTests {
         precondition(sleepHarness.callCount == 2)
     }
 
-    private static func testLocalAIInstallQuiescenceWaitsForEveryWorker() async {
+    private static func testLocalAIInstallQuiescenceWaitsForActiveWorker() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
@@ -1029,10 +1203,10 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         await MainActor.run {
-            appState.installLocalAIModel(LocalAIModelCatalog.fast)
-            appState.installLocalAIModel(LocalAIModelCatalog.quality)
+            appState.installLocalAIModel(model)
         }
         let waiter = Task {
             await appState.waitForLocalAIInstallsToQuiesce()
@@ -1042,31 +1216,11 @@ struct AppStateAIProcessingBackendTests {
         precondition(!completion.value)
 
         await MainActor.run {
-            appState.cancelLocalAIInstall(LocalAIModelCatalog.fast)
-            appState.cancelLocalAIInstall(LocalAIModelCatalog.quality)
+            appState.cancelLocalAIInstall(model)
         }
-        precondition(
-            installHarness.task(for: LocalAIModelCatalog.fast, startIndex: 0)?.isCancelled
-                == true
-        )
-        precondition(
-            installHarness.task(for: LocalAIModelCatalog.quality, startIndex: 0)?.isCancelled
-                == true
-        )
+        precondition(installHarness.task(for: model, startIndex: 0)?.isCancelled == true)
 
-        installHarness.complete(
-            model: LocalAIModelCatalog.fast,
-            with: .failure(.cancelled)
-        )
-        await waitUntil {
-            !appState.localAIInstallState(for: LocalAIModelCatalog.fast).isInstalling
-        }
-        precondition(!completion.value)
-
-        installHarness.complete(
-            model: LocalAIModelCatalog.quality,
-            with: .failure(.cancelled)
-        )
+        installHarness.complete(model: model, with: .failure(.cancelled))
         await waiter.value
         precondition(completion.value)
     }
@@ -1081,6 +1235,7 @@ struct AppStateAIProcessingBackendTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready },
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true }
@@ -1100,7 +1255,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.applicationTerminationReply = replyHarness.reply
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         _ = try await manager.withBaseURL(for: LocalAIModelCatalog.quality) { $0 }
         await MainActor.run {
@@ -1150,6 +1305,7 @@ struct AppStateAIProcessingBackendTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready },
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true }
@@ -1171,7 +1327,7 @@ struct AppStateAIProcessingBackendTests {
         defer { seams.restore() }
 
         let appState = await makeRefreshedAppState()
-        _ = try await manager.withBaseURL(for: LocalAIModelCatalog.fast) { $0 }
+        _ = try await manager.withBaseURL(for: LocalAIModelCatalog.quality) { $0 }
         await MainActor.run {
             appState.installNativeWhisperModel(autoSelectWhenReady: true)
         }
@@ -1207,6 +1363,7 @@ struct AppStateAIProcessingBackendTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (process, port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready },
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true }
@@ -1236,7 +1393,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.applicationTerminationReply = replyHarness.reply
         defer { seams.restore() }
 
-        let localModel = LocalAIModelCatalog.fast
+        let localModel = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         _ = try await manager.withBaseURL(for: LocalAIModelCatalog.quality) { $0 }
         await MainActor.run {
@@ -1299,7 +1456,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.applicationTerminationReply = replyHarness.reply
         defer { seams.restore() }
 
-        let activeModel = LocalAIModelCatalog.fast
+        let activeModel = LocalAIModelCatalog.quality
         let blockedModel = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         await MainActor.run {
@@ -1315,7 +1472,7 @@ struct AppStateAIProcessingBackendTests {
         }
 
         precondition(nativeInstallHarness.startCount == 0)
-        precondition(localInstallHarness.starts(for: blockedModel) == 0)
+        precondition(localInstallHarness.starts(for: blockedModel) == 1)
         await MainActor.run {
             precondition(appState.pendingLocalAIModelID(for: .postProcessing) == nil)
             precondition(!appState.willAutoSelectNativeWhisperWhenReady)
@@ -1339,7 +1496,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.applicationTerminationReply = replyHarness.reply
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         await MainActor.run {
             appState.installLocalAIModel(model)
@@ -1363,7 +1520,7 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .partial(
             downloadedBytes: 10,
-            expectedBytes: LocalAIModelCatalog.fast.approximateBytes
+            expectedBytes: LocalAIModelCatalog.quality.approximateBytes
         ))
         let installHarness = LocalAIInstallHarness()
         let seams = LocalAISeamSnapshot()
@@ -1375,7 +1532,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         await MainActor.run {
             appState.installLocalAIModel(model)
@@ -1448,7 +1605,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = { availability.value }
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         let originalChoice = await MainActor.run { () -> AIProcessingBackendChoice in
             let originalChoice = appState.contextBackendChoice
@@ -1486,7 +1643,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         await MainActor.run {
             appState.selectAIProcessingBackendChoice(
@@ -1521,7 +1678,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = unsupportedLocalAIAvailability
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         await MainActor.run {
             let originalChoice = appState.postProcessingBackendChoice
@@ -1533,7 +1690,8 @@ struct AppStateAIProcessingBackendTests {
             precondition(appState.pendingLocalAIModelID(for: .postProcessing) == nil)
             precondition(
                 !appState.isAIProcessingChoiceAvailable(
-                    .localAI(modelID: model.id)
+                    .localAI(modelID: model.id),
+                    for: .postProcessing
                 )
             )
             precondition(
@@ -1542,6 +1700,43 @@ struct AppStateAIProcessingBackendTests {
             )
             appState.postProcessingBackendChoice = .localAI(modelID: model.id)
             precondition(!appState.isAIProcessingBackendReady(for: .postProcessing))
+        }
+        precondition(installHarness.starts(for: model) == 0)
+    }
+
+    private static func testLowMemoryPreservesStoredLocalChoiceWithoutStartingIt() async {
+        resetAIProcessingDefaults()
+        let statusHarness = LocalAIStatusHarness(defaultStatus: .ready)
+        let installHarness = LocalAIInstallHarness()
+        let seams = LocalAISeamSnapshot()
+        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
+        AppState.localAIInstallStarter = installHarness.start
+        AppState.localAIProcessingAvailabilityProvider = lowMemoryLocalAIAvailability
+        defer { seams.restore() }
+
+        let model = LocalAIModelCatalog.quality
+        let storedChoice = AIProcessingBackendChoice.localAI(modelID: model.id)
+        storeChoice(storedChoice, forKey: "post_processing_backend_choice")
+        UserDefaults.standard.set(false, forKey: "disable_post_processing")
+        let appState = await makeRefreshedAppState()
+
+        await MainActor.run {
+            precondition(appState.postProcessingBackendChoice == storedChoice)
+            precondition(appState.disablePostProcessing)
+            precondition(!appState.isAIProcessingChoiceAvailable(storedChoice, for: .postProcessing))
+            precondition(!appState.isAIProcessingChoiceReady(storedChoice, for: .postProcessing))
+            precondition(
+                appState.aiProcessingChoiceDisplays(for: .postProcessing).contains {
+                    $0.choice == storedChoice && !$0.isAvailable
+                }
+            )
+
+            appState.selectAIProcessingBackendChoice(storedChoice, for: .postProcessing)
+            appState.installLocalAIModel(model, autoSelectFor: .postProcessing)
+
+            precondition(appState.postProcessingBackendChoice == storedChoice)
+            precondition(appState.pendingLocalAIModelID(for: .postProcessing) == nil)
+            precondition(!appState.localAIInstallState(for: model).isInstalling)
         }
         precondition(installHarness.starts(for: model) == 0)
     }
@@ -1560,7 +1755,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
-        let canonical = LocalAIModelCatalog.fast
+        let canonical = LocalAIModelCatalog.quality
         let forged = LocalAIModel(
             id: canonical.id,
             displayName: "Forged",
@@ -1572,7 +1767,8 @@ struct AppStateAIProcessingBackendTests {
         await MainActor.run {
             precondition(
                 !appState.isAIProcessingChoiceAvailable(
-                    .localAI(modelID: "unknown-local-model")
+                    .localAI(modelID: "unknown-local-model"),
+                    for: .postProcessing
                 )
             )
             appState.installLocalAIModel(forged, autoSelectFor: .postProcessing)
@@ -1613,14 +1809,43 @@ struct AppStateAIProcessingBackendTests {
             precondition(quality?.unavailableReason == nil)
             precondition(quality?.isRecommended == true)
 
+            let contextDisplays = appState.aiProcessingChoiceDisplays(for: .context)
             precondition(
-                appState.isAIProcessingChoiceAvailable(
-                    .localAI(modelID: LocalAIModelCatalog.fast.id)
+                !contextDisplays.contains {
+                    $0.choice == .localAI(modelID: LocalAIModelCatalog.quality.id)
+                }
+            )
+            let meetingSummaryDisplays = appState.aiProcessingChoiceDisplays(
+                for: .meetingSummary
+            )
+            precondition(
+                meetingSummaryDisplays.contains {
+                    $0.choice == .localAI(modelID: LocalAIModelCatalog.quality.id)
+                }
+            )
+            precondition(
+                !appState.isAIProcessingChoiceAvailable(
+                    .localAI(modelID: LocalAIModelCatalog.quality.id),
+                    for: .context
                 )
             )
             precondition(
                 appState.isAIProcessingChoiceAvailable(
-                    .cloud(modelID: AppState.defaultPostProcessingModel)
+                    .localAI(modelID: LocalAIModelCatalog.quality.id),
+                    for: .meetingSummary
+                )
+            )
+
+            precondition(
+                appState.isAIProcessingChoiceAvailable(
+                    .localAI(modelID: LocalAIModelCatalog.quality.id),
+                    for: .postProcessing
+                )
+            )
+            precondition(
+                appState.isAIProcessingChoiceAvailable(
+                    .cloud(modelID: AppState.defaultPostProcessingModel),
+                    for: .postProcessing
                 )
             )
             precondition(
@@ -1629,7 +1854,8 @@ struct AppStateAIProcessingBackendTests {
             appState.apiKey = "test-key"
             precondition(
                 appState.isAIProcessingChoiceAvailable(
-                    .cloud(modelID: AppState.defaultPostProcessingModel)
+                    .cloud(modelID: AppState.defaultPostProcessingModel),
+                    for: .postProcessing
                 )
             )
             precondition(
@@ -1640,7 +1866,7 @@ struct AppStateAIProcessingBackendTests {
 
     private static func testManagedLocalAIModelResolutionReconcilesRetainedLifecycle() {
         let activeModel = LocalAIModelCatalog.quality
-        let attemptedModel = LocalAIModelCatalog.fast
+        let attemptedModel = activeModel
         let cloudChoice = AIProcessingBackendChoice.cloud(
             modelID: AppState.defaultPostProcessingModel
         )
@@ -1717,13 +1943,13 @@ struct AppStateAIProcessingBackendTests {
             cleanRetainedClearsForCloud.reconciledRetainedModelID == nil
         )
 
-        let activeLocalReplacesCleanRetained = resolve(
-            retainedModelID: attemptedModel.id,
+        let activeLocalReplacesUnknownRetained = resolve(
+            retainedModelID: "unknown-local-model",
             currentChoice: .localAI(modelID: activeModel.id)
         )
-        precondition(activeLocalReplacesCleanRetained.model?.id == activeModel.id)
+        precondition(activeLocalReplacesUnknownRetained.model?.id == activeModel.id)
         precondition(
-            activeLocalReplacesCleanRetained.reconciledRetainedModelID == nil
+            activeLocalReplacesUnknownRetained.reconciledRetainedModelID == nil
         )
 
         let selectedRetainedStaysManaged = resolve(
@@ -1753,13 +1979,14 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let appState = await makeRefreshedAppState()
         await MainActor.run {
+            appState.contextBackendChoice = .cloud(modelID: "custom/context")
             var publications = 0
             let cancellable = appState.$contextBackendChoice
                 .dropFirst()
                 .sink { _ in publications += 1 }
 
             appState.selectAIProcessingBackendChoice(
-                .cloud(modelID: "cloud/single-rebuild"),
+                .cloud(modelID: "qwen/qwen3.6-27b"),
                 for: .context
             )
 
@@ -1858,6 +2085,7 @@ struct AppStateAIProcessingBackendTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (TestLocalAIServerProcess(), port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready }
         )
         AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
@@ -1873,7 +2101,7 @@ struct AppStateAIProcessingBackendTests {
         AppState.localAIServerManagerFactory = { manager }
         defer { seams.restore() }
 
-        let model = LocalAIModelCatalog.fast
+        let model = LocalAIModelCatalog.quality
         let appState = await makeRefreshedAppState()
         let originalChoices = await MainActor.run { () -> (AIProcessingBackendChoice, AIProcessingBackendChoice) in
             let choices = (
@@ -1935,6 +2163,7 @@ struct AppStateAIProcessingBackendTests {
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (TestLocalAIServerProcess(), port) },
             pollHealth: { _ in true },
+            readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready }
         )
         AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
@@ -1966,132 +2195,67 @@ struct AppStateAIProcessingBackendTests {
         }
     }
 
-    private static func testDeleteFallsBackToInstalledLocalThenCloudThenDisabled() async throws {
-        try await verifyDeletionFallback(
-            fastStatus: .ready,
-            apiKey: "",
-            expectedPostChoice: .localAI(modelID: LocalAIModelCatalog.fast.id),
-            expectedContextChoice: .localAI(modelID: LocalAIModelCatalog.fast.id),
-            expectedPostDisabled: false,
-            expectedContextDisabled: false,
-            verifyManagerStopsBeforeDelete: true
-        )
-        try await verifyDeletionFallback(
-            fastStatus: .notInstalled,
-            apiKey: "test-key",
-            expectedPostChoice: .cloud(modelID: "remembered/post"),
-            expectedContextChoice: .cloud(modelID: "remembered/context"),
-            expectedPostDisabled: false,
-            expectedContextDisabled: false,
-            verifyManagerStopsBeforeDelete: false
-        )
-        try await verifyDeletionFallback(
-            fastStatus: .notInstalled,
-            apiKey: "",
-            expectedPostChoice: .cloud(modelID: "remembered/post"),
-            expectedContextChoice: .cloud(modelID: "remembered/context"),
-            expectedPostDisabled: false,
-            expectedContextDisabled: false,
-            verifyManagerStopsBeforeDelete: false
+    private static func testDeletingOnlyLocalModelDoesNotSubstituteCloud() async throws {
+        try await verifyDeletingOnlyLocalModelDisablesRetainedChoices(
+            apiKey: "configured-cloud-key"
         )
     }
 
-    private static func verifyDeletionFallback(
-        fastStatus: LocalAIInstallStatus,
-        apiKey: String,
-        expectedPostChoice: AIProcessingBackendChoice,
-        expectedContextChoice: AIProcessingBackendChoice,
-        expectedPostDisabled: Bool,
-        expectedContextDisabled: Bool,
-        verifyManagerStopsBeforeDelete: Bool
+    private static func verifyDeletingOnlyLocalModelDisablesRetainedChoices(
+        apiKey: String
     ) async throws {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(
-            statuses: [
-                LocalAIModelCatalog.quality.id: .ready,
-                LocalAIModelCatalog.fast.id: fastStatus
-            ],
+            statuses: [LocalAIModelCatalog.quality.id: .ready],
             defaultStatus: .notInstalled
-        )
-        let process = TestLocalAIServerProcess()
-        let lifecycle = LockedBox<LocalAIServerManager.LifecycleSnapshot?>(nil)
-        let manager = LocalAIServerManager(
-            launchProcess: { _, _, port, _ in (process, port) },
-            pollHealth: { _ in true },
-            validateModel: { _ in .ready },
-            terminationGracePeriod: 0,
-            waitForProcessExit: { _, _ in true },
-            observeLifecycle: { lifecycle.set($0) }
         )
         let deletionHarness = LocalAIDeletionHarness()
         let seams = LocalAISeamSnapshot()
         AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        AppState.localAIServerManagerFactory = { manager }
         AppState.localAIModelDelete = { model in
-            deletionHarness.record(
-                modelID: model.id,
-                managerWasStopped: lifecycle.value?.phase == .idle
-            )
+            deletionHarness.record(modelID: model.id, managerWasStopped: true)
             statusHarness.set(.notInstalled, for: model)
         }
         defer { seams.restore() }
 
         let appState = await makeRefreshedAppState()
+        let retainedChoice = AIProcessingBackendChoice.localAI(
+            modelID: LocalAIModelCatalog.quality.id
+        )
         await MainActor.run {
-            appState.postProcessingModel = "remembered/post"
-            appState.contextModel = "remembered/context"
-            appState.postProcessingBackendChoice = .localAI(
-                modelID: LocalAIModelCatalog.quality.id
-            )
-            appState.contextBackendChoice = .localAI(
-                modelID: LocalAIModelCatalog.quality.id
-            )
+            appState.postProcessingBackendChoice = retainedChoice
+            appState.meetingSummaryBackendChoice = retainedChoice
             appState.disablePostProcessing = false
-            appState.disableContextCapture = false
+            appState.disableMeetingSummary = false
             appState.apiKey = apiKey
-        }
-
-        if verifyManagerStopsBeforeDelete {
-            _ = try await manager.withBaseURL(for: LocalAIModelCatalog.quality) { url in
-                url
-            }
-            precondition(lifecycle.value?.phase == .running)
-        }
-
-        await MainActor.run {
             appState.deleteLocalAIModel(LocalAIModelCatalog.quality)
         }
         await waitUntil { deletionHarness.callCount == 1 }
         await waitUntil {
-            appState.postProcessingBackendChoice == expectedPostChoice
-                && appState.contextBackendChoice == expectedContextChoice
-                && appState.disablePostProcessing == expectedPostDisabled
-                && appState.disableContextCapture == expectedContextDisabled
+            appState.postProcessingBackendChoice == retainedChoice
+                && appState.meetingSummaryBackendChoice == retainedChoice
+                && appState.disablePostProcessing
+                && appState.disableMeetingSummary
         }
+
         await MainActor.run {
             precondition(
                 appState.localAIInstallState(for: LocalAIModelCatalog.quality).status
                     == .notInstalled
             )
-            precondition(
-                appState.localAIInstallState(for: LocalAIModelCatalog.quality).issue
-                    == nil
-            )
+            precondition(appState.postProcessingBackendChoice == retainedChoice)
+            precondition(appState.meetingSummaryBackendChoice == retainedChoice)
+            precondition(appState.disablePostProcessing)
+            precondition(appState.disableMeetingSummary)
         }
         precondition(
-            storedChoice(forKey: "post_processing_backend_choice")
-                == expectedPostChoice
+            storedChoice(forKey: "post_processing_backend_choice") == retainedChoice
         )
         precondition(
-            storedChoice(forKey: "context_backend_choice")
-                == expectedContextChoice
+            storedChoice(forKey: "meeting_summary_backend_choice") == retainedChoice
         )
         precondition(deletionHarness.deletedModelIDs == [LocalAIModelCatalog.quality.id])
-        if verifyManagerStopsBeforeDelete {
-            precondition(deletionHarness.managerWasStoppedValues == [true])
-            precondition(!process.isRunning)
-        }
     }
 
     private static func makeRefreshedAppState() async -> AppState {
@@ -2123,7 +2287,7 @@ struct AppStateAIProcessingBackendTests {
             LocalAIProcessingAvailability(
                 isAppleSilicon: true,
                 runnerIsExecutable: true,
-                physicalMemory: LocalAIProcessingAvailability.qualityMemoryThreshold
+                physicalMemory: 16 * 1024 * 1024 * 1024
             )
         }
     }
@@ -2132,8 +2296,17 @@ struct AppStateAIProcessingBackendTests {
         {
             LocalAIProcessingAvailability(
                 isAppleSilicon: false,
-                runnerIsExecutable: false,
-                physicalMemory: LocalAIProcessingAvailability.qualityMemoryThreshold
+                runnerIsExecutable: false
+            )
+        }
+    }
+
+    private static var lowMemoryLocalAIAvailability: () -> LocalAIProcessingAvailability {
+        {
+            LocalAIProcessingAvailability(
+                isAppleSilicon: true,
+                runnerIsExecutable: true,
+                physicalMemory: 8 * 1024 * 1024 * 1024
             )
         }
     }
@@ -2172,8 +2345,13 @@ struct AppStateAIProcessingBackendTests {
             from: "private func startContextCapture()",
             to: "private func fallbackContextAtStop()"
         )
+        let compatibilityGuard = requiredRange(
+            of: "guard isAIProcessingChoiceCompatible(contextBackendChoice, for: .context) else",
+            in: body
+        )
         let snapshot = requiredRange(of: "let contextService = contextService", in: body)
         let task = requiredRange(of: "contextCaptureTask = Task", in: body)
+        assert(compatibilityGuard.lowerBound < snapshot.lowerBound)
         assert(snapshot.lowerBound < task.lowerBound)
         let taskBody = String(body[task.lowerBound...])
         assert(taskBody.contains("let context = await contextService.collectContext()"))

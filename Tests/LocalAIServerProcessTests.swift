@@ -7,6 +7,8 @@ struct LocalAIServerProcessTests {
         try testReservedPortIsWithinEphemeralRange()
         try testReservedPortCanBeRebound()
         try testRealProcessBuildsExpectedArguments()
+        try testVisionProcessAddsValidatedProjectorArgument()
+        try testRealProcessReturnsBoundedRedactedDiagnostics()
         try testLateTerminationHandlerRunsExactlyOnceAfterFakeExits()
         try testRealProcessInitThrowsWhenRunnerMissing()
         print("LocalAIServerProcessTests passed")
@@ -52,6 +54,7 @@ struct LocalAIServerProcessTests {
 
         let process = try RealLocalAIServerProcess(
             runnerURL: runnerURL,
+            model: textModel(),
             modelURL: modelURL,
             port: 51_234,
             contextSize: 4096
@@ -66,7 +69,77 @@ struct LocalAIServerProcessTests {
         assert(arguments[arguments.firstIndex(of: "--model")! + 1] == modelURL.path)
         assert(arguments.contains("--ctx-size"))
         assert(arguments[arguments.firstIndex(of: "--ctx-size")! + 1] == "4096")
+        assert(!arguments.contains("--mmproj"))
         try waitForProcessExit(process)
+    }
+
+    private static func testVisionProcessAddsValidatedProjectorArgument() throws {
+        let runnerDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: runnerDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: runnerDirectory) }
+        let runnerURL = runnerDirectory.appendingPathComponent("fake-llama-server")
+        try "#!/bin/sh\nexit 0\n".write(to: runnerURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: runnerURL.path)
+        let modelURL = runnerDirectory.appendingPathComponent("model.gguf")
+        let projectorURL = runnerDirectory.appendingPathComponent("projector.gguf")
+        FileManager.default.createFile(atPath: modelURL.path, contents: Data([1]))
+        FileManager.default.createFile(atPath: projectorURL.path, contents: Data([1]))
+        let model = visionModel()
+
+        let process = try RealLocalAIServerProcess(
+            runnerURL: runnerURL,
+            model: model,
+            modelURL: modelURL,
+            port: 51_238,
+            contextSize: 4096
+        )
+        let arguments = process.launchArguments
+
+        assert(arguments[arguments.firstIndex(of: "--mmproj")! + 1] == projectorURL.path)
+        try waitForProcessExit(process)
+    }
+
+    private static func testRealProcessReturnsBoundedRedactedDiagnostics() throws {
+        let runnerDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: runnerDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: runnerDirectory) }
+        let runnerURL = runnerDirectory.appendingPathComponent("fake-llama-server")
+        try """
+        #!/bin/sh
+        i=0
+        while [ "$i" -lt 70 ]; do
+          printf 'diagnostic %s\\n' "$i"
+          i=$((i + 1))
+        done
+        printf 'loading /Users/private/model.gguf\\n' >&2
+        printf 'Authorization: Bearer secret-token\\n' >&2
+        printf '{\"transcript\":\"private source\"}\\n' >&2
+        printf 'data:image/png;base64,private-pixels\\n' >&2
+        printf '%0513d\\n' 0 >&2
+        """.write(to: runnerURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: runnerURL.path)
+        let modelURL = runnerDirectory.appendingPathComponent("model.gguf")
+        FileManager.default.createFile(atPath: modelURL.path, contents: Data([1]))
+
+        let process = try RealLocalAIServerProcess(
+            runnerURL: runnerURL,
+            model: textModel(),
+            modelURL: modelURL,
+            port: 51_237,
+            contextSize: 4096
+        )
+        try waitForProcessExit(process)
+        let diagnostics = process.recentDiagnostics()
+        let joined = diagnostics.trailingLines.joined(separator: "\\n")
+
+        assert(diagnostics.category == .serverOutput)
+        assert(diagnostics.trailingLines.count <= 64)
+        assert(diagnostics.trailingLines.reduce(0) { $0 + $1.utf8.count + 1 } <= 16 * 1024)
+        assert(!joined.contains("/Users/private"))
+        assert(!joined.contains("secret-token"))
+        assert(!joined.contains("private source"))
+        assert(!joined.contains("private-pixels"))
+        assert(!joined.contains(String(repeating: "0", count: 513)))
     }
 
     private static func testLateTerminationHandlerRunsExactlyOnceAfterFakeExits() throws {
@@ -79,7 +152,13 @@ struct LocalAIServerProcessTests {
         let modelURL = runnerDirectory.appendingPathComponent("model.gguf")
         FileManager.default.createFile(atPath: modelURL.path, contents: Data([1]))
 
-        let process = try RealLocalAIServerProcess(runnerURL: runnerURL, modelURL: modelURL, port: 51_236, contextSize: 4096)
+        let process = try RealLocalAIServerProcess(
+            runnerURL: runnerURL,
+            model: textModel(),
+            modelURL: modelURL,
+            port: 51_236,
+            contextSize: 4096
+        )
         try waitForProcessExit(process)
 
         let callback = DispatchSemaphore(value: 0)
@@ -101,6 +180,37 @@ struct LocalAIServerProcessTests {
         assert(finalCallbackCount == 1)
     }
 
+    private static func textModel() -> LocalAIModel {
+        LocalAIModel(
+            id: "text-model",
+            displayName: "Text model",
+            description: "Test model",
+            artifacts: [artifact(named: "model.gguf")],
+            approximateResidentRAMBytes: 16,
+            runtime: .textChat
+        )
+    }
+
+    private static func visionModel() -> LocalAIModel {
+        LocalAIModel(
+            id: "vision-model",
+            displayName: "Vision model",
+            description: "Test model",
+            artifacts: [artifact(named: "model.gguf"), artifact(named: "projector.gguf")],
+            approximateResidentRAMBytes: 16,
+            runtime: .visionChat(projectorArtifactFileName: "projector.gguf")
+        )
+    }
+
+    private static func artifact(named fileName: String) -> LocalAIModelArtifact {
+        LocalAIModelArtifact(
+            downloadURL: URL(string: "https://example.com/\(fileName)")!,
+            expectedFileName: fileName,
+            approximateBytes: 1,
+            checksumSHA256: String(repeating: "0", count: 64)
+        )
+    }
+
     private static func waitForProcessExit(_ process: RealLocalAIServerProcess) throws {
         for _ in 0..<100 where process.isRunning {
             Thread.sleep(forTimeInterval: 0.01)
@@ -118,7 +228,13 @@ struct LocalAIServerProcessTests {
         defer { try? FileManager.default.removeItem(at: modelURL) }
 
         do {
-            _ = try RealLocalAIServerProcess(runnerURL: missingRunner, modelURL: modelURL, port: 51_235, contextSize: 4096)
+            _ = try RealLocalAIServerProcess(
+                runnerURL: missingRunner,
+                model: textModel(),
+                modelURL: modelURL,
+                port: 51_235,
+                contextSize: 4096
+            )
             assertionFailure("Expected init to throw for a missing runner")
         } catch is LocalAIServerProcessError {
             // expected
