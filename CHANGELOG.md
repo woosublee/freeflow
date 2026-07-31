@@ -8,6 +8,13 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.32] - 2026-07-31
+
+### Improved
+
+- Hardened Local AI processing with a 16 GiB model gate, completion-readiness retries, safer summary evidence validation, and durable recording-recovery storage checks.
+- Retired the unsupported Qwen2.5 1.5B Local AI option while preserving unavailable saved selections for explicit replacement.
+
 ## [0.1.31] - 2026-07-30
 
 ### Added
