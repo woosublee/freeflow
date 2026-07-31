@@ -462,7 +462,8 @@ final class PipelineHistoryStore {
             do {
                 let request = pipelineHistoryRequest()
                 request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: false)]
-                guard let entities = try? container.viewContext.fetch(request), entities.count > maxCount else { return }
+                let entities = try historyFetcher(container.viewContext, request)
+                guard entities.count > maxCount else { return }
                 let dropped = entities[maxCount...]
                 deletedAssets = dropped.map(Self.deletedAssets(from:))
                 beforeDeleting(deletedAssets)
@@ -550,23 +551,50 @@ final class PipelineHistoryStore {
 
     private func synchronizeAssetReferenceSnapshot() {
         guard canSynchronizeAssetReferenceSnapshot,
-              referenceTrust.permitsStartupReferenceCleanup else {
+              referenceTrust.permitsStartupReferenceCleanup,
+              let fileNames = loadAssetReferenceFileNames() else {
             return
         }
-        let history = loadAllHistory()
         guard referenceTrust.permitsStartupReferenceCleanup else {
             canSynchronizeAssetReferenceSnapshot = false
             return
         }
         do {
             try saveAssetReferenceSnapshot(
-                audioFileNames: Set(history.compactMap(\.audioFileName)),
-                transcriptFileNames: Set(history.compactMap(\.transcriptFileName))
+                audioFileNames: fileNames.audio,
+                transcriptFileNames: fileNames.transcripts
             )
         } catch {
             canSynchronizeAssetReferenceSnapshot = false
             referenceTrust = .unavailable
         }
+    }
+
+    private func loadAssetReferenceFileNames() -> (
+        audio: Set<String>,
+        transcripts: Set<String>
+    )? {
+        guard availability == .ready, isStoreLoaded else { return nil }
+        var audioFileNames = Set<String>()
+        var transcriptFileNames = Set<String>()
+        var fetchError: Error?
+        container.viewContext.performAndWait {
+            do {
+                let request = NSFetchRequest<NSDictionary>(entityName: "PipelineHistoryEntry")
+                request.resultType = .dictionaryResultType
+                request.propertiesToFetch = ["audioFileName", "transcriptFileName"]
+                let rows = try container.viewContext.fetch(request)
+                audioFileNames = Set(rows.compactMap { $0["audioFileName"] as? String })
+                transcriptFileNames = Set(rows.compactMap { $0["transcriptFileName"] as? String })
+            } catch {
+                fetchError = error
+            }
+        }
+        if let fetchError {
+            markHistoryUnavailable(fetchError)
+            return nil
+        }
+        return (audioFileNames, transcriptFileNames)
     }
 
     private func pipelineHistoryRequest() -> NSFetchRequest<PipelineHistoryEntry> {

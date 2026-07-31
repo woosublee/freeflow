@@ -231,8 +231,8 @@ struct QuillUserIssueUIContractTests {
         _ appState: String
     ) throws {
         try expect(
-            appState.contains("var isHistoryUnavailable: Bool"),
-            "AppState exposes an explicit history-unavailable state"
+            appState.contains("@Published private(set) var isHistoryUnavailable = false"),
+            "AppState publishes an explicit history-unavailable state"
         )
         try expect(
             appState.contains(".historyPersistenceUnavailable"),

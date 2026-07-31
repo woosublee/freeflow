@@ -37,9 +37,17 @@ struct AppStateHistoryProtectionSourceTests {
         )
 
         try expect(
-            !source.contains("@Published private(set) var historyPersistenceWarning")
-                && source.contains("var historyPersistenceWarning: QuillUserIssueRecord? {\n        isHistoryUnavailable"),
-            "history-unavailable warning stays current after a runtime read failure"
+            source.contains("@Published private(set) var isHistoryUnavailable = false")
+                && source.contains("private func synchronizeHistoryPersistenceState()")
+                && source.contains("let unavailable = pipelineHistoryStore.availability == .unavailable")
+                && source.contains("isHistoryUnavailable = unavailable")
+                && source.contains("historyPersistenceWarning = isHistoryUnavailable"),
+            "history-unavailable transitions publish protection UI state"
+        )
+        try expect(
+            source.contains("private func loadPipelineHistory() -> [PipelineHistoryItem]")
+                && source.contains("synchronizeHistoryPersistenceState()"),
+            "runtime history reads synchronize the published protection state"
         )
 
         let persistenceRange = try source.range(

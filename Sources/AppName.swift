@@ -5,9 +5,11 @@ enum AppName {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Quill"
 
     static var applicationSupportDirectory: URL {
-        FileManager.default.urls(
+        let baseURL = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first!.appendingPathComponent(displayName, isDirectory: true)
+        ).first ?? URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return baseURL.appendingPathComponent(displayName, isDirectory: true)
     }
 }

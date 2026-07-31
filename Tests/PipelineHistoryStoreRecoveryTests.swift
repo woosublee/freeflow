@@ -7,10 +7,13 @@ struct PipelineHistoryStoreRecoveryTests {
         try testFreshDurableStoreIsReady()
         try testAssetReferenceSnapshotDetectsHistoryLoss()
         try testMetadataOnlyUpdateDoesNotRewriteAssetSnapshot()
+        try testSnapshotSynchronizationFetchesOnlyAssetFileNames()
+        try testApplicationSupportDirectoryHasDeterministicFallback()
         try testUnavailableStorePreservesDatabaseComponentsAndRejectsMutations()
         try testReadFailureEntersProtectionMode()
         try testReadabilityProbeUsesBoundedFetch()
         try testClearAllPropagatesReadFailure()
+        try testTrimPropagatesReadFailure()
         try testHealthyHistoryIsRetriedOnNextLaunch()
         try testExplicitInMemoryStoreRejectsDurableWrites()
         print("PipelineHistoryStoreRecoveryTests passed")
@@ -91,6 +94,34 @@ struct PipelineHistoryStoreRecoveryTests {
         try expect(
             modifiedAt == snapshotDate,
             "metadata-only updates do not rebuild the asset reference snapshot"
+        )
+    }
+
+    private static func testSnapshotSynchronizationFetchesOnlyAssetFileNames() throws {
+        let source = try String(contentsOfFile: "Sources/PipelineHistoryStore.swift", encoding: .utf8)
+        guard let start = source.range(of: "private func synchronizeAssetReferenceSnapshot()"),
+              let end = source.range(
+                of: "private func pipelineHistoryRequest()",
+                range: start.upperBound..<source.endIndex
+              ) else {
+            throw RecoveryTestFailure("missing asset snapshot synchronization helpers")
+        }
+        let synchronization = String(source[start.lowerBound..<end.lowerBound])
+        try expect(
+            synchronization.contains("loadAssetReferenceFileNames()")
+                && !synchronization.contains("let history = loadAllHistory()")
+                && synchronization.contains("request.resultType = .dictionaryResultType")
+                && synchronization.contains("request.propertiesToFetch = [\"audioFileName\", \"transcriptFileName\"]"),
+            "snapshot synchronization fetches only asset filenames"
+        )
+    }
+
+    private static func testApplicationSupportDirectoryHasDeterministicFallback() throws {
+        let source = try String(contentsOfFile: "Sources/AppName.swift", encoding: .utf8)
+        try expect(
+            source.contains(".first ?? URL(fileURLWithPath: NSHomeDirectory())")
+                && source.contains(".appendingPathComponent(\"Library/Application Support\", isDirectory: true)"),
+            "Application Support lookup falls back without force-unwrapping"
         )
     }
 
@@ -206,6 +237,24 @@ struct PipelineHistoryStoreRecoveryTests {
             return
         }
         throw RecoveryTestFailure("clearAll must not report a failed read as an empty deletion")
+    }
+
+    private static func testTrimPropagatesReadFailure() throws {
+        let fixture = try PersistentStoreFixture()
+        defer { fixture.remove() }
+        let store = PipelineHistoryStore(
+            storeURL: fixture.storeURL,
+            historyFetcher: { _, _ in
+                throw RecoveryTestFailure("Injected trim read failure")
+            }
+        )
+
+        do {
+            _ = try store.trim(to: 1)
+        } catch is RecoveryTestFailure {
+            return
+        }
+        throw RecoveryTestFailure("trim must not report a failed read as an empty deletion")
     }
 
     private static func testHealthyHistoryIsRetriedOnNextLaunch() throws {

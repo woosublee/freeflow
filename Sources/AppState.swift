@@ -2092,14 +2092,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         [UUID: CloudTranscriptionDisplayProgress] = [:]
     @Published var lastTranscript: String = ""
     @Published var errorMessage: String?
-    var isHistoryUnavailable: Bool {
-        pipelineHistoryStore.availability == .unavailable
-    }
-    var historyPersistenceWarning: QuillUserIssueRecord? {
-        isHistoryUnavailable
-            ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
-            : nil
-    }
+    @Published private(set) var isHistoryUnavailable = false
+    @Published private(set) var historyPersistenceWarning: QuillUserIssueRecord?
     var historyUnavailableMessage: String {
         QuillUserIssueRecord(code: .historyPersistenceUnavailable)
             .presentation().compactMessage
@@ -3007,7 +3001,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.localTranscriptionModel = localTranscriptionModel
         self.soundVolume = soundVolume
         self.voiceMacros = initialMacros
+        let initialHistoryUnavailable = pipelineHistoryStore.availability == .unavailable
         self.pipelineHistory = savedHistory
+        self.isHistoryUnavailable = initialHistoryUnavailable
+        self.historyPersistenceWarning = initialHistoryUnavailable
+            ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+            : nil
         self.hasAccessibility = initialAccessibility
         self.hasScreenRecordingPermission = initialScreenCapturePermission
         self.launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -5539,7 +5538,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 for assets in removedAssets {
                     cleanupDeletedPipelineHistoryAssets(assets)
                 }
-                if let item = pipelineHistoryStore.loadAllHistory().first(where: {
+                if let item = loadPipelineHistory().first(where: {
                     $0.id == recovered.recordingID
                 }), item.isIncompleteTranscription {
                     try pipelineHistoryStore.update(
@@ -5547,7 +5546,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     )
                 }
                 pipelineHistory = Self.markInterruptedRecoveryPlaceholders(
-                    in: pipelineHistoryStore.loadAllHistory(),
+                    in: loadPipelineHistory(),
                     store: pipelineHistoryStore
                 )
                 let context = RecoveredRecordingContext(
@@ -6137,8 +6136,24 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
+    private func synchronizeHistoryPersistenceState() {
+        let unavailable = pipelineHistoryStore.availability == .unavailable
+        guard isHistoryUnavailable != unavailable else { return }
+        isHistoryUnavailable = unavailable
+        historyPersistenceWarning = isHistoryUnavailable
+            ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+            : nil
+    }
+
+    private func loadPipelineHistory() -> [PipelineHistoryItem] {
+        let history = pipelineHistoryStore.loadAllHistory()
+        synchronizeHistoryPersistenceState()
+        return history
+    }
+
     @discardableResult
     private func requireAvailableHistoryForMutation() -> Bool {
+        synchronizeHistoryPersistenceState()
         guard !isHistoryUnavailable else {
             errorMessage = historyUnavailableMessage
             return false
@@ -6824,7 +6839,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 }
                 do {
                     try self.pipelineHistoryStore.update(updatedItem)
-                    self.pipelineHistory = self.pipelineHistoryStore.loadAllHistory()
+                    self.pipelineHistory = self.loadPipelineHistory()
                     if retrySucceeded {
                         if snapshot.useLocalTranscription,
                            let cloudContext = snapshot.cloudExecutionContext {
@@ -10108,7 +10123,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     transcriptFileName: item.transcriptFileName
                 )
                 try pipelineHistoryStore.update(updated)
-                pipelineHistory = pipelineHistoryStore.loadAllHistory()
+                pipelineHistory = loadPipelineHistory()
                 completeCloudTranscriptionHistory(
                     historyID: record.historyID,
                     context: context,
@@ -10431,7 +10446,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             for removedAssets in removed {
                 cleanupDeletedPipelineHistoryAssets(removedAssets)
             }
-            pipelineHistory = pipelineHistoryStore.loadAllHistory()
+            pipelineHistory = loadPipelineHistory()
         } catch {
             updateTranscriptionJob(jobID) { $0.liveNoteID = nil }
         }
@@ -10546,7 +10561,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         } catch {
             if journalRecordingID == nil,
-               !pipelineHistoryStore.loadAllHistory().contains(where: { $0.id == recordingID }) {
+               !loadPipelineHistory().contains(where: { $0.id == recordingID }) {
                 Self.deleteStoredFiles(
                     audioFileName: audioFileName,
                     transcriptFileName: nil
@@ -10591,7 +10606,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             for assets in removedAssets {
                 cleanupDeletedPipelineHistoryAssets(assets)
             }
-            if let item = pipelineHistoryStore.loadAllHistory().first(where: {
+            if let item = loadPipelineHistory().first(where: {
                 $0.id == recovered.recordingID
             }) {
                 let normalized = item.isIncompleteTranscription
@@ -10602,7 +10617,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 }
             }
             pipelineHistory = Self.markInterruptedRecoveryPlaceholders(
-                in: pipelineHistoryStore.loadAllHistory(),
+                in: loadPipelineHistory(),
                 store: pipelineHistoryStore
             )
             presentation = (
