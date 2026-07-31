@@ -2,9 +2,8 @@ import AppKit
 import Combine
 import Foundation
 
-#if !QUILL_GROUPED_TEST_RUNNER
-@main
-#endif
+// AppState tests run only through FullSourceAppStateTestRunner so its process
+// isolation always protects production preferences and stored recordings.
 struct AppStateAIProcessingBackendTests {
     static func main() async throws {
         let defaultsSnapshot = UserDefaultsSnapshot()

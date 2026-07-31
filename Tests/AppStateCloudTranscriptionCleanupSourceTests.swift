@@ -11,6 +11,7 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         try verifiesCommonCleanupOrder(source)
         try verifiesDeleteUsesCommonCleanup(source)
         try verifiesClearUsesCommonCleanup(source)
+        try verifiesStartupCleanupRequiresTrustedReferences(source)
         try verifiesTrimmedAssetsUseCommonCleanup(source)
         try verifiesIncompatibleRetryInvalidatesBeforeReplacement(source)
         try verifiesActiveCloudTasksAreInstalled(source)
@@ -74,7 +75,9 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         )
     }
 
-    private static func verifiesTrimmedAssetsUseCommonCleanup(_ source: String) throws {
+    private static func verifiesStartupCleanupRequiresTrustedReferences(
+        _ source: String
+    ) throws {
         let initializer = block(
             source,
             from: "init() {",
@@ -82,15 +85,29 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         )
         try expectOrdered(
             [
-                "pipelineHistoryStore.trim(to: maxPipelineHistoryCount)",
-                "cloudTranscriptionJobStore.invalidateSession(",
+                "savedHistory = pipelineHistoryStore.loadAllHistory()",
+                "referenceTrust = pipelineHistoryStore.referenceTrust",
+                "if referenceTrust.permitsStartupReferenceCleanup {",
+                "pipelineHistoryStore.trim(",
                 "Self.deleteStoredFiles(removedAssets)",
-                "cloudTranscriptionJobStore.delete("
+                "sweepOrphanStoredFiles("
             ],
             in: initializer,
-            label: "startup trim invalidates then deletes permanent assets and sidecar"
+            label: "startup cleanup uses trusted references before deleting files"
         )
 
+        let sweep = block(
+            source,
+            from: "static func sweepOrphanStoredFiles(",
+            to: "static func saveTranscriptFile("
+        )
+        try expect(
+            sweep.contains("guard referenceTrust.permitsStartupReferenceCleanup else { return }"),
+            "orphan cleanup returns before inspecting files when references are untrusted"
+        )
+    }
+
+    private static func verifiesTrimmedAssetsUseCommonCleanup(_ source: String) throws {
         for marker in [
             "pipelineHistoryStore.append(item, maxCount: maxPipelineHistoryCount)",
             "pipelineHistoryStore.upsert("

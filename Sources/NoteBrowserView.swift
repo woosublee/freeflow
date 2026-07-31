@@ -479,7 +479,11 @@ struct NoteBrowserView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        Group {
+            if appState.isHistoryUnavailable {
+                historyUnavailableView
+            } else {
+                HStack(spacing: 0) {
             sidebarPanel
             detailPanel
         }
@@ -516,6 +520,37 @@ struct NoteBrowserView: View {
             }
             knownHistoryIDs = Set(ids)
         }
+            }
+        }
+    }
+
+    private var historyUnavailableView: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: "externaldrive.badge.exclamationmark")
+                .font(.system(size: 42, weight: .light))
+                .foregroundStyle(.orange)
+            Text("Recording history couldn’t be opened")
+                .font(.system(size: 20, weight: .semibold))
+            Text("Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery.")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
+            HStack(spacing: 10) {
+                Button("Open Data Folder") {
+                    appState.openHistoryDataFolder()
+                }
+                Button("Quit Quill") {
+                    NSApplication.shared.terminate(nil)
+                }
+            }
+            .controlSize(.large)
+            Spacer()
+        }
+        .padding(32)
+        .frame(minWidth: 800, maxWidth: .infinity, minHeight: 520, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
     }
 
     // MARK: - Sidebar
@@ -1261,7 +1296,10 @@ private struct NoteDetailView: View {
         item.machineStatus == .audioOnly
     }
     private var transcriptionActionHelp: LocalizedStringKey {
-        isAudioOnly ? "Transcribe audio" : "Retry transcription"
+        if retryAvailability == .noAudio {
+            return "Audio file unavailable"
+        }
+        return isAudioOnly ? "Transcribe audio" : "Retry transcription"
     }
     private var isCloudTranscribing: Bool {
         item.machineStatus == .cloudTranscribing
@@ -2112,7 +2150,11 @@ private struct NoteDetailView: View {
                 )
             )
         case .noAudio:
-            break
+            showToast(
+                localizedCatalogString(
+                    "This recording's audio file is unavailable, so it can't be transcribed."
+                )
+            )
         }
     }
 

@@ -68,6 +68,9 @@ FULL_SOURCE_TRANSCRIPTION_TESTS = \
 FULL_SOURCE_APP_STATE_TESTS = \
 	Tests/AudioImportFileCopyTests.swift \
 	Tests/LatestValueProgressCoalescerTests.swift \
+	Tests/AppStateTestStorage.swift \
+	Tests/AppStateStorageSafetyTests.swift \
+	Tests/AppStateHistoryProtectionSourceTests.swift \
 	Tests/AppStateTranscriptionConfigurationTests.swift \
 	Tests/AppStateAIProcessingBackendTests.swift \
 	Tests/MeetingSummaryAppStateTests.swift

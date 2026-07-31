@@ -18,7 +18,9 @@ struct QuillUserIssueUIContractTests {
         try testRunLogSanitizesMachineStatuses(settings)
         try testRecoveryActionsUseExistingRoutes(noteBrowser, appState)
         try testDismissibleBannerScopedToWarningStyle(issueView, noteBrowser, appState)
-        try testNonDurableHistoryWarningIsVisibleAndDoesNotExposeBackups(
+        try testHistoryUnavailableProtectionIsVisibleAndDoesNotExposeRecoveryPaths(
+            noteBrowser,
+            settings,
             menuBar,
             appState
         )
@@ -222,34 +224,41 @@ struct QuillUserIssueUIContractTests {
         )
     }
 
-    private static func testNonDurableHistoryWarningIsVisibleAndDoesNotExposeBackups(
+    private static func testHistoryUnavailableProtectionIsVisibleAndDoesNotExposeRecoveryPaths(
+        _ noteBrowser: String,
+        _ settings: String,
         _ menuBar: String,
         _ appState: String
     ) throws {
         try expect(
-            appState.contains("@Published private(set) var historyPersistenceWarning"),
-            "AppState publishes a session-only history persistence warning"
+            appState.contains("var isHistoryUnavailable: Bool"),
+            "AppState exposes an explicit history-unavailable state"
         )
         try expect(
             appState.contains(".historyPersistenceUnavailable"),
-            "AppState uses the structured non-durable history warning"
+            "AppState uses the structured unavailable-history issue"
+        )
+        for source in [noteBrowser, settings, menuBar] {
+            try expect(
+                source.contains("appState.isHistoryUnavailable"),
+                "every history surface renders the protected state"
+            )
+            try expect(source.contains("Open Data Folder"), "protected state opens the data folder")
+            try expect(source.contains("Quit Quill"), "protected state provides a safe quit action")
+        }
+        try expect(
+            menuBar.contains(".disabled(appState.isTranscribing || appState.isHistoryUnavailable)"),
+            "Menu Bar disables recording while history is unavailable"
         )
         try expect(
-            appState.contains(".historyRecovered"),
-            "AppState publishes a distinct warning after durable history recovery"
+            noteBrowser.contains("if appState.isHistoryUnavailable"),
+            "Note Browser checks protected state before normal empty history"
         )
-        try expect(
-            menuBar.contains("appState.historyPersistenceWarning"),
-            "Menu Bar shows the non-durable history warning"
-        )
-        try expect(
-            !menuBar.contains("backupName"),
-            "Menu Bar never exposes a history recovery backup name"
-        )
-        try expect(
-            !menuBar.contains("History Recovery"),
-            "Menu Bar never exposes a history recovery path"
-        )
+        for source in [noteBrowser, settings, menuBar] {
+            try expect(!source.contains("backupName"), "protected UI never exposes a backup name")
+            try expect(!source.contains("History Recovery"), "protected UI never exposes a recovery path")
+            try expect(!source.contains("start fresh"), "protected UI never offers a replacement history")
+        }
     }
 
     private static func source(_ path: String) throws -> String {

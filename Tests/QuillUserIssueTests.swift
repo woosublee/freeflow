@@ -6,6 +6,7 @@ struct QuillUserIssueTests {
         let bundle = try compiledLocalizationBundle()
         try testEveryCodeHasCompleteEnglishAndKoreanPresentation(bundle: bundle)
         try testSeverityAndRecoveryActions()
+        try testHistoryUnavailablePresentation(bundle: bundle)
         try testVersionedPersistenceRoundTripAndRejection()
         try testPersistedPayloadExcludesPrivateDiagnostics()
         try testLocalIssueUsesBoundedDiagnosticCategoryAndExcerpt()
@@ -134,6 +135,29 @@ struct QuillUserIssueTests {
         try expect(
             QuillUserIssueRecord(code: .contextUnavailable).recoveryAction == .none,
             "context unavailable is informational only, no recovery action"
+        )
+    }
+
+    private static func testHistoryUnavailablePresentation(bundle: Bundle) throws {
+        let record = QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+        let english = record.presentation(language: "en", bundle: bundle)
+        let korean = record.presentation(language: "ko", bundle: bundle)
+
+        try expect(
+            english.title == "Recording history couldn’t be opened",
+            "history-unavailable English title explains protected state"
+        )
+        try expect(
+            english.body == "Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery.",
+            "history-unavailable English body confirms asset preservation"
+        )
+        try expect(
+            korean.title == "녹음 기록을 열 수 없음",
+            "history-unavailable Korean title is localized"
+        )
+        try expect(
+            korean.body == "노트와 오디오 파일은 삭제되지 않았습니다. Quill을 다시 시작해 재시도하거나 데이터 폴더를 열어 지원 및 복구에 사용할 수 있습니다.",
+            "history-unavailable Korean body confirms asset preservation"
         )
     }
 

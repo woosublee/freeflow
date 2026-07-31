@@ -42,6 +42,8 @@ struct RecoveredRecordingNoteBrowserSourceTests {
         precondition(source.contains("Image(systemName: \"square.and.arrow.down\")"))
         precondition(source.contains("Image(systemName: \"ellipsis\")"))
         try testRetryWithoutReadyModelUsesToast(source)
+        try testRetryWithoutAudioExplainsWhy(source)
+        try testRetryWithoutAudioUsesAccessibleHelp(source)
         try testAudioOnlyNoteUsesDedicatedNormalState()
         try testInputPickerSwitchesActiveRecordingInput(source)
         try testInputMenuCatcherDisablesAndLocalizesSources(source)
@@ -69,6 +71,39 @@ struct RecoveredRecordingNoteBrowserSourceTests {
             )
         )
         precondition(!providerBranch.contains("appState.openProviderSettings()"))
+    }
+
+    private static func testRetryWithoutAudioExplainsWhy(
+        _ source: String
+    ) throws {
+        let retryAction = block(
+            source,
+            from: "private func retryTranscription()",
+            to: "private func showToast("
+        )
+        let missingAudioBranch = block(
+            retryAction,
+            from: "case .noAudio:",
+            to: "\n        }\n    }"
+        )
+        precondition(missingAudioBranch.contains("showToast("))
+        precondition(
+            missingAudioBranch.contains(
+                "This recording's audio file is unavailable, so it can't be transcribed."
+            )
+        )
+    }
+
+    private static func testRetryWithoutAudioUsesAccessibleHelp(
+        _ source: String
+    ) throws {
+        let actionHelp = block(
+            source,
+            from: "private var transcriptionActionHelp: LocalizedStringKey {",
+            to: "private var isCloudTranscribing"
+        )
+        precondition(actionHelp.contains("if retryAvailability == .noAudio"))
+        precondition(actionHelp.contains("return \"Audio file unavailable\""))
     }
 
     private static func testInputPickerSwitchesActiveRecordingInput(
