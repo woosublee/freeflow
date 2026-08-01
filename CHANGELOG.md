@@ -8,6 +8,21 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.33] - 2026-08-02
+
+### Added
+
+- Added a protected recovery flow for unavailable recording history: archive the current generation, start fresh, inspect and import snapshots from Recovery settings, and automatically delete completed recovery snapshots after seven days.
+
+### Improved
+
+- Protected recording history and audio assets when loading or persistence fails, blocking unsafe mutations while providing clear recovery guidance.
+- Preserved spoken-language context through transcription and retries, with safer meeting-summary validation, durable diagnostics, consistent retry and deletion controls, and warnings when summary evidence cannot be verified.
+
+### Fixed
+
+- Untitled note exports now use locale-aware recording timestamps for filenames while continuing to prefer custom and calendar titles.
+
 ## [0.1.32] - 2026-07-31
 
 ### Improved
