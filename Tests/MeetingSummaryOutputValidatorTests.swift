@@ -13,6 +13,7 @@ struct MeetingSummaryOutputValidatorTests {
         try testRejectsGeneratedPartialProseAsMergeEvidence()
         try testRejectsActionOwnerOutsideSourceQuote()
         try testAcceptsKoreanDateGroundingForISODueDate()
+        try testEvidenceRepairPreservesLocalizedDateGroundedISODueDate()
         try testAcceptsJapaneseDateGroundingForISODueDate()
         try testRejectsYearlessLocalizedDateForISODueDate()
         try testRejectsWrongLanguageInGeneratedProse()
@@ -21,6 +22,7 @@ struct MeetingSummaryOutputValidatorTests {
         try testTraditionalChineseIsAcceptedForTraditionalAndGenericChinese()
         try testTraditionalChineseIsRejectedForSimplifiedChinese()
         testEvidenceRepairReplacesWhitespaceAndPunctuationVariantWithSourceSubstring()
+        testEvidenceRepairMapsLowercaseExpansionToOriginalSourceSubstring()
         testEvidenceRepairMarksUnresolvedCitationUnverified()
         testEvidenceRepairSanitizesUngroundedActionMetadata()
         print("MeetingSummaryOutputValidatorTests passed")
@@ -110,6 +112,18 @@ struct MeetingSummaryOutputValidatorTests {
             v2WithDueDate("2026-08-15", quote: quote),
             against: quote
         )
+    }
+
+    private static func testEvidenceRepairPreservesLocalizedDateGroundedISODueDate() throws {
+        let sourceQuote = "민수는 2026년 8월 15일까지 배포합니다."
+        let repaired = MeetingSummaryEvidenceRepairer().repair(
+            v2WithDueDate("2026-08-15", quote: sourceQuote),
+            sourceTexts: [sourceQuote]
+        )
+
+        precondition(repaired.verification == .verified)
+        precondition(repaired.draft.actionItems[0].dueDate == "2026-08-15")
+        try MeetingSummaryOutputValidator().validate(repaired.draft, against: sourceQuote)
     }
 
     private static func testAcceptsJapaneseDateGroundingForISODueDate() throws {
@@ -209,6 +223,17 @@ struct MeetingSummaryOutputValidatorTests {
         let sourceQuote = "Minsu will send the release notes\non Friday."
         let repaired = MeetingSummaryEvidenceRepairer().repair(
             v2WithQuote("“Minsu will send the release notes on Friday”"),
+            sourceTexts: [sourceQuote]
+        )
+
+        precondition(repaired.verification == .verified)
+        precondition(repaired.draft.overview.sourceQuotes == [sourceQuote])
+    }
+
+    private static func testEvidenceRepairMapsLowercaseExpansionToOriginalSourceSubstring() {
+        let sourceQuote = "İstanbul will send the release notes."
+        let repaired = MeetingSummaryEvidenceRepairer().repair(
+            v2WithQuote("istanbul will send the release notes"),
             sourceTexts: [sourceQuote]
         )
 

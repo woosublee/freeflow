@@ -29,6 +29,125 @@ enum MeetingSummaryOutputValidationError: Error, Equatable, Sendable {
     }
 }
 
+private enum MeetingSummaryDateEvidenceMatcher {
+    static func containsDateNormalized(
+        _ dueDate: String,
+        in sourceQuote: String
+    ) -> Bool {
+        let normalizedDueDate = normalizedWhitespace(dueDate)
+        let normalizedSourceQuote = normalizedWhitespace(sourceQuote)
+        if normalizedSourceQuote.range(of: normalizedDueDate, options: .literal) != nil {
+            return true
+        }
+        guard let dueDateValue = parseDate(normalizedDueDate) else {
+            return false
+        }
+        return dateStrings(in: normalizedSourceQuote).contains { candidate in
+            parseDate(candidate) == dueDateValue
+        }
+    }
+
+    private static func dateStrings(in text: String) -> [String] {
+        let patterns = [
+            #"\b\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)?\b"#,
+            #"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b"#,
+            #"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+\d{1,2},?\s+\d{4}\b"#,
+            #"(?<!\d)\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일(?!\d)"#,
+            #"(?<!\d)\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日(?!\d)"#
+        ]
+        return patterns.flatMap { pattern in
+            guard let expression = try? NSRegularExpression(
+                pattern: pattern,
+                options: [.caseInsensitive]
+            ) else {
+                return [String]()
+            }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            return expression.matches(in: text, range: range).compactMap {
+                Range($0.range, in: text).map { String(text[$0]) }
+            }
+        }
+    }
+
+    private static func parseDate(_ value: String) -> String? {
+        let iso = ISO8601DateFormatter()
+        if let date = iso.date(from: value) {
+            return dayFormatter.string(from: date)
+        }
+        if let date = localizedGregorianDate(from: value) {
+            return dayFormatter.string(from: date)
+        }
+        for format in [
+            "yyyy-MM-dd",
+            "MMMM d, yyyy",
+            "MMMM d yyyy",
+            "MMM d, yyyy",
+            "MMM d yyyy"
+        ] {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = format
+            if let date = formatter.date(from: value) {
+                return dayFormatter.string(from: date)
+            }
+        }
+        return nil
+    }
+
+    private static func localizedGregorianDate(from value: String) -> Date? {
+        let pattern = #"^(\d{4})\s*(?:년|年)\s*(\d{1,2})\s*(?:월|月)\s*(\d{1,2})\s*(?:일|日)$"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(
+                in: value,
+                range: NSRange(value.startIndex..<value.endIndex, in: value)
+              ),
+              match.range.location == 0,
+              match.range.length == (value as NSString).length else {
+            return nil
+        }
+        let components = (1...3).compactMap { index -> Int? in
+            guard let range = Range(match.range(at: index), in: value) else {
+                return nil
+            }
+            return Int(value[range])
+        }
+        guard components.count == 3 else { return nil }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        var dateComponents = DateComponents()
+        dateComponents.calendar = calendar
+        dateComponents.timeZone = calendar.timeZone
+        dateComponents.year = components[0]
+        dateComponents.month = components[1]
+        dateComponents.day = components[2]
+        guard let date = calendar.date(from: dateComponents) else { return nil }
+        let resolved = calendar.dateComponents([.year, .month, .day], from: date)
+        guard resolved.year == components[0],
+              resolved.month == components[1],
+              resolved.day == components[2] else {
+            return nil
+        }
+        return date
+    }
+
+    private static var dayFormatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }
+
+    private static func normalizedWhitespace(_ value: String) -> String {
+        value
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+}
+
 struct MeetingSummaryOutputValidator: Sendable {
     func validate(
         _ draft: MeetingSummaryDraftContentV2,
@@ -92,7 +211,10 @@ struct MeetingSummaryOutputValidator: Sendable {
                 throw MeetingSummaryOutputValidationError.ownerNotGrounded
             }
             if let dueDate = nonempty(action.dueDate),
-               !containsDateNormalized(dueDate, in: sourceQuote) {
+               !MeetingSummaryDateEvidenceMatcher.containsDateNormalized(
+                dueDate,
+                in: sourceQuote
+               ) {
                 throw MeetingSummaryOutputValidationError.dueDateNotGrounded
             }
         }
@@ -163,116 +285,6 @@ struct MeetingSummaryOutputValidator: Sendable {
             of: normalizedQuote(value),
             options: .literal
         ) != nil
-    }
-
-    private func containsDateNormalized(
-        _ dueDate: String,
-        in sourceQuote: String
-    ) -> Bool {
-        let normalizedDueDate = normalizedQuote(dueDate)
-        let normalizedQuote = normalizedQuote(sourceQuote)
-        if normalizedQuote.range(of: normalizedDueDate, options: .literal) != nil {
-            return true
-        }
-        guard let dueDateValue = parseDate(normalizedDueDate) else {
-            return false
-        }
-        return dateStrings(in: normalizedQuote).contains { candidate in
-            parseDate(candidate) == dueDateValue
-        }
-    }
-
-    private func dateStrings(in text: String) -> [String] {
-        let patterns = [
-            #"\b\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)?\b"#,
-            #"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b"#,
-            #"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+\d{1,2},?\s+\d{4}\b"#,
-            #"(?<!\d)\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일(?!\d)"#,
-            #"(?<!\d)\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日(?!\d)"#
-        ]
-        return patterns.flatMap { pattern in
-            guard let expression = try? NSRegularExpression(
-                pattern: pattern,
-                options: [.caseInsensitive]
-            ) else {
-                return [String]()
-            }
-            let range = NSRange(text.startIndex..<text.endIndex, in: text)
-            return expression.matches(in: text, range: range).compactMap {
-                Range($0.range, in: text).map { String(text[$0]) }
-            }
-        }
-    }
-
-    private func parseDate(_ value: String) -> String? {
-        let iso = ISO8601DateFormatter()
-        if let date = iso.date(from: value) {
-            return dayFormatter.string(from: date)
-        }
-        if let date = localizedGregorianDate(from: value) {
-            return dayFormatter.string(from: date)
-        }
-        for format in [
-            "yyyy-MM-dd",
-            "MMMM d, yyyy",
-            "MMMM d yyyy",
-            "MMM d, yyyy",
-            "MMM d yyyy"
-        ] {
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.timeZone = TimeZone(secondsFromGMT: 0)
-            formatter.dateFormat = format
-            if let date = formatter.date(from: value) {
-                return dayFormatter.string(from: date)
-            }
-        }
-        return nil
-    }
-
-    private func localizedGregorianDate(from value: String) -> Date? {
-        let pattern = #"^(\d{4})\s*(?:년|年)\s*(\d{1,2})\s*(?:월|月)\s*(\d{1,2})\s*(?:일|日)$"#
-        guard let expression = try? NSRegularExpression(pattern: pattern),
-              let match = expression.firstMatch(
-                in: value,
-                range: NSRange(value.startIndex..<value.endIndex, in: value)
-              ),
-              match.range.location == 0,
-              match.range.length == (value as NSString).length else {
-            return nil
-        }
-        let components = (1...3).compactMap { index -> Int? in
-            guard let range = Range(match.range(at: index), in: value) else {
-                return nil
-            }
-            return Int(value[range])
-        }
-        guard components.count == 3 else { return nil }
-
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        var dateComponents = DateComponents()
-        dateComponents.calendar = calendar
-        dateComponents.timeZone = calendar.timeZone
-        dateComponents.year = components[0]
-        dateComponents.month = components[1]
-        dateComponents.day = components[2]
-        guard let date = calendar.date(from: dateComponents) else { return nil }
-        let resolved = calendar.dateComponents([.year, .month, .day], from: date)
-        guard resolved.year == components[0],
-              resolved.month == components[1],
-              resolved.day == components[2] else {
-            return nil
-        }
-        return date
-    }
-
-    private var dayFormatter: DateFormatter {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
     }
 
     private func nonempty(_ value: String?) -> String? {
@@ -389,7 +401,10 @@ struct MeetingSummaryEvidenceRepairer: Sendable {
                 isVerified = false
             }
             if let value = nonempty(dueDate),
-               !normalizedSourceQuote.contains(normalized(value) ?? "") {
+               !MeetingSummaryDateEvidenceMatcher.containsDateNormalized(
+                value,
+                in: sourceQuote
+               ) {
                 dueDate = nil
                 isVerified = false
             }
@@ -451,9 +466,11 @@ struct MeetingSummaryEvidenceRepairer: Sendable {
                     ranges.append(index..<next)
                 }
                 previousWasSpace = true
-            } else if !isPunctuation(character) {
-                normalizedSource += String(character).lowercased()
-                ranges.append(index..<next)
+            } else if let normalizedCharacters = normalizedCharacters(for: character) {
+                for normalizedCharacter in normalizedCharacters {
+                    normalizedSource.append(normalizedCharacter)
+                    ranges.append(index..<next)
+                }
                 previousWasSpace = false
             }
             index = next
@@ -485,20 +502,25 @@ struct MeetingSummaryEvidenceRepairer: Sendable {
     }
 
     private func normalized(_ value: String) -> String? {
-        let pieces = value.map(String.init).compactMap { character -> String? in
-            guard let scalar = character.unicodeScalars.first else { return nil }
-            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
-                return " "
+        let result = value.reduce(into: "") { result, character in
+            if isWhitespace(character) {
+                result.append(" ")
+            } else if let normalizedCharacters = normalizedCharacters(for: character) {
+                result.append(contentsOf: normalizedCharacters)
             }
-            if CharacterSet.punctuationCharacters.contains(scalar) {
-                return nil
-            }
-            return character.lowercased()
         }
-        let result = pieces.joined()
+        let collapsedWhitespace = result
             .split(whereSeparator: { $0 == " " })
             .joined(separator: " ")
-        return result.isEmpty ? nil : result
+        return collapsedWhitespace.isEmpty ? nil : collapsedWhitespace
+    }
+
+    private func normalizedCharacters(for character: Character) -> String? {
+        guard !isPunctuation(character) else { return nil }
+        if String(character) == "İ" {
+            return "i"
+        }
+        return String(character).lowercased()
     }
 
     private func isWhitespace(_ character: Character) -> Bool {
