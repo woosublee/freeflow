@@ -35,6 +35,7 @@ struct AppStateAIProcessingBackendTests {
         await testCorruptedChoicesFallbackAndPersistNormalizedCloudChoices()
         await testWhitespaceCloudIDsFallbackToRememberedOrDefaultModels()
         await testStoredCloudChoicesReconcileRememberedModels()
+        try await testSettingsDraftCommittersFlushBeforeRecordingStart()
         await testRetiredCloudChoiceRemainsVisibleForReplacement()
         await testStoredLocalChoicesPreserveRememberedCloudModels()
         await testIncompatibleLegacyContextSelectionIsPreservedAndDisabled()
@@ -171,6 +172,46 @@ struct AppStateAIProcessingBackendTests {
         assert(defaults.string(forKey: "context_model") == "stored/context")
         assert(storedChoice(forKey: "post_processing_backend_choice") == .cloud(modelID: "stored/post"))
         assert(storedChoice(forKey: "context_backend_choice") == .cloud(modelID: "stored/context"))
+    }
+
+    private static func testSettingsDraftCommittersFlushBeforeRecordingStart() async throws {
+        resetAIProcessingDefaults()
+        let appState = await makeRefreshedAppState()
+
+        await MainActor.run {
+            var commitCount = 0
+            let registrationID = appState.registerSettingsDraftCommit {
+                commitCount += 1
+            }
+
+            appState.commitSettingsDraftsBeforeRecordingStart()
+            precondition(
+                commitCount == 1,
+                "recording start flushes the active Settings text draft"
+            )
+
+            appState.unregisterSettingsDraftCommit(registrationID)
+            appState.commitSettingsDraftsBeforeRecordingStart()
+            precondition(
+                commitCount == 1,
+                "a dismissed Settings view no longer receives recording-start flushes"
+            )
+        }
+
+        let recordingStart = sourceBlock(
+            in: try appStateSource(),
+            from: "private func startRecording(triggerMode: RecordingTriggerMode",
+            to: "/// Whether the configured recording flow will actually exercise Accessibility."
+        )
+        let flush = requiredRange(
+            of: "commitSettingsDraftsBeforeRecordingStart()",
+            in: recordingStart
+        )
+        let task = requiredRange(of: "Task { [weak self]", in: recordingStart)
+        assert(
+            flush.lowerBound < task.lowerBound,
+            "recording flushes Settings text drafts before capturing Context or starting async work"
+        )
     }
 
     private static func testRetiredCloudChoiceRemainsVisibleForReplacement() async {

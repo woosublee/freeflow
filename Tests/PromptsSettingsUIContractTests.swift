@@ -70,7 +70,10 @@ struct PromptsSettingsUIContractTests {
             ".focused($customSystemPromptFocused)",
             ".focused($customContextPromptFocused)",
             ".onChange(of: customSystemPromptFocused)",
-            ".onChange(of: customContextPromptFocused)"
+            ".onChange(of: customContextPromptFocused)",
+            "@State private var settingsDraftCommitRegistrationID: UUID?",
+            "appState.registerSettingsDraftCommit",
+            "appState.unregisterSettingsDraftCommit"
         ] {
             precondition(prompts.contains(expected), "Missing focus-loss prompt persistence: \(expected)")
         }

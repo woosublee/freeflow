@@ -39,318 +39,6 @@ private let iso8601DayFormatter: DateFormatter = {
     return formatter
 }()
 
-struct ProviderSettingsFields: View {
-    @EnvironmentObject var appState: AppState
-    @Binding var apiBaseURLInput: String
-    @Binding var transcriptionAPIURLInput: String
-    @Binding var transcriptionAPIKeyInput: String
-    @FocusState private var isEditingAPIBaseURL: Bool
-    @FocusState private var isEditingTranscriptionModel: Bool
-    @FocusState private var isEditingRealtimeStreamingModel: Bool
-    @FocusState private var isEditingPostProcessingModel: Bool
-    @FocusState private var isEditingPostProcessingFallbackModel: Bool
-    @FocusState private var isEditingContextModel: Bool
-    @FocusState private var transcriptionAPIURLFocused: Bool
-    @FocusState private var transcriptionAPIKeyFocused: Bool
-    @State private var transcriptionModelDraft: String = ""
-    @State private var realtimeStreamingModelDraft: String = ""
-    @State private var postProcessingModelDraft: String = ""
-    @State private var postProcessingFallbackModelDraft: String = ""
-    @State private var contextModelDraft: String = ""
-
-    let showsModelDescription: Bool
-    let showsTranscriptionLanguage: Bool
-
-    private func commitAPIBaseURL() {
-        let trimmed = apiBaseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedBaseURL = trimmed.isEmpty ? AppState.defaultAPIBaseURL : trimmed
-        apiBaseURLInput = resolvedBaseURL
-        appState.apiBaseURL = resolvedBaseURL
-    }
-
-    private func commitTranscriptionModel() {
-        let trimmed = transcriptionModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolved = trimmed.isEmpty ? AppState.defaultTranscriptionModel : trimmed
-        transcriptionModelDraft = resolved
-        guard appState.transcriptionModel != resolved else { return }
-        appState.transcriptionModel = resolved
-    }
-
-    private func commitRealtimeStreamingModel() {
-        let trimmed = realtimeStreamingModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        realtimeStreamingModelDraft = trimmed
-        guard appState.realtimeStreamingModel != trimmed else { return }
-        appState.realtimeStreamingModel = trimmed
-    }
-
-    private func commitPostProcessingModel() {
-        let trimmed = postProcessingModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolved = trimmed.isEmpty ? AppState.defaultPostProcessingModel : trimmed
-        postProcessingModelDraft = resolved
-        guard appState.postProcessingModel != resolved else { return }
-        appState.postProcessingModel = resolved
-    }
-
-    private func commitPostProcessingFallbackModel() {
-        let trimmed = postProcessingFallbackModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolved = trimmed.isEmpty ? AppState.defaultPostProcessingFallbackModel : trimmed
-        postProcessingFallbackModelDraft = resolved
-        guard appState.postProcessingFallbackModel != resolved else { return }
-        appState.postProcessingFallbackModel = resolved
-    }
-
-    private func commitContextModel() {
-        let trimmed = contextModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolved = trimmed.isEmpty ? AppState.defaultContextModel : trimmed
-        contextModelDraft = resolved
-        guard appState.contextModel != resolved else { return }
-        appState.contextModel = resolved
-    }
-
-    private func commitTranscriptionAPIURL() {
-        let trimmed = transcriptionAPIURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        transcriptionAPIURLInput = trimmed
-        guard appState.transcriptionAPIURL != trimmed else { return }
-        appState.transcriptionAPIURL = trimmed
-    }
-
-    private func commitTranscriptionAPIKey() {
-        let trimmed = transcriptionAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        transcriptionAPIKeyInput = trimmed
-        guard appState.transcriptionAPIKey != trimmed else { return }
-        appState.transcriptionAPIKey = trimmed
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("API Base URL")
-                .font(.caption.weight(.semibold))
-
-            Text("Change this to use a different OpenAI-compatible API provider.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 8) {
-                TextField(AppState.defaultAPIBaseURL, text: $apiBaseURLInput)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-                    .focused($isEditingAPIBaseURL)
-                    .onSubmit {
-                        commitAPIBaseURL()
-                    }
-                    .onChange(of: isEditingAPIBaseURL) { isEditing in
-                        if !isEditing {
-                            commitAPIBaseURL()
-                        }
-                    }
-
-                Button("Reset to Default") {
-                    apiBaseURLInput = AppState.defaultAPIBaseURL
-                    appState.apiBaseURL = AppState.defaultAPIBaseURL
-                }
-                .font(.caption)
-            }
-
-            if showsModelDescription {
-                Text("If you use another provider, enter that provider's model IDs here.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            ModelDropdownView(
-                title: "Post-Processing Model",
-                subtitle: "Used for transcript cleanup and Edit Mode transforms.",
-                predefinedModels: ModelConfiguration.llmModels,
-                defaultModel: AppState.defaultPostProcessingModel,
-                textDraft: $postProcessingModelDraft,
-                onCommit: commitPostProcessingModel,
-                onReset: {
-                    postProcessingModelDraft = AppState.defaultPostProcessingModel
-                    appState.postProcessingModel = AppState.defaultPostProcessingModel
-                }
-            )
-
-            ModelDropdownView(
-                title: "Post-Processing Fallback Model",
-                subtitle: "Used as the explicit retry model for transcript cleanup and Edit Mode transforms.",
-                predefinedModels: ModelConfiguration.llmModels,
-                defaultModel: AppState.defaultPostProcessingFallbackModel,
-                textDraft: $postProcessingFallbackModelDraft,
-                onCommit: commitPostProcessingFallbackModel,
-                onReset: {
-                    postProcessingFallbackModelDraft = AppState.defaultPostProcessingFallbackModel
-                    appState.postProcessingFallbackModel = AppState.defaultPostProcessingFallbackModel
-                }
-            )
-
-            ModelDropdownView(
-                title: "Context Model",
-                subtitle: "Used for context inference, with a text-only retry when screenshot analysis fails. Screenshot analysis requires a model that accepts image input.",
-                predefinedModels: ModelConfiguration.visionModels,
-                defaultModel: AppState.defaultContextModel,
-                textDraft: $contextModelDraft,
-                onCommit: commitContextModel,
-                onReset: {
-                    contextModelDraft = AppState.defaultContextModel
-                    appState.contextModel = AppState.defaultContextModel
-                }
-            )
-
-            ModelDropdownView(
-                title: "Transcription Model",
-                subtitle: "Used for speech-to-text transcription.",
-                predefinedModels: ModelConfiguration.transcriptionModels,
-                defaultModel: AppState.defaultTranscriptionModel,
-                textDraft: $transcriptionModelDraft,
-                onCommit: commitTranscriptionModel,
-                onReset: {
-                    transcriptionModelDraft = AppState.defaultTranscriptionModel
-                    appState.transcriptionModel = AppState.defaultTranscriptionModel
-                }
-            )
-
-            if showsTranscriptionLanguage {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Transcription Language")
-                        .font(.caption.weight(.semibold))
-                    Picker("", selection: $appState.transcriptionLanguage) {
-                        ForEach(TranscriptionLanguage.all) { option in
-                            Text(option.localizedDisplayName()).tag(option)
-                        }
-                    }
-                    .accessibilityLabel("Transcription Language")
-                    .labelsHidden()
-                    Text("Hint to the transcription model. Auto Detect works for most users. Pick a specific language if you see wrong-script characters appear in the output.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Transcription API URL")
-                    .font(.caption.weight(.semibold))
-                HStack(spacing: 8) {
-                    TextField("Uses API Base URL when empty", text: $transcriptionAPIURLInput)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
-                        .focused($transcriptionAPIURLFocused)
-                        .onSubmit {
-                            commitTranscriptionAPIURL()
-                        }
-                        .onChange(of: transcriptionAPIURLFocused) { isFocused in
-                            if !isFocused {
-                                commitTranscriptionAPIURL()
-                            }
-                        }
-                    if !transcriptionAPIURLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Button("Clear") {
-                            transcriptionAPIURLInput = ""
-                            appState.transcriptionAPIURL = ""
-                        }
-                        .font(.caption)
-                    }
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Transcription API Key")
-                    .font(.caption.weight(.semibold))
-                HStack(spacing: 8) {
-                    SecureField("Uses API Key when empty", text: $transcriptionAPIKeyInput)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
-                        .focused($transcriptionAPIKeyFocused)
-                        .onSubmit {
-                            commitTranscriptionAPIKey()
-                        }
-                        .onChange(of: transcriptionAPIKeyFocused) { isFocused in
-                            if !isFocused {
-                                commitTranscriptionAPIKey()
-                            }
-                        }
-                    if !transcriptionAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Button("Clear") {
-                            transcriptionAPIKeyInput = ""
-                            appState.transcriptionAPIKey = ""
-                        }
-                        .font(.caption)
-                    }
-                }
-            }
-
-            Divider()
-
-            Toggle(
-                "Stream audio while recording (realtime)",
-                isOn: $appState.realtimeStreamingEnabled
-            )
-            Text("Streams audio through the provider's OpenAI-compatible /v1/realtime WebSocket so transcription runs while you speak.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Realtime Transcription Model")
-                    .font(.caption.weight(.semibold))
-                HStack(spacing: 8) {
-                    TextField("Required by some providers, e.g. gpt-4o-transcribe", text: $realtimeStreamingModelDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($isEditingRealtimeStreamingModel)
-                        .onSubmit {
-                            commitRealtimeStreamingModel()
-                        }
-                        .onChange(of: isEditingRealtimeStreamingModel) { isEditing in
-                            if !isEditing {
-                                commitRealtimeStreamingModel()
-                            }
-                        }
-                    if !realtimeStreamingModelDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Button("Reset") {
-                            realtimeStreamingModelDraft = ""
-                            appState.realtimeStreamingModel = ""
-                        }
-                        .font(.caption)
-                    }
-                }
-                Text("Used only for realtime streaming. Leave empty for providers that supply a server default.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .onAppear {
-            transcriptionModelDraft = appState.transcriptionModel
-            realtimeStreamingModelDraft = appState.realtimeStreamingModel
-            postProcessingModelDraft = appState.postProcessingModel
-            postProcessingFallbackModelDraft = appState.postProcessingFallbackModel
-            contextModelDraft = appState.contextModel
-        }
-        .onChange(of: appState.transcriptionModel) { value in
-            if !isEditingTranscriptionModel {
-                transcriptionModelDraft = value
-            }
-        }
-        .onChange(of: appState.realtimeStreamingModel) { value in
-            if !isEditingRealtimeStreamingModel {
-                realtimeStreamingModelDraft = value
-            }
-        }
-        .onChange(of: appState.postProcessingModel) { value in
-            if !isEditingPostProcessingModel {
-                postProcessingModelDraft = value
-            }
-        }
-        .onChange(of: appState.postProcessingFallbackModel) { value in
-            if !isEditingPostProcessingFallbackModel {
-                postProcessingFallbackModelDraft = value
-            }
-        }
-        .onChange(of: appState.contextModel) { value in
-            if !isEditingContextModel {
-                contextModelDraft = value
-            }
-        }
-    }
-}
-
 // MARK: - Settings
 
 struct SettingsView: View {
@@ -1549,6 +1237,7 @@ struct ModelsSettingsView: View {
     @State private var keyValidationIssue: QuillUserIssueRecord?
     @State private var customVocabularyInput: String = ""
     @FocusState private var customVocabularyFocused: Bool
+    @State private var settingsDraftCommitRegistrationID: UUID?
     @State private var advancedProviderSettingsExpanded = false
 
     private struct OutputLanguageOption {
@@ -1617,6 +1306,7 @@ struct ModelsSettingsView: View {
             )
             meetingSummaryFallbackModelDraft = appState.meetingSummaryFallbackModel
             customVocabularyInput = appState.customVocabulary
+            registerVocabularyDraftCommit()
             initializeManagedNativeModel()
             reconcileRetainedLocalAIModels()
         }
@@ -1684,6 +1374,7 @@ struct ModelsSettingsView: View {
         }
         .onDisappear {
             commitCustomVocabulary()
+            unregisterVocabularyDraftCommit()
             appState.commitModelSettingsDrafts(
                 transcriptionEnabled: transcriptionEnabledDraft,
                 transcriptionChoice: settingsTranscriptionChoice,
@@ -2489,6 +2180,10 @@ struct ModelsSettingsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 aiProcessingChoicePicker(for: .context)
 
+                Text("Used for context inference, with a text-only retry when screenshot analysis fails. Screenshot analysis requires a model that accepts image input.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 if let warning = appState.contextModelCapabilityWarning {
                     Label(warning, systemImage: "exclamationmark.triangle")
                         .font(.caption)
@@ -3033,6 +2728,19 @@ struct ModelsSettingsView: View {
         }
     }
 
+    private func registerVocabularyDraftCommit() {
+        guard settingsDraftCommitRegistrationID == nil else { return }
+        settingsDraftCommitRegistrationID = appState.registerSettingsDraftCommit {
+            commitCustomVocabulary()
+        }
+    }
+
+    private func unregisterVocabularyDraftCommit() {
+        guard let settingsDraftCommitRegistrationID else { return }
+        appState.unregisterSettingsDraftCommit(settingsDraftCommitRegistrationID)
+        self.settingsDraftCommitRegistrationID = nil
+    }
+
     private func commitCustomVocabulary() {
         let trimmed = customVocabularyInput.trimmingCharacters(in: .whitespacesAndNewlines)
         if appState.customVocabulary != trimmed {
@@ -3141,6 +2849,7 @@ struct PromptsSettingsView: View {
     @State private var customContextPromptInput: String = ""
     @FocusState private var customSystemPromptFocused: Bool
     @FocusState private var customContextPromptFocused: Bool
+    @State private var settingsDraftCommitRegistrationID: UUID?
     @State private var showDefaultSystemPrompt = false
     @State private var showDefaultContextPrompt = false
     @State private var systemTestInput = "Um, so I was like, thinking we should uh, refactor the authentication module, you know?"
@@ -3176,11 +2885,27 @@ struct PromptsSettingsView: View {
             customContextPromptInput = appState.customContextPrompt.isEmpty
                 ? AppContextService.defaultContextPrompt
                 : appState.customContextPrompt
+            registerPromptDraftCommit()
         }
         .onDisappear {
             commitCustomSystemPrompt()
             commitCustomContextPrompt()
+            unregisterPromptDraftCommit()
         }
+    }
+
+    private func registerPromptDraftCommit() {
+        guard settingsDraftCommitRegistrationID == nil else { return }
+        settingsDraftCommitRegistrationID = appState.registerSettingsDraftCommit {
+            commitCustomSystemPrompt()
+            commitCustomContextPrompt()
+        }
+    }
+
+    private func unregisterPromptDraftCommit() {
+        guard let settingsDraftCommitRegistrationID else { return }
+        appState.unregisterSettingsDraftCommit(settingsDraftCommitRegistrationID)
+        self.settingsDraftCommitRegistrationID = nil
     }
 
     private func commitCustomSystemPrompt() {

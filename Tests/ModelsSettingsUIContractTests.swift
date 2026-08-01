@@ -16,7 +16,8 @@ struct ModelsSettingsUIContractTests {
         testUIOnlyBoundary(appState: appState)
         testExistingProviderRoutingRemains(postProcessing: postProcessing, context: context)
         testExistingModelCatalogRemains(modelConfiguration)
-        testProviderContextPickerRequiresVisionModels(settings)
+        testLiveContextPickerRequiresVisionModels(settings)
+        testVocabularyDraftRegistersForRecordingStart(settings)
         testExistingModelLifecycleRemains(settings)
         try testModelFirstTopLevelStructure(settings)
         testPromptControlsMovedOutOfModels(settings)
@@ -105,30 +106,48 @@ struct ModelsSettingsUIContractTests {
         }
     }
 
-    private static func testProviderContextPickerRequiresVisionModels(_ source: String) {
-        let provider = block(
+    private static func testLiveContextPickerRequiresVisionModels(_ source: String) {
+        let models = block(
             in: source,
-            from: "struct ProviderSettingsFields",
-            to: "// MARK: - Settings"
+            from: "struct ModelsSettingsView",
+            to: "// MARK: - Prompts Settings"
         )
-        let contextModel = block(
-            in: provider,
-            from: "ModelDropdownView(\n                title: \"Context Model\"",
-            to: "ModelDropdownView(\n                title: \"Transcription Model\""
+        let context = block(
+            in: models,
+            from: "private var contextFeatureSection: some View",
+            to: "private var meetingSummaryEnabled"
+        )
+        precondition(
+            context.contains("aiProcessingChoicePicker(for: .context)"),
+            "the visible Context Settings section uses the capability-filtered model picker"
+        )
+        precondition(
+            context.contains("Screenshot analysis requires a model that accepts image input."),
+            "the visible Context Settings section explains its image-input requirement"
+        )
+        precondition(
+            !source.contains("struct ProviderSettingsFields"),
+            "the unused legacy provider Settings view is removed"
+        )
+    }
+
+    private static func testVocabularyDraftRegistersForRecordingStart(_ source: String) {
+        let models = block(
+            in: source,
+            from: "struct ModelsSettingsView",
+            to: "// MARK: - Prompts Settings"
         )
         for expected in [
-            "predefinedModels: ModelConfiguration.visionModels",
-            "Screenshot analysis requires a model that accepts image input."
+            "@State private var settingsDraftCommitRegistrationID: UUID?",
+            "appState.registerSettingsDraftCommit",
+            "commitCustomVocabulary()",
+            "appState.unregisterSettingsDraftCommit"
         ] {
             precondition(
-                contextModel.contains(expected),
-                "Context model picker must require a vision-capable model: \(expected)"
+                models.contains(expected),
+                "Vocabulary draft is registered for recording-start persistence: \(expected)"
             )
         }
-        precondition(
-            !contextModel.contains("predefinedModels: ModelConfiguration.llmModels"),
-            "Context model picker does not offer text-only models by default"
-        )
     }
 
     private static func testExistingModelLifecycleRemains(_ settings: String) {
