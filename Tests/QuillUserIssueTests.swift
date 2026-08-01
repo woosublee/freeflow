@@ -7,6 +7,7 @@ struct QuillUserIssueTests {
         try testEveryCodeHasCompleteEnglishAndKoreanPresentation(bundle: bundle)
         try testSeverityAndRecoveryActions()
         try testHistoryUnavailablePresentation(bundle: bundle)
+        try testHistoryArchivedPresentation(bundle: bundle)
         try testVersionedPersistenceRoundTripAndRejection()
         try testPersistedPayloadExcludesPrivateDiagnostics()
         try testLocalIssueUsesBoundedDiagnosticCategoryAndExcerpt()
@@ -51,7 +52,8 @@ struct QuillUserIssueTests {
             .meetingSummaryUnavailable,
             .meetingSummaryInvalidResponse,
             .historyPersistenceUnavailable,
-            .historyRecovered
+            .historyRecovered,
+            .historyArchived
         ]
 
         for code in QuillUserIssueCode.allCases {
@@ -158,6 +160,31 @@ struct QuillUserIssueTests {
         try expect(
             korean.body == "노트와 오디오 파일은 삭제되지 않았습니다. Quill을 다시 시작해 재시도하거나 데이터 폴더를 열어 지원 및 복구에 사용할 수 있습니다.",
             "history-unavailable Korean body confirms asset preservation"
+        )
+    }
+
+    private static func testHistoryArchivedPresentation(bundle: Bundle) throws {
+        let record = QuillUserIssueRecord(code: .historyArchived)
+        let english = record.presentation(language: "en", bundle: bundle)
+        let korean = record.presentation(language: "ko", bundle: bundle)
+
+        try expect(record.severity == .warning, "archived history is an informational warning")
+        try expect(record.recoveryAction == .none, "archived history has no automatic recovery action")
+        try expect(
+            english.title == "Old history was archived",
+            "archived-history English title distinguishes archive from restore"
+        )
+        try expect(
+            english.body == "New history is saving separately. Restore, import, and merge are not available yet.",
+            "archived-history English body states the #243 boundary"
+        )
+        try expect(
+            korean.title == "이전 기록을 보관함",
+            "archived-history Korean title is localized"
+        )
+        try expect(
+            korean.body == "새 기록은 별도로 저장 중입니다. 복원, 가져오기, 병합은 아직 제공되지 않습니다.",
+            "archived-history Korean body states the #243 boundary"
         )
     }
 

@@ -14789,6 +14789,182 @@
         }
       }
     },
+    "Archive Old History and Start Fresh…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archive Old History and Start Fresh…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 기록을 보관하고 새로 시작…"
+          }
+        }
+      }
+    },
+    "Archive and Start Fresh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archive and Start Fresh"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "보관하고 새로 시작"
+          }
+        }
+      }
+    },
+    "Archive old history?": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archive old history?"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 기록을 보관할까요?"
+          }
+        }
+      }
+    },
+    "Archiving recording history…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archiving recording history…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "녹음 기록을 보관하는 중…"
+          }
+        }
+      }
+    },
+    "Finish the current recording or transcription before archiving history.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish the current recording or transcription before archiving history."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기록을 보관하기 전에 현재 녹음 또는 전사를 완료하세요."
+          }
+        }
+      }
+    },
+    "Archiving recording history is still in progress.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archiving recording history is still in progress."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "녹음 기록을 보관하는 작업이 아직 진행 중입니다."
+          }
+        }
+      }
+    },
+    "Old history was archived": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Old history was archived"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 기록을 보관함"
+          }
+        }
+      }
+    },
+    "New history is saving separately. Restore, import, and merge are not available yet.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New history is saving separately. Restore, import, and merge are not available yet."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "새 기록은 별도로 저장 중입니다. 복원, 가져오기, 병합은 아직 제공되지 않습니다."
+          }
+        }
+      }
+    },
+    "Open Recovery Folder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Recovery Folder"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복구 폴더 열기"
+          }
+        }
+      }
+    },
+    "Open the recovery folder to keep the archived history available for a future recovery.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open the recovery folder to keep the archived history available for a future recovery."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "향후 복구에 사용할 수 있도록 보관된 기록을 복구 폴더에서 유지하세요."
+          }
+        }
+      }
+    },
+    "Your earlier notes will not appear in the new history. The original database, audio, transcripts, and recovery metadata will be kept in a recovery snapshot. Restore, import, and merge are not available yet. Cancel to leave everything unchanged.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your earlier notes will not appear in the new history. The original database, audio, transcripts, and recovery metadata will be kept in a recovery snapshot. Restore, import, and merge are not available yet. Cancel to leave everything unchanged."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 노트는 새 기록에 표시되지 않습니다. 원본 데이터베이스, 오디오, 전사문, 복구 메타데이터는 복구 스냅샷에 보관됩니다. 복원, 가져오기, 병합은 아직 제공되지 않습니다. 취소하면 아무 데이터도 이동하지 않습니다."
+          }
+        }
+      }
+    },
     "Recording history couldn’t be opened": {
       "localizations": {
         "en": {

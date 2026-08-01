@@ -483,7 +483,11 @@ struct NoteBrowserView: View {
             if appState.isHistoryUnavailable {
                 historyUnavailableView
             } else {
-                HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    HistoryArchiveNoticeView()
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                    HStack(spacing: 0) {
             sidebarPanel
             detailPanel
         }
@@ -521,6 +525,7 @@ struct NoteBrowserView: View {
             knownHistoryIDs = Set(ids)
         }
             }
+                }
         }
     }
 
@@ -537,15 +542,8 @@ struct NoteBrowserView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 440)
-            HStack(spacing: 10) {
-                Button("Open Data Folder") {
-                    appState.openHistoryDataFolder()
-                }
-                Button("Quit Quill") {
-                    NSApplication.shared.terminate(nil)
-                }
-            }
-            .controlSize(.large)
+            HistoryUnavailableRecoveryActions()
+                .controlSize(.large)
             Spacer()
         }
         .padding(32)

@@ -150,19 +150,17 @@ struct MenuBarView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    HStack {
-                        Button("Open Data Folder") {
-                            appState.openHistoryDataFolder()
-                        }
-                        Button("Quit Quill") {
-                            NSApplication.shared.terminate(nil)
-                        }
-                    }
-                    .controlSize(.small)
+                    HistoryUnavailableRecoveryActions()
+                        .controlSize(.small)
                 }
                 .foregroundStyle(.orange)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 4)
+            } else if appState.historyArchiveSafety == .unresolvedArchive {
+                Divider()
+                HistoryArchiveNoticeView()
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 4)
             } else if let warning = appState.historyPersistenceWarning {
                 Divider()
                 Label(

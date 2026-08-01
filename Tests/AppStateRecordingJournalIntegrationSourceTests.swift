@@ -12,7 +12,7 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             encoding: .utf8
         )
 
-        precondition(source.contains("private let recordingJournalStore: RecordingJournalStore"))
+        precondition(source.contains("private var recordingJournalStore: RecordingJournalStore"))
         precondition(source.contains("private var activeSegmentedJournalController: SegmentedRecordingJournalController?"))
         precondition(source.contains("private var activeRecordingID: UUID?"))
         precondition(source.contains("private var activeInputSwitchToken: UUID?"))
