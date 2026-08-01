@@ -5,6 +5,7 @@ struct NoteFileExportTests {
     static func main() throws {
         try testSanitizedBaseNameAndFallback()
         try testSuggestedBaseNamePrefersTitle()
+        try testSuggestedBaseNameFallsBackToCalendarTitle()
         try testSuggestedBaseNameUsesLocalizedTimestamp()
         try testLocalizedTimestampNameExportsWithColon()
         try testDestinationNamesPreserveAudioExtension()
@@ -38,7 +39,19 @@ struct NoteFileExportTests {
 
     private static func testSuggestedBaseNamePrefersTitle() throws {
         let name = NoteFileExportNaming.suggestedBaseName(
-            preferredTitle: "  Product review  ",
+            customTitle: "  Product review  ",
+            calendarTitle: "Calendar review",
+            timestamp: localizedNameTimestamp,
+            locale: Locale(identifier: "ko_KR"),
+            timeZone: seoulTimeZone
+        )
+        precondition(name == "Product review")
+    }
+
+    private static func testSuggestedBaseNameFallsBackToCalendarTitle() throws {
+        let name = NoteFileExportNaming.suggestedBaseName(
+            customTitle: " \n ",
+            calendarTitle: "  Product review  ",
             timestamp: localizedNameTimestamp,
             locale: Locale(identifier: "ko_KR"),
             timeZone: seoulTimeZone
@@ -48,13 +61,15 @@ struct NoteFileExportTests {
 
     private static func testSuggestedBaseNameUsesLocalizedTimestamp() throws {
         let korean = NoteFileExportNaming.suggestedBaseName(
-            preferredTitle: " \n ",
+            customTitle: " \n ",
+            calendarTitle: nil,
             timestamp: localizedNameTimestamp,
             locale: Locale(identifier: "ko_KR"),
             timeZone: seoulTimeZone
         )
         let english = NoteFileExportNaming.suggestedBaseName(
-            preferredTitle: nil,
+            customTitle: nil,
+            calendarTitle: nil,
             timestamp: localizedNameTimestamp,
             locale: Locale(identifier: "en_US"),
             timeZone: seoulTimeZone

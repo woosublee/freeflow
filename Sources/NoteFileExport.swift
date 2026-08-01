@@ -2,15 +2,16 @@ import Foundation
 
 enum NoteFileExportNaming {
     static func suggestedBaseName(
-        preferredTitle: String?,
+        customTitle: String?,
+        calendarTitle: String?,
         timestamp: Date,
         locale: Locale = .current,
         timeZone: TimeZone = .current
     ) -> String {
-        if let preferredTitle {
-            let trimmed = preferredTitle.trimmingCharacters(
+        for candidate in [customTitle, calendarTitle] {
+            let trimmed = candidate?.trimmingCharacters(
                 in: .whitespacesAndNewlines
-            )
+            ) ?? ""
             if !trimmed.isEmpty { return trimmed }
         }
 
