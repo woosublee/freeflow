@@ -7,6 +7,7 @@ struct AIModelCapabilitiesTests {
         try testQualityQwenFeatures()
         try testRetiredQwenHasNoCapabilities()
         try testCloudCapabilitiesAreExplicit()
+        try testCuratedCloudModelCatalog()
         try testProviderlessCloudVisionAliasIsCanonicalized()
         print("AIModelCapabilitiesTests passed")
     }
@@ -50,6 +51,25 @@ struct AIModelCapabilitiesTests {
                 "\(modelID) is not Context-capable until explicitly declared"
             )
         }
+    }
+
+    private static func testCuratedCloudModelCatalog() throws {
+        for retiredModelID in [
+            "allam-2-7b",
+            "canopylabs/orpheus-arabic-saudi",
+            "canopylabs/orpheus-v1-english",
+            "meta-llama/llama-prompt-guard-2-22m",
+            "meta-llama/llama-prompt-guard-2-86m"
+        ] {
+            try expect(
+                !ModelConfiguration.llmModels.contains(retiredModelID),
+                "retired Cloud model \(retiredModelID) is not offered as a predefined choice"
+            )
+        }
+        try expect(
+            ModelConfiguration.visionModels == ["qwen/qwen3.6-27b"],
+            "the predefined Context model list contains only the declared Cloud vision model"
+        )
     }
 
     private static func testProviderlessCloudVisionAliasIsCanonicalized() throws {

@@ -16,6 +16,7 @@ struct ModelsSettingsUIContractTests {
         testUIOnlyBoundary(appState: appState)
         testExistingProviderRoutingRemains(postProcessing: postProcessing, context: context)
         testExistingModelCatalogRemains(modelConfiguration)
+        testProviderContextPickerRequiresVisionModels(settings)
         testExistingModelLifecycleRemains(settings)
         try testModelFirstTopLevelStructure(settings)
         testPromptControlsMovedOutOfModels(settings)
@@ -42,6 +43,7 @@ struct ModelsSettingsUIContractTests {
         testCurrentSpecDocumentsCorrectedLayout(currentSpec)
         try testSettingsDraftsApplyImmediatelyWhenReadyOrOff(settings)
         try testSettingsDraftsSyncFromExternalAppStateChanges(settings)
+        testVocabularyDraftCommitsOnFocusLoss(settings)
         try testNoteBrowserSharesStandardModelsAndGatesRealtime(appState)
         print("ModelsSettingsUIContractTests passed")
     }
@@ -101,6 +103,32 @@ struct ModelsSettingsUIContractTests {
         ] {
             precondition(source.contains("\"\(model)\""), "Missing existing model: \(model)")
         }
+    }
+
+    private static func testProviderContextPickerRequiresVisionModels(_ source: String) {
+        let provider = block(
+            in: source,
+            from: "struct ProviderSettingsFields",
+            to: "// MARK: - Settings"
+        )
+        let contextModel = block(
+            in: provider,
+            from: "ModelDropdownView(\n                title: \"Context Model\"",
+            to: "ModelDropdownView(\n                title: \"Transcription Model\""
+        )
+        for expected in [
+            "predefinedModels: ModelConfiguration.visionModels",
+            "Screenshot analysis requires a model that accepts image input."
+        ] {
+            precondition(
+                contextModel.contains(expected),
+                "Context model picker must require a vision-capable model: \(expected)"
+            )
+        }
+        precondition(
+            !contextModel.contains("predefinedModels: ModelConfiguration.llmModels"),
+            "Context model picker does not offer text-only models by default"
+        )
     }
 
     private static func testExistingModelLifecycleRemains(_ settings: String) {
@@ -1061,6 +1089,33 @@ struct ModelsSettingsUIContractTests {
         ] {
             precondition(source.contains(expected), "Missing external draft sync: \(expected)")
         }
+    }
+
+    private static func testVocabularyDraftCommitsOnFocusLoss(_ source: String) {
+        let models = block(
+            in: source,
+            from: "struct ModelsSettingsView",
+            to: "// MARK: - Prompts Settings"
+        )
+        let vocabulary = block(
+            in: models,
+            from: "private var vocabularySection: some View",
+            to: "private func commitAPIBaseURL()"
+        )
+        for expected in [
+            "@FocusState private var customVocabularyFocused: Bool",
+            "private func commitCustomVocabulary()",
+            ".onDisappear {",
+            "commitCustomVocabulary()",
+            ".focused($customVocabularyFocused)",
+            ".onChange(of: customVocabularyFocused)"
+        ] {
+            precondition(models.contains(expected), "Missing focus-loss vocabulary persistence: \(expected)")
+        }
+        precondition(
+            !vocabulary.contains(".onChange(of: customVocabularyInput)"),
+            "Vocabulary does not persist on every keystroke"
+        )
     }
 
     private static func testNoteBrowserSharesStandardModelsAndGatesRealtime(

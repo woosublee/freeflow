@@ -185,8 +185,8 @@ struct ProviderSettingsFields: View {
 
             ModelDropdownView(
                 title: "Context Model",
-                subtitle: "Used for context inference, with a text-only retry when screenshot analysis fails.",
-                predefinedModels: ModelConfiguration.llmModels,
+                subtitle: "Used for context inference, with a text-only retry when screenshot analysis fails. Screenshot analysis requires a model that accepts image input.",
+                predefinedModels: ModelConfiguration.visionModels,
                 defaultModel: AppState.defaultContextModel,
                 textDraft: $contextModelDraft,
                 onCommit: commitContextModel,
@@ -1548,6 +1548,7 @@ struct ModelsSettingsView: View {
     @State private var isValidatingKey = false
     @State private var keyValidationIssue: QuillUserIssueRecord?
     @State private var customVocabularyInput: String = ""
+    @FocusState private var customVocabularyFocused: Bool
     @State private var advancedProviderSettingsExpanded = false
 
     private struct OutputLanguageOption {
@@ -1682,6 +1683,7 @@ struct ModelsSettingsView: View {
             reconcileRetainedLocalAIModels()
         }
         .onDisappear {
+            commitCustomVocabulary()
             appState.commitModelSettingsDrafts(
                 transcriptionEnabled: transcriptionEnabledDraft,
                 transcriptionChoice: settingsTranscriptionChoice,
@@ -3016,17 +3018,25 @@ struct ModelsSettingsView: View {
             TextEditor(text: $customVocabularyInput)
                 .font(.system(.body, design: .monospaced))
                 .frame(minHeight: 80, maxHeight: 140)
+                .focused($customVocabularyFocused)
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
                 )
-                .onChange(of: customVocabularyInput) { newValue in
-                    appState.customVocabulary = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                .onChange(of: customVocabularyFocused) { focused in
+                    if !focused { commitCustomVocabulary() }
                 }
 
             Text("Separate entries with commas, new lines, or semicolons.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private func commitCustomVocabulary() {
+        let trimmed = customVocabularyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if appState.customVocabulary != trimmed {
+            appState.customVocabulary = trimmed
         }
     }
 
@@ -3129,6 +3139,8 @@ struct PromptsSettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var customSystemPromptInput: String = ""
     @State private var customContextPromptInput: String = ""
+    @FocusState private var customSystemPromptFocused: Bool
+    @FocusState private var customContextPromptFocused: Bool
     @State private var showDefaultSystemPrompt = false
     @State private var showDefaultContextPrompt = false
     @State private var systemTestInput = "Um, so I was like, thinking we should uh, refactor the authentication module, you know?"
@@ -3164,6 +3176,50 @@ struct PromptsSettingsView: View {
             customContextPromptInput = appState.customContextPrompt.isEmpty
                 ? AppContextService.defaultContextPrompt
                 : appState.customContextPrompt
+        }
+        .onDisappear {
+            commitCustomSystemPrompt()
+            commitCustomContextPrompt()
+        }
+    }
+
+    private func commitCustomSystemPrompt() {
+        let trimmed = customSystemPromptInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let defaultTrimmed = PostProcessingService.defaultSystemPrompt
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == defaultTrimmed || trimmed.isEmpty {
+            if !appState.customSystemPrompt.isEmpty {
+                appState.customSystemPrompt = ""
+                appState.customSystemPromptLastModified = ""
+            }
+        } else {
+            if appState.customSystemPrompt != trimmed {
+                appState.customSystemPrompt = trimmed
+            }
+            let today = iso8601DayFormatter.string(from: Date())
+            if appState.customSystemPromptLastModified != today {
+                appState.customSystemPromptLastModified = today
+            }
+        }
+    }
+
+    private func commitCustomContextPrompt() {
+        let trimmed = customContextPromptInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let defaultTrimmed = AppContextService.defaultContextPrompt
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == defaultTrimmed || trimmed.isEmpty {
+            if !appState.customContextPrompt.isEmpty {
+                appState.customContextPrompt = ""
+                appState.customContextPromptLastModified = ""
+            }
+        } else {
+            if appState.customContextPrompt != trimmed {
+                appState.customContextPrompt = trimmed
+            }
+            let today = iso8601DayFormatter.string(from: Date())
+            if appState.customContextPromptLastModified != today {
+                appState.customContextPromptLastModified = today
+            }
         }
     }
 
@@ -3270,22 +3326,10 @@ struct PromptsSettingsView: View {
             TextEditor(text: $customSystemPromptInput)
                 .font(.system(.body, design: .monospaced))
                 .frame(minHeight: 120, maxHeight: 200)
+                .focused($customSystemPromptFocused)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3), lineWidth: 1))
-                .onChange(of: customSystemPromptInput) { newValue in
-                    let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let defaultTrimmed = PostProcessingService.defaultSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if trimmed == defaultTrimmed || trimmed.isEmpty {
-                        if !appState.customSystemPrompt.isEmpty {
-                            appState.customSystemPrompt = ""
-                            appState.customSystemPromptLastModified = ""
-                        }
-                    } else {
-                        appState.customSystemPrompt = trimmed
-                        let today = iso8601DayFormatter.string(from: Date())
-                        if appState.customSystemPromptLastModified != today {
-                            appState.customSystemPromptLastModified = today
-                        }
-                    }
+                .onChange(of: customSystemPromptFocused) { focused in
+                    if !focused { commitCustomSystemPrompt() }
                 }
 
             HStack {
@@ -3384,6 +3428,7 @@ struct PromptsSettingsView: View {
     }
 
     private func runSystemPromptTest() {
+        commitCustomSystemPrompt()
         systemTestRunning = true
         systemTestOutput = nil
         systemTestIssue = nil
@@ -3484,22 +3529,10 @@ struct PromptsSettingsView: View {
             TextEditor(text: $customContextPromptInput)
                 .font(.system(.body, design: .monospaced))
                 .frame(minHeight: 120, maxHeight: 200)
+                .focused($customContextPromptFocused)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3), lineWidth: 1))
-                .onChange(of: customContextPromptInput) { newValue in
-                    let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let defaultTrimmed = AppContextService.defaultContextPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if trimmed == defaultTrimmed || trimmed.isEmpty {
-                        if !appState.customContextPrompt.isEmpty {
-                            appState.customContextPrompt = ""
-                            appState.customContextPromptLastModified = ""
-                        }
-                    } else {
-                        appState.customContextPrompt = trimmed
-                        let today = iso8601DayFormatter.string(from: Date())
-                        if appState.customContextPromptLastModified != today {
-                            appState.customContextPromptLastModified = today
-                        }
-                    }
+                .onChange(of: customContextPromptFocused) { focused in
+                    if !focused { commitCustomContextPrompt() }
                 }
 
             HStack {
@@ -3598,6 +3631,7 @@ struct PromptsSettingsView: View {
     }
 
     private func runContextPromptTest() {
+        commitCustomContextPrompt()
         contextTestRunning = true
         contextTestOutput = nil
         contextTestIssue = nil

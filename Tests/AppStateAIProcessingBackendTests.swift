@@ -35,6 +35,7 @@ struct AppStateAIProcessingBackendTests {
         await testCorruptedChoicesFallbackAndPersistNormalizedCloudChoices()
         await testWhitespaceCloudIDsFallbackToRememberedOrDefaultModels()
         await testStoredCloudChoicesReconcileRememberedModels()
+        await testRetiredCloudChoiceRemainsVisibleForReplacement()
         await testStoredLocalChoicesPreserveRememberedCloudModels()
         await testIncompatibleLegacyContextSelectionIsPreservedAndDisabled()
         await testProviderlessQwenVisionCloudChoiceSupportsContext()
@@ -170,6 +171,33 @@ struct AppStateAIProcessingBackendTests {
         assert(defaults.string(forKey: "context_model") == "stored/context")
         assert(storedChoice(forKey: "post_processing_backend_choice") == .cloud(modelID: "stored/post"))
         assert(storedChoice(forKey: "context_backend_choice") == .cloud(modelID: "stored/context"))
+    }
+
+    private static func testRetiredCloudChoiceRemainsVisibleForReplacement() async {
+        resetAIProcessingDefaults()
+        let retiredModelID = "allam-2-7b"
+        precondition(
+            !ModelConfiguration.llmModels.contains(retiredModelID),
+            "the retired Cloud model is no longer offered as a predefined choice"
+        )
+        storeChoice(
+            .cloud(modelID: retiredModelID),
+            forKey: "post_processing_backend_choice"
+        )
+
+        let appState = await makeRefreshedAppState()
+        await MainActor.run {
+            let matches = appState.aiProcessingChoiceDisplays(for: .postProcessing)
+                .filter { $0.choice == .cloud(modelID: retiredModelID) }
+            precondition(
+                matches.count == 1 && matches[0].isAvailable,
+                "a saved retired Cloud model remains visible exactly once so it can be replaced"
+            )
+            precondition(
+                appState.postProcessingBackendChoice == .cloud(modelID: retiredModelID),
+                "catalog cleanup does not reset the saved Cloud selection"
+            )
+        }
     }
 
     private static func testStoredLocalChoicesPreserveRememberedCloudModels() async {

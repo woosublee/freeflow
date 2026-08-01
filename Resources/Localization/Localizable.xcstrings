@@ -9989,6 +9989,22 @@
         }
       }
     },
+    "Used for context inference, with a text-only retry when screenshot analysis fails. Screenshot analysis requires a model that accepts image input.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Used for context inference, with a text-only retry when screenshot analysis fails. Screenshot analysis requires a model that accepts image input."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컨텍스트 추론에 사용하며, 스크린샷 분석에 실패하면 텍스트 전용으로 다시 시도합니다. 스크린샷 분석에는 이미지 입력을 지원하는 모델이 필요합니다."
+          }
+        }
+      }
+    },
     "Post-Processing Fallback Model": {
       "localizations": {
         "en": {
