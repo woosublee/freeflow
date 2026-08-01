@@ -35,6 +35,8 @@ struct AppStateAIProcessingBackendTests {
         await testCorruptedChoicesFallbackAndPersistNormalizedCloudChoices()
         await testWhitespaceCloudIDsFallbackToRememberedOrDefaultModels()
         await testStoredCloudChoicesReconcileRememberedModels()
+        try await testSettingsDraftCommittersFlushBeforeRecordingStart()
+        await testRetiredCloudChoiceRemainsVisibleForReplacement()
         await testStoredLocalChoicesPreserveRememberedCloudModels()
         await testIncompatibleLegacyContextSelectionIsPreservedAndDisabled()
         await testProviderlessQwenVisionCloudChoiceSupportsContext()
@@ -170,6 +172,73 @@ struct AppStateAIProcessingBackendTests {
         assert(defaults.string(forKey: "context_model") == "stored/context")
         assert(storedChoice(forKey: "post_processing_backend_choice") == .cloud(modelID: "stored/post"))
         assert(storedChoice(forKey: "context_backend_choice") == .cloud(modelID: "stored/context"))
+    }
+
+    private static func testSettingsDraftCommittersFlushBeforeRecordingStart() async throws {
+        resetAIProcessingDefaults()
+        let appState = await makeRefreshedAppState()
+
+        await MainActor.run {
+            var commitCount = 0
+            let registrationID = appState.registerSettingsDraftCommit {
+                commitCount += 1
+            }
+
+            appState.commitSettingsDraftsBeforeRecordingStart()
+            precondition(
+                commitCount == 1,
+                "recording start flushes the active Settings text draft"
+            )
+
+            appState.unregisterSettingsDraftCommit(registrationID)
+            appState.commitSettingsDraftsBeforeRecordingStart()
+            precondition(
+                commitCount == 1,
+                "a dismissed Settings view no longer receives recording-start flushes"
+            )
+        }
+
+        let recordingStart = sourceBlock(
+            in: try appStateSource(),
+            from: "private func startRecording(triggerMode: RecordingTriggerMode",
+            to: "/// Whether the configured recording flow will actually exercise Accessibility."
+        )
+        let flush = requiredRange(
+            of: "commitSettingsDraftsBeforeRecordingStart()",
+            in: recordingStart
+        )
+        let task = requiredRange(of: "Task { [weak self]", in: recordingStart)
+        assert(
+            flush.lowerBound < task.lowerBound,
+            "recording flushes Settings text drafts before capturing Context or starting async work"
+        )
+    }
+
+    private static func testRetiredCloudChoiceRemainsVisibleForReplacement() async {
+        resetAIProcessingDefaults()
+        let retiredModelID = "allam-2-7b"
+        precondition(
+            !ModelConfiguration.llmModels.contains(retiredModelID),
+            "the retired Cloud model is no longer offered as a predefined choice"
+        )
+        storeChoice(
+            .cloud(modelID: retiredModelID),
+            forKey: "post_processing_backend_choice"
+        )
+
+        let appState = await makeRefreshedAppState()
+        await MainActor.run {
+            let matches = appState.aiProcessingChoiceDisplays(for: .postProcessing)
+                .filter { $0.choice == .cloud(modelID: retiredModelID) }
+            precondition(
+                matches.count == 1 && matches[0].isAvailable,
+                "a saved retired Cloud model remains visible exactly once so it can be replaced"
+            )
+            precondition(
+                appState.postProcessingBackendChoice == .cloud(modelID: retiredModelID),
+                "catalog cleanup does not reset the saved Cloud selection"
+            )
+        }
     }
 
     private static func testStoredLocalChoicesPreserveRememberedCloudModels() async {

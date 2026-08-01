@@ -2463,6 +2463,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private var contextService: AppContextService
+    private var settingsDraftCommits: [UUID: () -> Void] = [:]
     private var contextCaptureTask: Task<AppContext?, Never>?
     private var capturedContext: AppContext?
     private var googleCalendarConnectionTask: Task<Void, Never>?
@@ -8558,6 +8559,24 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
+    func registerSettingsDraftCommit(_ commit: @escaping () -> Void) -> UUID {
+        let registrationID = UUID()
+        settingsDraftCommits[registrationID] = commit
+        return registrationID
+    }
+
+    @MainActor
+    func unregisterSettingsDraftCommit(_ registrationID: UUID) {
+        settingsDraftCommits[registrationID] = nil
+    }
+
+    @MainActor
+    func commitSettingsDraftsBeforeRecordingStart() {
+        let commits = Array(settingsDraftCommits.values)
+        commits.forEach { $0() }
+    }
+
+    @MainActor
     func toggleRecording() {
         os_log(.info, log: recordingLog, "toggleRecording() called, isRecording=%{public}d", isRecording)
         cancelPendingShortcutStart()
@@ -8973,9 +8992,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @MainActor
     private func startRecording(triggerMode: RecordingTriggerMode, onStarted: (@MainActor () -> Void)? = nil) {
         guard requireAvailableHistoryForMutation() else { return }
+        guard !isRecording else { return }
+        commitSettingsDraftsBeforeRecordingStart()
         let t0 = CFAbsoluteTimeGetCurrent()
         os_log(.info, log: recordingLog, "startRecording() entered")
-        guard !isRecording else { return }
 
         // 전사 중이면 기존 transcribing overlay/indicator를 정리하고 소유권만 넘긴다.
         if isTranscribing {

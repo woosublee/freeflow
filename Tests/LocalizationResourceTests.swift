@@ -244,7 +244,8 @@ struct LocalizationResourceTests {
             "My calendars", "Shared calendars", "Primary", "My calendar", "Shared",
             "Use API Provider transcription to choose a final output language.",
             "Enable post-processing to choose a final output language.",
-            "Final transcript language for post-processing."
+            "Final transcript language for post-processing.",
+            "Used for context inference, with a text-only retry when screenshot analysis fails. Screenshot analysis requires a model that accepts image input."
         ] {
             let localizations = (strings[key] as? [String: Any])?["localizations"] as? [String: Any]
             assert(!(((localizations?["en"] as? [String: Any])?["stringUnit"] as? [String: Any])?["value"] as? String ?? "").isEmpty)

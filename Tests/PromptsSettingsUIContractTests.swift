@@ -9,6 +9,8 @@ struct PromptsSettingsUIContractTests {
         testNavigation(tabs: tabs, settings: settings)
         testCardOrder(settings)
         testPromptPersistence(settings)
+        testPromptModificationDatesRequireContentChange(settings)
+        testPromptDraftsCommitOnFocusLoss(settings)
         testBackendAwareTests(settings)
         testInstructionGuard(settings)
         testScreenshotResolutionStaysOut(settings)
@@ -54,6 +56,88 @@ struct PromptsSettingsUIContractTests {
         ] {
             precondition(prompts.contains(expected), "Missing Prompt persistence behavior: \(expected)")
         }
+    }
+
+    private static func testPromptModificationDatesRequireContentChange(_ source: String) {
+        let prompts = promptsBlock(source)
+        let systemCommit = block(
+            in: prompts,
+            from: "private func commitCustomSystemPrompt()",
+            to: "private func commitCustomContextPrompt()"
+        )
+        let contextCommit = block(
+            in: prompts,
+            from: "private func commitCustomContextPrompt()",
+            to: "private var hasConfiguredCloudAPIKey"
+        )
+
+        for (commit, storedPrompt, lastModified) in [
+            (systemCommit, "appState.customSystemPrompt", "appState.customSystemPromptLastModified"),
+            (contextCommit, "appState.customContextPrompt", "appState.customContextPromptLastModified")
+        ] {
+            let contentChange = "} else if \(storedPrompt) != trimmed {"
+            guard let contentChangeRange = commit.range(of: contentChange),
+                  let dateRange = commit.range(of: "let today = iso8601DayFormatter"),
+                  let lastModifiedWrite = commit.range(of: "\(lastModified) = today") else {
+                preconditionFailure(
+                    "Prompt modification dates must be written only after a content change"
+                )
+            }
+            precondition(
+                contentChangeRange.lowerBound < dateRange.lowerBound
+                    && dateRange.lowerBound < lastModifiedWrite.lowerBound,
+                "Prompt modification dates are not refreshed by view dismissal, tests, or recording-start draft flushes"
+            )
+        }
+    }
+
+    private static func testPromptDraftsCommitOnFocusLoss(_ source: String) {
+        let prompts = promptsBlock(source)
+        for expected in [
+            "@FocusState private var customSystemPromptFocused: Bool",
+            "@FocusState private var customContextPromptFocused: Bool",
+            "private func commitCustomSystemPrompt()",
+            "private func commitCustomContextPrompt()",
+            ".onDisappear {",
+            "commitCustomSystemPrompt()",
+            "commitCustomContextPrompt()",
+            ".focused($customSystemPromptFocused)",
+            ".focused($customContextPromptFocused)",
+            ".onChange(of: customSystemPromptFocused)",
+            ".onChange(of: customContextPromptFocused)",
+            "@State private var settingsDraftCommitRegistrationID: UUID?",
+            "appState.registerSettingsDraftCommit",
+            "appState.unregisterSettingsDraftCommit"
+        ] {
+            precondition(prompts.contains(expected), "Missing focus-loss prompt persistence: \(expected)")
+        }
+        precondition(
+            !prompts.contains(".onChange(of: customSystemPromptInput)"),
+            "System prompt does not persist on every keystroke"
+        )
+        precondition(
+            !prompts.contains(".onChange(of: customContextPromptInput)"),
+            "Context prompt does not persist on every keystroke"
+        )
+
+        let systemRunner = block(
+            in: prompts,
+            from: "private func runSystemPromptTest()",
+            to: "private var contextPromptSection"
+        )
+        let contextRunner = String(prompts[
+            prompts.range(of: "private func runContextPromptTest()")!.lowerBound...
+        ])
+        precondition(
+            systemRunner.range(of: "commitCustomSystemPrompt()")!.lowerBound
+                < systemRunner.range(of: "let service = appState.makePostProcessingService()")!.lowerBound,
+            "System prompt tests commit the latest draft before building a service"
+        )
+        precondition(
+            contextRunner.range(of: "commitCustomContextPrompt()")!.lowerBound
+                < contextRunner.range(of: "let service = appState.makeAppContextService()")!.lowerBound,
+            "Context prompt tests commit the latest draft before collecting context"
+        )
     }
 
     private static func testBackendAwareTests(_ source: String) {

@@ -16,6 +16,8 @@ struct ModelsSettingsUIContractTests {
         testUIOnlyBoundary(appState: appState)
         testExistingProviderRoutingRemains(postProcessing: postProcessing, context: context)
         testExistingModelCatalogRemains(modelConfiguration)
+        testLiveContextPickerRequiresVisionModels(settings)
+        testVocabularyDraftRegistersForRecordingStart(settings)
         testExistingModelLifecycleRemains(settings)
         try testModelFirstTopLevelStructure(settings)
         testPromptControlsMovedOutOfModels(settings)
@@ -42,6 +44,7 @@ struct ModelsSettingsUIContractTests {
         testCurrentSpecDocumentsCorrectedLayout(currentSpec)
         try testSettingsDraftsApplyImmediatelyWhenReadyOrOff(settings)
         try testSettingsDraftsSyncFromExternalAppStateChanges(settings)
+        testVocabularyDraftCommitsOnFocusLoss(settings)
         try testNoteBrowserSharesStandardModelsAndGatesRealtime(appState)
         print("ModelsSettingsUIContractTests passed")
     }
@@ -100,6 +103,50 @@ struct ModelsSettingsUIContractTests {
             "whisper-large-v3-turbo"
         ] {
             precondition(source.contains("\"\(model)\""), "Missing existing model: \(model)")
+        }
+    }
+
+    private static func testLiveContextPickerRequiresVisionModels(_ source: String) {
+        let models = block(
+            in: source,
+            from: "struct ModelsSettingsView",
+            to: "// MARK: - Prompts Settings"
+        )
+        let context = block(
+            in: models,
+            from: "private var contextFeatureSection: some View",
+            to: "private var meetingSummaryEnabled"
+        )
+        precondition(
+            context.contains("aiProcessingChoicePicker(for: .context)"),
+            "the visible Context Settings section uses the capability-filtered model picker"
+        )
+        precondition(
+            context.contains("Screenshot analysis requires a model that accepts image input."),
+            "the visible Context Settings section explains its image-input requirement"
+        )
+        precondition(
+            !source.contains("struct ProviderSettingsFields"),
+            "the unused legacy provider Settings view is removed"
+        )
+    }
+
+    private static func testVocabularyDraftRegistersForRecordingStart(_ source: String) {
+        let models = block(
+            in: source,
+            from: "struct ModelsSettingsView",
+            to: "// MARK: - Prompts Settings"
+        )
+        for expected in [
+            "@State private var settingsDraftCommitRegistrationID: UUID?",
+            "appState.registerSettingsDraftCommit",
+            "commitCustomVocabulary()",
+            "appState.unregisterSettingsDraftCommit"
+        ] {
+            precondition(
+                models.contains(expected),
+                "Vocabulary draft is registered for recording-start persistence: \(expected)"
+            )
         }
     }
 
@@ -1061,6 +1108,33 @@ struct ModelsSettingsUIContractTests {
         ] {
             precondition(source.contains(expected), "Missing external draft sync: \(expected)")
         }
+    }
+
+    private static func testVocabularyDraftCommitsOnFocusLoss(_ source: String) {
+        let models = block(
+            in: source,
+            from: "struct ModelsSettingsView",
+            to: "// MARK: - Prompts Settings"
+        )
+        let vocabulary = block(
+            in: models,
+            from: "private var vocabularySection: some View",
+            to: "private func commitAPIBaseURL()"
+        )
+        for expected in [
+            "@FocusState private var customVocabularyFocused: Bool",
+            "private func commitCustomVocabulary()",
+            ".onDisappear {",
+            "commitCustomVocabulary()",
+            ".focused($customVocabularyFocused)",
+            ".onChange(of: customVocabularyFocused)"
+        ] {
+            precondition(models.contains(expected), "Missing focus-loss vocabulary persistence: \(expected)")
+        }
+        precondition(
+            !vocabulary.contains(".onChange(of: customVocabularyInput)"),
+            "Vocabulary does not persist on every keystroke"
+        )
     }
 
     private static func testNoteBrowserSharesStandardModelsAndGatesRealtime(
