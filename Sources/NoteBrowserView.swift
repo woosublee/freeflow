@@ -1491,9 +1491,8 @@ private struct NoteDetailView: View {
                     audioURL: storedAudioURL
                 ),
                 suggestedBaseName: NoteFileExportNaming.suggestedBaseName(
-                    preferredTitle: item.customTitle
-                        ?? item.calendarMatch?.appliedTitle,
-                    transcript: displayContent,
+                    customTitle: item.customTitle,
+                    calendarTitle: item.calendarMatch?.appliedTitle,
                     timestamp: item.timestamp
                 ),
                 onDismiss: { showFileExportSheet = false },
