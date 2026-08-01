@@ -9,6 +9,7 @@ struct PromptsSettingsUIContractTests {
         testNavigation(tabs: tabs, settings: settings)
         testCardOrder(settings)
         testPromptPersistence(settings)
+        testPromptModificationDatesRequireContentChange(settings)
         testPromptDraftsCommitOnFocusLoss(settings)
         testBackendAwareTests(settings)
         testInstructionGuard(settings)
@@ -54,6 +55,39 @@ struct PromptsSettingsUIContractTests {
             "Button(\"Reset to Default\")"
         ] {
             precondition(prompts.contains(expected), "Missing Prompt persistence behavior: \(expected)")
+        }
+    }
+
+    private static func testPromptModificationDatesRequireContentChange(_ source: String) {
+        let prompts = promptsBlock(source)
+        let systemCommit = block(
+            in: prompts,
+            from: "private func commitCustomSystemPrompt()",
+            to: "private func commitCustomContextPrompt()"
+        )
+        let contextCommit = block(
+            in: prompts,
+            from: "private func commitCustomContextPrompt()",
+            to: "private var hasConfiguredCloudAPIKey"
+        )
+
+        for (commit, storedPrompt, lastModified) in [
+            (systemCommit, "appState.customSystemPrompt", "appState.customSystemPromptLastModified"),
+            (contextCommit, "appState.customContextPrompt", "appState.customContextPromptLastModified")
+        ] {
+            let contentChange = "} else if \(storedPrompt) != trimmed {"
+            guard let contentChangeRange = commit.range(of: contentChange),
+                  let dateRange = commit.range(of: "let today = iso8601DayFormatter"),
+                  let lastModifiedWrite = commit.range(of: "\(lastModified) = today") else {
+                preconditionFailure(
+                    "Prompt modification dates must be written only after a content change"
+                )
+            }
+            precondition(
+                contentChangeRange.lowerBound < dateRange.lowerBound
+                    && dateRange.lowerBound < lastModifiedWrite.lowerBound,
+                "Prompt modification dates are not refreshed by view dismissal, tests, or recording-start draft flushes"
+            )
         }
     }
 

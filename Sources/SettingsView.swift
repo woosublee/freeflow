@@ -2917,10 +2917,8 @@ struct PromptsSettingsView: View {
                 appState.customSystemPrompt = ""
                 appState.customSystemPromptLastModified = ""
             }
-        } else {
-            if appState.customSystemPrompt != trimmed {
-                appState.customSystemPrompt = trimmed
-            }
+        } else if appState.customSystemPrompt != trimmed {
+            appState.customSystemPrompt = trimmed
             let today = iso8601DayFormatter.string(from: Date())
             if appState.customSystemPromptLastModified != today {
                 appState.customSystemPromptLastModified = today
@@ -2937,10 +2935,8 @@ struct PromptsSettingsView: View {
                 appState.customContextPrompt = ""
                 appState.customContextPromptLastModified = ""
             }
-        } else {
-            if appState.customContextPrompt != trimmed {
-                appState.customContextPrompt = trimmed
-            }
+        } else if appState.customContextPrompt != trimmed {
+            appState.customContextPrompt = trimmed
             let today = iso8601DayFormatter.string(from: Date())
             if appState.customContextPromptLastModified != today {
                 appState.customContextPromptLastModified = today
