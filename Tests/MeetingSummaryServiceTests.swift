@@ -4,17 +4,36 @@ import Foundation
 @main
 #endif
 struct MeetingSummaryServiceTests {
+    private static let summaryLanguage = MeetingSummaryLanguageContext(
+        requestedOutputLanguage: "English",
+        appliedLanguageCode: "en",
+        resolutionSource: .configured
+    )
+
     static func main() async throws {
         try await testCloudRequestUsesSummaryPromptAndStrictJSON()
         try await testLocalRequestUsesLoopbackWithoutAuthorization()
         try testUnknownTopLevelKeyIsRejected()
         try testOwnerAndDueDateMayBeNull()
         try await testRateLimitUsesConfiguredFallback()
+        try await testRateLimitRetainsAllowlistedProviderCode()
+        try await testFallbackTerminalFailureReportsFallbackModel()
+        try await testTraditionalChineseSameAsSpokenUsesTraditionalPromptAndValidator()
         try await testLongTranscriptExtractsEveryChunkThenMerges()
         try await testHierarchyUsesBoundedIntermediateMergesAndCompletionCeiling()
         try await testHierarchyCarriesSingletonTailIntoNextMergeRound()
+        try await testUnresolvedCitationReturnsUnverifiedSummaryWithoutExtraModelCall()
+        try await testMissingCitationReturnsUnverifiedSummary()
+        try await testNullPointCitationReturnsUnverifiedSummary()
+        try await testNullOverviewCitationReturnsUnverifiedSummary()
         try await testChunkFailureDoesNotReturnPartialSummary()
         try testUserIssueMapsToSummaryDomainCodes()
+        try testInvalidResponseUsesSafeResponseEnvelopeSubtype()
+        try testSafeFailureSubtypeMappingsCoverSummaryValidation()
+        try testAttemptDoesNotSerializeSecretsOrProviderBody()
+        try testProviderCodeAllowlistExcludesUnsafeValues()
+        try await testProviderResponseCodeIsNormalizedBeforeErrorPropagation()
+        try await testSameAsSpokenKoreanUsesKoreanPromptAndValidator()
         print("MeetingSummaryServiceTests passed")
     }
 
@@ -47,7 +66,7 @@ struct MeetingSummaryServiceTests {
             )
         }
 
-        for error: MeetingSummaryError in [.invalidResponse("bad"), .emptyOutput] {
+        for error: MeetingSummaryError in [.invalidResponse(.responseEnvelope), .emptyOutput()] {
             let issue = error.userIssue(
                 providerHost: "api.example.com",
                 modelID: "summary/model",
@@ -81,6 +100,240 @@ struct MeetingSummaryServiceTests {
         )
     }
 
+    private static func testInvalidResponseUsesSafeResponseEnvelopeSubtype() throws {
+        let issue = MeetingSummaryError.invalidResponse(
+            .responseEnvelope
+        ).userIssue(
+            providerHost: "api.example.com",
+            modelID: "summary/model",
+            localBackend: nil
+        )
+
+        try expect(
+            issue.context.meetingSummaryFailureSubtype == .responseEnvelope,
+            "invalid summary envelopes retain only the safe response-envelope category"
+        )
+    }
+
+    private static func testSafeFailureSubtypeMappingsCoverSummaryValidation() throws {
+        let cases: [(MeetingSummaryError, MeetingSummaryFailureSubtype)] = [
+            (.invalidResponse(.jsonSchema), .jsonSchema),
+            (.invalidResponse(.contextBudget), .contextBudget),
+            (.invalidResponse(.mergeBudget), .mergeBudget),
+            (.emptyOutput(), .emptyOutput),
+            (.outputRejected(.sourceQuoteMissing), .sourceEvidenceMissing),
+            (.outputRejected(.sourceQuoteNotFound), .sourceQuoteNotFound),
+            (.outputRejected(.overviewEvidenceCountInvalid), .overviewEvidenceCountInvalid),
+            (.outputRejected(.overviewEvidenceQuoteDuplicate), .overviewEvidenceQuoteDuplicate),
+            (.outputRejected(.ownerNotGrounded), .ownerNotGrounded),
+            (.outputRejected(.dueDateNotGrounded), .dueDateNotGrounded),
+            (.outputRejected(.languageMismatch), .languageMismatch)
+        ]
+
+        for (error, expectedSubtype) in cases {
+            let issue = error.userIssue(
+                providerHost: "api.example.com",
+                modelID: "summary/model",
+                localBackend: nil
+            )
+            try expect(
+                issue.context.meetingSummaryFailureSubtype == expectedSubtype,
+                "\(error) maps to the bounded summary failure subtype \(expectedSubtype)"
+            )
+            let encoded = String(data: try JSONEncoder().encode(issue), encoding: .utf8)!
+            try expect(
+                encoded.contains(expectedSubtype.rawValue),
+                "the app-owned summary failure subtype persists by its closed raw value"
+            )
+        }
+    }
+
+    private static func testAttemptDoesNotSerializeSecretsOrProviderBody() throws {
+        let issue = MeetingSummaryError.requestFailed(
+            statusCode: 503,
+            providerCode: "temporarily_unavailable"
+        ).userIssue(
+            providerHost: "api.example.com",
+            modelID: "summary/model",
+            localBackend: nil
+        )
+        let attempt = MeetingSummaryAttempt(
+            occurredAt: Date(timeIntervalSince1970: 2_000),
+            outcome: .failed,
+            backendKind: .cloud,
+            modelID: "summary/model",
+            providerHost: "api.example.com",
+            language: nil,
+            issue: issue
+        )
+        let encoded = String(data: try JSONEncoder().encode(attempt), encoding: .utf8)!
+
+        precondition(encoded.contains("temporarily_unavailable"))
+        precondition(!encoded.contains("sk-secret"))
+        precondition(!encoded.contains("provider response body"))
+        precondition(!encoded.contains("회의 전사문"))
+    }
+
+    private static func testProviderCodeAllowlistExcludesUnsafeValues() throws {
+        let unsafeCodes = [
+            String(repeating: "x", count: 129),
+            "temporarily unavailable",
+            "temporary\nunavailable",
+            "sk-secret-api-key",
+            "Bearer secret-token",
+            "Authorization: Bearer secret-token",
+            #"{\"error\":{\"message\":\"provider response body\"}}"#,
+            "회의 전사문",
+            "AIza" + String(repeating: "a", count: 35),
+            "ghp_" + String(repeating: "a", count: 36),
+            "xoxb-" + [
+                String(repeating: "1", count: 12),
+                String(repeating: "2", count: 12),
+                String(repeating: "a", count: 24)
+            ].joined(separator: "-"),
+            "sk_live_" + String(repeating: "a", count: 24)
+        ]
+        for code in unsafeCodes {
+            let issue = MeetingSummaryError.requestFailed(
+                statusCode: 503,
+                providerCode: code
+            ).userIssue(
+                providerHost: "api.example.com",
+                modelID: "summary/model",
+                localBackend: nil
+            )
+            let attempt = MeetingSummaryAttempt(
+                occurredAt: Date(timeIntervalSince1970: 2_000),
+                outcome: .failed,
+                backendKind: .cloud,
+                modelID: "summary/model",
+                providerHost: "api.example.com",
+                language: nil,
+                issue: issue
+            )
+            let encoded = String(
+                data: try JSONEncoder().encode(attempt),
+                encoding: .utf8
+            )!
+
+            try expect(
+                issue.context.providerCode == nil,
+                "unsafe provider code is discarded: \(code)"
+            )
+            try expect(
+                !encoded.contains(code),
+                "unsafe provider code is not serialized: \(code)"
+            )
+            try expect(
+                !issue.presentation().detailsRows.contains { $0.value == code },
+                "unsafe provider code is not shown in Details: \(code)"
+            )
+        }
+
+        let safeCode = "temporarily_unavailable"
+        let safeIssue = MeetingSummaryError.requestFailed(
+            statusCode: 503,
+            providerCode: safeCode
+        ).userIssue(
+            providerHost: "api.example.com",
+            modelID: "summary/model",
+            localBackend: nil
+        )
+        try expect(
+            safeIssue.context.providerCode == safeCode,
+            "allowlisted provider identifiers remain available for diagnostics"
+        )
+        let safeAttempt = MeetingSummaryAttempt(
+            occurredAt: Date(timeIntervalSince1970: 2_000),
+            outcome: .failed,
+            backendKind: .cloud,
+            modelID: "summary/model",
+            providerHost: "api.example.com",
+            language: nil,
+            issue: safeIssue
+        )
+        let safeEncoded = String(
+            data: try JSONEncoder().encode(safeAttempt),
+            encoding: .utf8
+        )!
+        try expect(
+            safeEncoded.contains(safeCode),
+            "allowlisted provider code remains in attempt diagnostics"
+        )
+        try expect(
+            safeIssue.presentation().detailsRows.contains {
+                $0.label == "Provider code" && $0.value == safeCode
+            },
+            "allowlisted provider code remains in Details"
+        )
+    }
+
+    private static func testProviderResponseCodeIsNormalizedBeforeErrorPropagation() async throws {
+        let service = makeCloudService { request in
+            try providerErrorResponse(
+                request: request,
+                statusCode: 503,
+                code: "sk-secret-api-key"
+            )
+        }
+
+        do {
+            _ = try await service.generate(
+                source: MeetingSummarySource(
+                    transcript: summaryTranscript,
+                    calendar: nil,
+                    languageContext: summaryLanguage
+                )
+            )
+            throw MeetingSummaryServiceTestFailure("Expected provider failure")
+        } catch let failure as MeetingSummaryServiceTestFailure {
+            throw failure
+        } catch let error as MeetingSummaryError {
+            guard case .requestFailed(
+                statusCode: 503,
+                providerCode: nil,
+                modelID: _
+            ) = error else {
+                throw MeetingSummaryServiceTestFailure(
+                    "unsafe response code must be discarded before propagation"
+                )
+            }
+        }
+    }
+
+    private static func testSameAsSpokenKoreanUsesKoreanPromptAndValidator() async throws {
+        let recorder = MeetingSummaryRequestRecorder()
+        let sourceQuote = "회의에서 다음 주 화요일에 출시하기로 결정했습니다."
+        let source = MeetingSummarySource(
+            transcript: sourceQuote,
+            calendar: nil,
+            languageContext: MeetingSummaryLanguageContext(
+                requestedOutputLanguage: "",
+                appliedLanguageCode: "ko",
+                resolutionSource: .engineDetected
+            )
+        )
+        let koreanJSON = #"{"overview":{"text":"팀은 다음 주 화요일에 출시하기로 결정했습니다.","sourceQuotes":["회의에서 다음 주 화요일에 출시하기로 결정했습니다."]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
+        let service = makeCloudService { request in
+            recorder.record(request)
+            return try successResponse(request: request, content: koreanJSON)
+        }
+
+        let result = try await service.generate(source: source)
+        let request = try recorder.requests().only()
+        let messages = try array(try requestBody(request)["messages"])
+        let system = try string(try dictionary(messages[0])["content"])
+
+        try expect(
+            system.contains("Write generated summary prose in Korean."),
+            "Same as spoken Korean uses the stable Korean prompt name"
+        )
+        try expect(
+            result.draft.overview.text == "팀은 다음 주 화요일에 출시하기로 결정했습니다.",
+            "Korean generated prose passes validation for Korean source context"
+        )
+    }
+
     private static func testCloudRequestUsesSummaryPromptAndStrictJSON() async throws {
         let recorder = MeetingSummaryRequestRecorder()
         let service = makeCloudService { request in
@@ -95,7 +348,8 @@ struct MeetingSummaryServiceTests {
                 start: start,
                 end: start.addingTimeInterval(1_800),
                 attendees: ["Ada", "Lin"]
-            )
+            ),
+            languageContext: summaryLanguage
         )
 
         let result = try await service.generate(source: source)
@@ -143,7 +397,6 @@ struct MeetingSummaryServiceTests {
                 )
             ),
             cloudFallbackModelID: "cloud/fallback",
-            outputLanguage: "English",
             transport: { request in
                 recorder.record(request)
                 return try successResponse(request: request, content: validJSON)
@@ -151,7 +404,11 @@ struct MeetingSummaryServiceTests {
         )
 
         _ = try await service.generate(
-            source: MeetingSummarySource(transcript: summaryTranscript, calendar: nil)
+            source: MeetingSummarySource(
+                transcript: summaryTranscript,
+                calendar: nil,
+                languageContext: summaryLanguage
+            )
         )
 
         let request = try recorder.requests().only()
@@ -198,7 +455,11 @@ struct MeetingSummaryServiceTests {
         }
 
         let result = try await service.generate(
-            source: MeetingSummarySource(transcript: summaryTranscript, calendar: nil)
+            source: MeetingSummarySource(
+                transcript: summaryTranscript,
+                calendar: nil,
+                languageContext: summaryLanguage
+            )
         )
         let models = try recorder.requests().map {
             try string(try requestBody($0)["model"])
@@ -206,6 +467,153 @@ struct MeetingSummaryServiceTests {
 
         try expect(models == ["primary/model", "fallback/model"], "fallback request order")
         try expect(result.modelID == "fallback/model", "fallback result model")
+    }
+
+    private static func testRateLimitRetainsAllowlistedProviderCode() async throws {
+        for testCase in [
+            (providerCode: "rate_limit_exceeded", expectedCode: "rate_limit_exceeded"),
+            (providerCode: "sk-secret-api-key", expectedCode: Optional<String>.none)
+        ] {
+            let service = makeCloudService { request in
+                try providerErrorResponse(
+                    request: request,
+                    statusCode: 429,
+                    code: testCase.providerCode
+                )
+            }
+
+            do {
+                _ = try await service.generate(
+                    source: MeetingSummarySource(
+                        transcript: summaryTranscript,
+                        calendar: nil,
+                        languageContext: summaryLanguage
+                    )
+                )
+                throw MeetingSummaryServiceTestFailure("Expected rate limit")
+            } catch let failure as MeetingSummaryServiceTestFailure {
+                throw failure
+            } catch let error as MeetingSummaryError {
+                let issue = error.userIssue(
+                    providerHost: "api.example.com",
+                    modelID: "primary/model",
+                    localBackend: nil
+                )
+                let attempt = MeetingSummaryAttempt(
+                    occurredAt: Date(timeIntervalSince1970: 2_000),
+                    outcome: .failed,
+                    backendKind: .cloud,
+                    modelID: "primary/model",
+                    providerHost: "api.example.com",
+                    language: nil,
+                    issue: issue
+                )
+                let encoded = String(
+                    data: try JSONEncoder().encode(attempt),
+                    encoding: .utf8
+                )!
+
+                try expect(
+                    issue.context.providerCode == testCase.expectedCode,
+                    "429 preserves only an allowlisted provider code"
+                )
+                try expect(
+                    issue.presentation().detailsRows.contains {
+                        $0.label == "Provider code" && $0.value == testCase.expectedCode
+                    } == (testCase.expectedCode != nil),
+                    "429 Details preserve only an allowlisted provider code"
+                )
+                if let expectedCode = testCase.expectedCode {
+                    try expect(
+                        encoded.contains(expectedCode),
+                        "429 attempt persists its allowlisted provider code"
+                    )
+                } else {
+                    try expect(
+                        !encoded.contains(testCase.providerCode),
+                        "429 attempt excludes its unsafe provider code"
+                    )
+                }
+            }
+        }
+    }
+
+    private static func testFallbackTerminalFailureReportsFallbackModel() async throws {
+        let service = makeCloudService(fallbackModel: "fallback/model") { request in
+            let model = try string(try requestBody(request)["model"])
+            if model == "primary/model" {
+                return rateLimitedResponse(request: request)
+            }
+            return try providerErrorResponse(
+                request: request,
+                statusCode: 503,
+                code: "service_unavailable"
+            )
+        }
+
+        do {
+            _ = try await service.generate(
+                source: MeetingSummarySource(
+                    transcript: summaryTranscript,
+                    calendar: nil,
+                    languageContext: summaryLanguage
+                )
+            )
+            throw MeetingSummaryServiceTestFailure("Expected fallback failure")
+        } catch let failure as MeetingSummaryServiceTestFailure {
+            throw failure
+        } catch let error as MeetingSummaryError {
+            let issue = error.userIssue(
+                providerHost: "api.example.com",
+                modelID: "primary/model",
+                localBackend: nil
+            )
+            try expect(
+                issue.context.modelID == "fallback/model",
+                "terminal fallback failure reports the model that returned it"
+            )
+        }
+    }
+
+    private static func testTraditionalChineseSameAsSpokenUsesTraditionalPromptAndValidator() async throws {
+        let sourceQuote = "團隊決定下週二發布產品，並在今天完成說明文件。"
+        for engineLanguageCode in ["zh-Hant", "zh-HK"] {
+            let spoken = SpokenLanguageResolver.resolve(
+                requestedLanguageCode: "auto",
+                engineLanguageCode: engineLanguageCode,
+                transcript: sourceQuote
+            )
+            let source = MeetingSummarySource(
+                transcript: sourceQuote,
+                calendar: nil,
+                languageContext: MeetingSummaryLanguageContext(
+                    requestedOutputLanguage: "",
+                    appliedLanguageCode: spoken.languageCode ?? "",
+                    resolutionSource: spoken.source
+                )
+            )
+            let traditionalJSON = #"{"overview":{"text":"團隊決定下週二發布產品。","sourceQuotes":["團隊決定下週二發布產品，並在今天完成說明文件。"]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
+            let recorder = MeetingSummaryRequestRecorder()
+            let service = makeCloudService { request in
+                recorder.record(request)
+                return try successResponse(request: request, content: traditionalJSON)
+            }
+
+            _ = try await service.generate(source: source)
+            let messages = try array(try requestBody(try recorder.requests().only())["messages"])
+            let system = try string(try dictionary(messages[0])["content"])
+            try expect(
+                spoken == SpokenLanguageResolution(
+                    languageCode: "zh-Hant",
+                    source: .engineDetected
+                ),
+                "Traditional Chinese engine result is preserved for \(engineLanguageCode)"
+            )
+            try expect(
+                system.contains("Write generated summary prose in Traditional Chinese."),
+                "Traditional Chinese Same-as-spoken uses a script-specific prompt"
+            )
+        }
     }
 
     private static func testLongTranscriptExtractsEveryChunkThenMerges() async throws {
@@ -229,7 +637,11 @@ struct MeetingSummaryServiceTests {
         ].joined(separator: "\n\n")
 
         _ = try await service.generate(
-            source: MeetingSummarySource(transcript: transcript, calendar: nil)
+            source: MeetingSummarySource(
+                transcript: transcript,
+                calendar: nil,
+                languageContext: summaryLanguage
+            )
         )
         let requests = recorder.requests()
 
@@ -258,7 +670,8 @@ struct MeetingSummaryServiceTests {
         _ = try await service.generate(
             source: MeetingSummarySource(
                 transcript: String(repeating: "Evidence line. ", count: 10),
-                calendar: nil
+                calendar: nil,
+                languageContext: summaryLanguage
             )
         )
 
@@ -303,7 +716,8 @@ struct MeetingSummaryServiceTests {
         _ = try await service.generate(
             source: MeetingSummarySource(
                 transcript: "Evidence line.\n\nEvidence line.\n\nEvidence line.",
-                calendar: nil
+                calendar: nil,
+                languageContext: summaryLanguage
             )
         )
 
@@ -315,6 +729,100 @@ struct MeetingSummaryServiceTests {
             "three extractions, one intermediate merge, and one final merge"
         )
         try expect(mergeRequests.count == 2, "singleton tails do not create merge requests")
+    }
+
+    private static func testUnresolvedCitationReturnsUnverifiedSummaryWithoutExtraModelCall() async throws {
+        let recorder = MeetingSummaryRequestRecorder()
+        let service = makeCloudService { request in
+            recorder.record(request)
+            return try successResponse(
+                request: request,
+                content: #"{"overview":{"text":"Release review","sourceQuotes":["Invented citation."]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
+            )
+        }
+
+        let result = try await service.generate(
+            source: MeetingSummarySource(
+                transcript: summaryTranscript,
+                calendar: nil,
+                languageContext: summaryLanguage
+            )
+        )
+
+        try expect(
+            result.evidenceVerification == .unverified,
+            "unresolved citation saves an unverified summary instead of a hard failure"
+        )
+        try expect(
+            recorder.requests().count == 1,
+            "unresolved citation does not cause an extra model call"
+        )
+    }
+
+    private static func testMissingCitationReturnsUnverifiedSummary() async throws {
+        let service = makeCloudService { request in
+            try successResponse(
+                request: request,
+                content: #"{"overview":{"text":"Release review","sourceQuotes":[]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
+            )
+        }
+
+        let result = try await service.generate(
+            source: MeetingSummarySource(
+                transcript: summaryTranscript,
+                calendar: nil,
+                languageContext: summaryLanguage
+            )
+        )
+
+        try expect(
+            result.evidenceVerification == .unverified,
+            "missing citations are saved as unverified evidence instead of a schema failure"
+        )
+    }
+
+    private static func testNullPointCitationReturnsUnverifiedSummary() async throws {
+        let service = makeCloudService { request in
+            try successResponse(
+                request: request,
+                content: #"{"overview":{"text":"Release review","sourceQuotes":["Release review."]},"keyPoints":[{"text":"Launch remains on schedule.","sourceQuote":null}],"decisions":[],"actionItems":[],"openQuestions":[]}"#
+            )
+        }
+
+        let result = try await service.generate(
+            source: MeetingSummarySource(
+                transcript: summaryTranscript,
+                calendar: nil,
+                languageContext: summaryLanguage
+            )
+        )
+
+        try expect(
+            result.evidenceVerification == .unverified,
+            "missing point citations are saved as unverified evidence instead of a schema failure"
+        )
+    }
+
+    private static func testNullOverviewCitationReturnsUnverifiedSummary() async throws {
+        let service = makeCloudService { request in
+            try successResponse(
+                request: request,
+                content: #"{"overview":{"text":"Release review","sourceQuotes":[null]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}"#
+            )
+        }
+
+        let result = try await service.generate(
+            source: MeetingSummarySource(
+                transcript: summaryTranscript,
+                calendar: nil,
+                languageContext: summaryLanguage
+            )
+        )
+
+        try expect(
+            result.evidenceVerification == .unverified,
+            "missing overview citations are saved as unverified evidence instead of a schema failure"
+        )
     }
 
     private static func testChunkFailureDoesNotReturnPartialSummary() async throws {
@@ -335,7 +843,11 @@ struct MeetingSummaryServiceTests {
 
         do {
             _ = try await service.generate(
-                source: MeetingSummarySource(transcript: transcript, calendar: nil)
+                source: MeetingSummarySource(
+                transcript: transcript,
+                calendar: nil,
+                languageContext: summaryLanguage
+            )
             )
             throw MeetingSummaryServiceTestFailure("Expected chunk failure")
         } catch let failure as MeetingSummaryServiceTestFailure {
@@ -359,7 +871,6 @@ struct MeetingSummaryServiceTests {
                 cloudAPIKey: "test-key"
             ),
             cloudFallbackModelID: fallbackModel,
-            outputLanguage: "English",
             chunker: chunker,
             tokenBudgeter: tokenBudgeter,
             transport: transport
@@ -391,6 +902,28 @@ struct MeetingSummaryServiceTests {
             HTTPURLResponse(
                 url: request.url!,
                 statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+        )
+    }
+
+    private static func providerErrorResponse(
+        request: URLRequest,
+        statusCode: Int,
+        code: String
+    ) throws -> (Data, URLResponse) {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "error": [
+                "code": code,
+                "message": "provider response body"
+            ]
+        ])
+        return (
+            data,
+            HTTPURLResponse(
+                url: request.url!,
+                statusCode: statusCode,
                 httpVersion: nil,
                 headerFields: nil
             )!

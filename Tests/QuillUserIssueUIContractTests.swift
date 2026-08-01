@@ -9,7 +9,6 @@ struct QuillUserIssueUIContractTests {
         let settings = try source("Sources/SettingsView.swift")
         let menuBar = try source("Sources/MenuBarView.swift")
         let appState = try source("Sources/AppState.swift")
-        let historyRecovery = try source("Sources/HistoryRecoveryView.swift")
 
         try testSharedRenderer(issueView)
         try testNoteBrowserUsesStructuredErrorAndWarningUI(noteBrowser)
@@ -19,12 +18,11 @@ struct QuillUserIssueUIContractTests {
         try testRunLogSanitizesMachineStatuses(settings)
         try testRecoveryActionsUseExistingRoutes(noteBrowser, appState)
         try testDismissibleBannerScopedToWarningStyle(issueView, noteBrowser, appState)
-        try testHistoryUnavailableProtectionAndArchiveNotice(
-            noteBrowser,
-            settings,
+        try testSummaryRetryUsesSummarySpecificCopy(issueView)
+        try testSummaryInvalidationDoesNotBecomeTransientFailure(noteBrowser)
+        try testNonDurableHistoryWarningIsVisibleAndDoesNotExposeBackups(
             menuBar,
-            appState,
-            historyRecovery
+            appState
         )
         print("QuillUserIssueUIContractTests passed")
     }
@@ -226,74 +224,60 @@ struct QuillUserIssueUIContractTests {
         )
     }
 
-    private static func testHistoryUnavailableProtectionAndArchiveNotice(
-        _ noteBrowser: String,
-        _ settings: String,
-        _ menuBar: String,
-        _ appState: String,
-        _ historyRecovery: String
+    private static func testSummaryInvalidationDoesNotBecomeTransientFailure(
+        _ source: String
+    ) throws {
+        let generation = block(
+            source,
+            from: "private func generateSummary() {",
+            to: "\n    private func deleteSummary"
+        )
+        try expect(
+            generation.contains("if let error = error as? MeetingSummaryError, error == .sourceChanged {"),
+            "source and lifecycle invalidation return without a transient Summary failure"
+        )
+    }
+
+    private static func testSummaryRetryUsesSummarySpecificCopy(
+        _ source: String
     ) throws {
         try expect(
-            appState.contains("@Published private(set) var isHistoryUnavailable = false"),
-            "AppState publishes an explicit history-unavailable state"
+            source.contains("var actionTitleOverride: String?"),
+            "shared issue renderer accepts a context-specific retry title"
         )
         try expect(
-            appState.contains("func archiveOldHistoryAndStartFresh() -> Bool")
-                && appState.contains("func openHistoryRecoveryFolder()"),
-            "AppState exposes explicit archive and recovery-folder actions"
+            source.contains("actionTitleOverride ?? actionTitle"),
+            "summary retry copy overrides the transcription retry title"
+        )
+    }
+
+    private static func testNonDurableHistoryWarningIsVisibleAndDoesNotExposeBackups(
+        _ menuBar: String,
+        _ appState: String
+    ) throws {
+        try expect(
+            appState.contains("@Published private(set) var historyPersistenceWarning"),
+            "AppState publishes a session-only history persistence warning"
         )
         try expect(
-            appState.contains(".historyArchived"),
-            "AppState publishes a persistent archived-history notice"
-        )
-        for source in [noteBrowser, settings, menuBar] {
-            try expect(
-                source.contains("appState.isHistoryUnavailable"),
-                "every history surface renders the protected state"
-            )
-            try expect(
-                source.contains("HistoryUnavailableRecoveryActions"),
-                "every protected history surface uses shared archive actions"
-            )
-            try expect(
-                source.contains("HistoryArchiveNoticeView"),
-                "every history surface renders the persistent archive notice"
-            )
-        }
-        try expect(
-            menuBar.contains(".disabled(appState.isTranscribing || appState.isHistoryUnavailable"),
-            "Menu Bar disables recording while history is unavailable"
-        )
-        for source in [noteBrowser, settings] {
-            try expect(
-                source.contains("if appState.historyArchiveSafety == .unresolvedArchive {\n                        HistoryArchiveNoticeView()"),
-                "archive notice padding renders only when an archive notice is visible"
-            )
-        }
-        try expect(
-            noteBrowser.contains("if appState.isHistoryUnavailable"),
-            "Note Browser checks protected state before normal empty history"
-        )
-        for marker in [
-            "Archive Old History and Start Fresh…",
-            "Archive and Start Fresh",
-            "Open Data Folder",
-            "Open Recovery Folder",
-            ".confirmationDialog(",
-            "role: .destructive",
-            "appState.archiveOldHistoryAndStartFresh()"
-        ] {
-            try expect(historyRecovery.contains(marker), "shared recovery UI contains \(marker)")
-        }
-        try expect(
-            !historyRecovery.contains("Button(\"Restore")
-                && !historyRecovery.contains("Button(\"Import")
-                && !historyRecovery.contains("Button(\"Merge"),
-            "#242 recovery UI does not expose #243 restore, import, or merge actions"
+            appState.contains(".historyPersistenceUnavailable"),
+            "AppState uses the structured non-durable history warning"
         )
         try expect(
-            !historyRecovery.contains("backupName") && !historyRecovery.contains("History Recovery"),
-            "recovery UI does not expose internal backup names or legacy paths"
+            appState.contains(".historyRecovered"),
+            "AppState publishes a distinct warning after durable history recovery"
+        )
+        try expect(
+            menuBar.contains("appState.historyPersistenceWarning"),
+            "Menu Bar shows the non-durable history warning"
+        )
+        try expect(
+            !menuBar.contains("backupName"),
+            "Menu Bar never exposes a history recovery backup name"
+        )
+        try expect(
+            !menuBar.contains("History Recovery"),
+            "Menu Bar never exposes a history recovery path"
         )
     }
 

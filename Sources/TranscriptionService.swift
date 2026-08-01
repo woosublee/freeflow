@@ -6,6 +6,23 @@ import os.log
 
 private let transcriptionLog = OSLog(subsystem: "com.woosublee.quill", category: "Transcription")
 
+private actor CloudEngineLanguageCollector {
+    private var languageCode: String?
+
+    func record(_ resolution: SpokenLanguageResolution) {
+        record(resolution.source == .engineDetected ? resolution.languageCode : nil)
+    }
+
+    func record(_ detectedCode: String?) {
+        guard languageCode == nil, let detectedCode else { return }
+        languageCode = detectedCode
+    }
+
+    func resolvedLanguageCode() -> String? {
+        languageCode
+    }
+}
+
 struct CloudTranscriptionDependencies: Sendable {
     let encodedUploadCeilingBytes: UInt64
     let upload: @Sendable (URLRequest, Data) async throws -> (Data, URLResponse)
@@ -52,6 +69,7 @@ class TranscriptionService {
     private let localTranscriptionModel: TranscriptionModel
     private let transcriptionModel: String
     private let language: String?
+    private let requestedLanguageCode: String
     private let cloudDependencies: CloudTranscriptionDependencies
     private let cloudExecutionContext: CloudTranscriptionExecutionContext?
     private var transcriptionResponseFormat: String {
@@ -88,9 +106,11 @@ class TranscriptionService {
         let trimmedModel = transcriptionModel.trimmingCharacters(in: .whitespacesAndNewlines)
         self.transcriptionModel = trimmedModel.isEmpty ? AppState.defaultTranscriptionModel : trimmedModel
         let trimmedLanguage = language?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.language = (trimmedLanguage?.isEmpty == false)
+        let effectiveRequestLanguage = (trimmedLanguage?.isEmpty == false)
             ? trimmedLanguage
             : transcriptionLanguage.whisperArgument
+        self.language = effectiveRequestLanguage
+        self.requestedLanguageCode = effectiveRequestLanguage ?? "auto"
         self.cloudDependencies = cloudDependencies
         self.cloudExecutionContext = cloudExecutionContext
     }
@@ -133,8 +153,8 @@ class TranscriptionService {
         }
     }
 
-    // Upload audio file, submit for transcription, poll until done, return text
-    func transcribe(fileURL: URL) async throws -> String {
+    // Upload audio file, submit for transcription, and resolve its spoken language.
+    func transcribe(fileURL: URL) async throws -> TranscriptionResult {
         do {
             return try await performTranscription(fileURL: fileURL)
         } catch is CancellationError {
@@ -146,13 +166,13 @@ class TranscriptionService {
         }
     }
 
-    private func performTranscription(fileURL: URL) async throws -> String {
+    private func performTranscription(fileURL: URL) async throws -> TranscriptionResult {
         guard !Task.isCancelled else {
             throw CancellationError()
         }
 
         if useLocalTranscription {
-            return try await withThrowingTaskGroup(of: String.self) { group in
+            return try await withThrowingTaskGroup(of: TranscriptionResult.self) { group in
                 group.addTask { [weak self] in
                     guard let self else {
                         throw TranscriptionError.submissionFailed("Service deallocated")
@@ -319,7 +339,7 @@ class TranscriptionService {
     }
 
     // Run local transcription: Apple Speech, native Whisper, or legacy mlx_whisper
-    private func transcribeAudioLocally(fileURL: URL) async throws -> String {
+    private func transcribeAudioLocally(fileURL: URL) async throws -> TranscriptionResult {
         if localTranscriptionModel.isAppleSpeech {
             return try await transcribeWithAppleSpeech(fileURL: fileURL)
         }
@@ -329,7 +349,7 @@ class TranscriptionService {
         return try await transcribeWithNativeWhisper(fileURL: fileURL)
     }
 
-    private func transcribeWithNativeWhisper(fileURL: URL) async throws -> String {
+    private func transcribeWithNativeWhisper(fileURL: URL) async throws -> TranscriptionResult {
         let model = NativeWhisperModelCatalog.recommended
         let store = NativeWhisperModelStore()
         guard store.installStatus(for: model) == .ready else {
@@ -363,18 +383,17 @@ class TranscriptionService {
         defer { preparedAudio.cleanup() }
 
         do {
-            let transcript = try await runtime.transcribe(
+            return try await runtime.transcribe(
                 audioURL: preparedAudio.fileURL,
                 modelURL: modelURL,
                 languageCode: transcriptionLanguage.whisperArgument
             )
-            return normalizedTranscriptText(transcript)
         } catch let error as NativeWhisperRuntimeError {
             throw error.userIssue(modelID: model.id)
         }
     }
 
-    private func transcribeWithAppleSpeech(fileURL: URL) async throws -> String {
+    private func transcribeWithAppleSpeech(fileURL: URL) async throws -> TranscriptionResult {
         let authStatus = await withCheckedContinuation { (continuation: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
         }
@@ -414,14 +433,14 @@ class TranscriptionService {
                     resumed = true
                     let text = result.bestTranscription.formattedString
                         .trimmingCharacters(in: .whitespacesAndNewlines)
-                    continuation.resume(returning: text)
+                    continuation.resume(returning: self.transcriptionResult(text: text))
                 }
             }
         }
     }
 
-    // Run mlx_whisper locally and return transcript text
-    private func transcribeWithMlxWhisper(fileURL: URL) async throws -> String {
+    // Run mlx_whisper locally and resolve its transcript language.
+    private func transcribeWithMlxWhisper(fileURL: URL) async throws -> TranscriptionResult {
         try await Task.detached(priority: .userInitiated) { [localWhisperPath, transcriptionLanguage, localTranscriptionModel] in
             let home = FileManager.default.homeDirectoryForCurrentUser.path
             let whisperBin = (localWhisperPath?.isEmpty == false)
@@ -575,14 +594,11 @@ class TranscriptionService {
             }
 
             if self.isHallucination(text: text, json: json) {
-                return ""
+                return self.transcriptionResult(text: "")
             }
 
-            let normalizedText = self.normalizedTranscriptText(text)
-            guard !normalizedText.isEmpty else {
-                return ""
-            }
-            return normalizedText
+            let normalizedText = TranscriptTextNormalizer.normalized(text)
+            return self.transcriptionResult(text: normalizedText)
         }.value
     }
 
@@ -600,7 +616,7 @@ class TranscriptionService {
         return (try? CanonicalPCM16WAV.validateFile(at: fileURL)) != nil
     }
 
-    private func transcribeLargeCanonicalWAV(fileURL: URL) async throws -> String {
+    private func transcribeLargeCanonicalWAV(fileURL: URL) async throws -> TranscriptionResult {
         let sourceLayout = try CanonicalPCM16WAV.validateFile(at: fileURL)
         let sourceIdentity = try CloudTranscriptionSourceIdentityBuilder.make(
             fileURL: fileURL,
@@ -649,8 +665,9 @@ class TranscriptionService {
             ?? cloudDependencies.checkpointStore
         let progress = cloudExecutionContext?.progress
             ?? cloudDependencies.progress
+        let detectedLanguage = CloudEngineLanguageCollector()
         do {
-            return try await core.transcribe(
+            let text = try await core.transcribe(
                 sourceURL: fileURL,
                 sourceLayout: sourceLayout,
                 sourceIdentity: sourceIdentity,
@@ -659,13 +676,25 @@ class TranscriptionService {
                 multipart: multipart,
                 checkpointStore: checkpointStore,
                 request: { [self] chunkURL, timeoutSeconds in
-                    try await transcribeCloudFile(
+                    let result = try await transcribeCloudFile(
                         fileURL: chunkURL,
                         timeoutSeconds: timeoutSeconds,
                         useStructuredHTTPFailure: true
                     )
+                    await detectedLanguage.record(result.spokenLanguage)
+                    return result.text
+                },
+                engineLanguageCode: {
+                    await detectedLanguage.resolvedLanguageCode()
+                },
+                restoreEngineLanguageCode: { code in
+                    await detectedLanguage.record(code)
                 },
                 progress: progress
+            )
+            return transcriptionResult(
+                text: text,
+                engineLanguageCode: await detectedLanguage.resolvedLanguageCode()
             )
         } catch let failure as CloudTranscriptionHTTPFailure {
             throw QuillUserIssueError.cloudHTTP(
@@ -689,8 +718,8 @@ class TranscriptionService {
         }
     }
 
-    // Send audio file for transcription and return text
-    private func transcribeAudio(fileURL: URL) async throws -> String {
+    // Send audio file for transcription and return its normalized result.
+    private func transcribeAudio(fileURL: URL) async throws -> TranscriptionResult {
         try await transcribeCloudFile(
             fileURL: fileURL,
             timeoutSeconds: transcriptionTimeoutSeconds,
@@ -702,7 +731,7 @@ class TranscriptionService {
         fileURL: URL,
         timeoutSeconds: TimeInterval,
         useStructuredHTTPFailure: Bool
-    ) async throws -> String {
+    ) async throws -> TranscriptionResult {
         let url = baseURL
             .appendingPathComponent("audio")
             .appendingPathComponent("transcriptions")
@@ -751,7 +780,7 @@ class TranscriptionService {
         response: URLResponse,
         fileURL: URL,
         useStructuredHTTPFailure: Bool
-    ) throws -> String {
+    ) throws -> TranscriptionResult {
         guard let httpResponse = response as? HTTPURLResponse else {
             if useStructuredHTTPFailure {
                 throw CloudTranscriptionHTTPFailure(statusCode: 0)
@@ -794,7 +823,11 @@ class TranscriptionService {
         }
 
         do {
-            return try parseTranscript(from: data)
+            let parsed = try parseTranscript(from: data)
+            return transcriptionResult(
+                text: parsed.text,
+                engineLanguageCode: parsed.engineLanguageCode
+            )
         } catch {
             if useStructuredHTTPFailure {
                 throw CloudTranscriptionInvalidResponseFailure()
@@ -946,25 +979,41 @@ class TranscriptionService {
 
     private let hallucinationNoSpeechThreshold = 0.1
 
-    private func parseTranscript(from data: Data) throws -> String {
-        if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+    private func parseTranscript(
+        from data: Data
+    ) throws -> (text: String, engineLanguageCode: String?) {
+        if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
            let text = json["text"] as? String {
             if isHallucination(text: text, json: json) {
-                return ""
+                return ("", json["language"] as? String)
             }
-            return normalizedTranscriptText(text)
+            return (
+                TranscriptTextNormalizer.normalized(text),
+                json["language"] as? String
+            )
         }
 
         let plainText = String(data: data, encoding: .utf8) ?? ""
-        let text = plainText
-                .components(separatedBy: .newlines)
-                .joined(separator: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = TranscriptTextNormalizer.normalized(plainText)
         guard !text.isEmpty else {
             throw TranscriptionError.pollFailed("Invalid response")
         }
 
-        return text
+        return (text, nil)
+    }
+
+    private func transcriptionResult(
+        text: String,
+        engineLanguageCode: String? = nil
+    ) -> TranscriptionResult {
+        TranscriptionResult(
+            text: text,
+            spokenLanguage: SpokenLanguageResolver.resolve(
+                requestedLanguageCode: requestedLanguageCode,
+                engineLanguageCode: engineLanguageCode,
+                transcript: text
+            )
+        )
     }
 
     private func isHallucination(text: String, json: [String: Any]) -> Bool {
@@ -997,24 +1046,6 @@ class TranscriptionService {
         return noSpeechProb >= hallucinationNoSpeechThreshold
     }
 
-    private func normalizedTranscriptText(_ text: String) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "" }
-
-        let reducedPunctuation = trimmed.replacingOccurrences(
-            of: #"([!?.,])\1+"#,
-            with: #"$1"#,
-            options: .regularExpression
-        )
-        let collapsedWhitespace = reducedPunctuation.replacingOccurrences(
-            of: #"\s+"#,
-            with: " ",
-            options: .regularExpression
-        )
-        let normalized = collapsedWhitespace.trimmingCharacters(in: .whitespacesAndNewlines)
-        let contentOnly = normalized.trimmingCharacters(in: CharacterSet.punctuationCharacters.union(.whitespacesAndNewlines))
-        return contentOnly.isEmpty ? "" : normalized
-    }
 }
 
 extension TranscriptionExecutionSnapshot {
@@ -1036,6 +1067,9 @@ extension TranscriptionExecutionSnapshot {
                 apiKey: cloud.apiKey,
                 baseURL: cloud.baseURL.absoluteString,
                 useLocalTranscription: false,
+                transcriptionLanguage: TranscriptionLanguage.find(
+                    code: cloud.language ?? "auto"
+                ),
                 transcriptionModel: cloud.model,
                 language: cloud.language,
                 cloudDependencies: dependencies,
@@ -1081,10 +1115,10 @@ enum TranscriptionError: LocalizedError {
 private final class TranscriptionTimeoutRaceState: @unchecked Sendable {
     private let lock = NSLock()
     private var didFinish = false
-    private var continuation: CheckedContinuation<String, Error>?
+    private var continuation: CheckedContinuation<TranscriptionResult, Error>?
     private var tasks: [Task<Void, Never>] = []
 
-    func setContinuation(_ continuation: CheckedContinuation<String, Error>) {
+    func setContinuation(_ continuation: CheckedContinuation<TranscriptionResult, Error>) {
         lock.lock()
         if didFinish {
             lock.unlock()
@@ -1108,7 +1142,7 @@ private final class TranscriptionTimeoutRaceState: @unchecked Sendable {
         lock.unlock()
     }
 
-    func finish(_ result: Result<String, Error>) {
+    func finish(_ result: Result<TranscriptionResult, Error>) {
         lock.lock()
         guard !didFinish else {
             lock.unlock()

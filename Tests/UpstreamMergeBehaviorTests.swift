@@ -68,7 +68,7 @@ struct UpstreamMergeBehaviorTests {
         checkContains(transcriptionService, "UserDefaults.standard.double(forKey: \"transcription_timeout_seconds\")", "TranscriptionService should support provider timeout overrides")
         checkContains(transcriptionService, "localTranscriptionTimeoutSeconds", "TranscriptionService should preserve Quill's local transcription timeout")
         checkContains(transcriptionService, "useLocalTranscription", "TranscriptionService should preserve Quill local transcription support")
-        checkContains(transcriptionService, "func transcribe(fileURL: URL) async throws -> String", "TranscriptionService should preserve its public file transcription contract")
+        checkContains(transcriptionService, "func transcribe(fileURL: URL) async throws -> TranscriptionResult", "TranscriptionService should return a normalized transcription result")
         checkContains(transcriptionService, "if useLocalTranscription {", "Local transcription should remain an exclusive branch before cloud chunk planning")
         checkContains(transcriptionService, "transcribeLargeCanonicalWAV(fileURL: fileURL)", "Oversized canonical WAV should use the cloud chunking core")
         checkNotContains(transcriptionService, "body=%{public}@", "Cloud failures should not log raw provider response bodies")

@@ -38,6 +38,14 @@ struct MeetingSummaryView: View {
 
     @ViewBuilder
     private var statusMessages: some View {
+        if envelope.effectiveEvidenceVerification == .unverified {
+            statusBanner(
+                icon: "exclamationmark.triangle",
+                title: "Some evidence could not be verified.",
+                detail: "Review the summary before sharing it.",
+                color: .orange
+            )
+        }
         if isStale {
             statusBanner(
                 icon: "exclamationmark.triangle",

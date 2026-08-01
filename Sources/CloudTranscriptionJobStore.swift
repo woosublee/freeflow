@@ -50,6 +50,7 @@ struct CloudTranscriptionJobRecord: Codable, Equatable, Sendable {
     let identity: CloudTranscriptionJobIdentity
     let plan: CloudTranscriptionChunkPlan
     var completedChunks: [CloudTranscriptionCompletedChunk]
+    var engineLanguageCode: String? = nil
     var firstIncompleteChunkIndex: Int
     var lastFailure: CloudTranscriptionStoredFailure?
     let completionPolicy: CloudTranscriptionCompletionPolicy
@@ -496,7 +497,8 @@ final class CloudTranscriptionJobStore: @unchecked Sendable {
                 identity: record.identity,
                 completedRawTranscripts: record.completedChunks.map(
                     \.normalizedRawText
-                )
+                ),
+                engineLanguageCode: record.engineLanguageCode
             )
         }
     }
@@ -527,6 +529,9 @@ final class CloudTranscriptionJobStore: @unchecked Sendable {
                     index: $0.offset,
                     normalizedRawText: $0.element
                 )
+            }
+            if record.engineLanguageCode == nil {
+                record.engineLanguageCode = checkpoint.engineLanguageCode
             }
             record.firstIncompleteChunkIndex = normalizedTranscripts.count
             record.phase = normalizedTranscripts.count == record.plan.chunks.count

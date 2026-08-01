@@ -11,17 +11,8 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             contentsOfFile: "Sources/AppleSpeechLiveTranscriber.swift",
             encoding: .utf8
         )
-        let finalizationWorkSource = try String(
-            contentsOfFile: "Sources/RecordingJournalFinalizationWork.swift",
-            encoding: .utf8
-        )
 
-        precondition(finalizationWorkSource.contains(
-            "final class RecordingJournalFinalizationWork: @unchecked Sendable"
-        ))
-        precondition(finalizationWorkSource.contains("private let controller: SegmentedRecordingJournalController"))
-        precondition(finalizationWorkSource.contains("private let store: RecordingJournalStore"))
-        precondition(source.contains("private var recordingJournalStore: RecordingJournalStore"))
+        precondition(source.contains("private let recordingJournalStore: RecordingJournalStore"))
         precondition(source.contains("private var activeSegmentedJournalController: SegmentedRecordingJournalController?"))
         precondition(source.contains("private var activeRecordingID: UUID?"))
         precondition(source.contains("private var activeInputSwitchToken: UUID?"))
@@ -60,18 +51,11 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             of: "recoverRecordingJournalsBeforeHistoryLoad(",
             in: initializerBody
         )
-        let preflightHistoryRange = try requiredRange(
-            of: "pipelineHistoryStore.verifyHistoryReadable()",
+        let historyRange = try requiredRange(
+            of: "pipelineHistoryStore.loadAllHistory()",
             in: initializerBody
         )
-        guard let recoveredHistoryRange = initializerBody.range(
-            of: "pipelineHistoryStore.loadAllHistory()",
-            range: recoveryRange.upperBound..<initializerBody.endIndex
-        ) else {
-            throw TestFailure("missing history reload after journal recovery")
-        }
-        precondition(preflightHistoryRange.lowerBound < recoveryRange.lowerBound)
-        precondition(recoveryRange.lowerBound < recoveredHistoryRange.lowerBound)
+        precondition(recoveryRange.lowerBound < historyRange.lowerBound)
 
         let startBody = try functionBody(named: "startSelectedAudioRecorder", in: source)
         precondition(startBody.contains("makeActiveSegmentedJournalController(inputID: inputID)"))
@@ -159,27 +143,27 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             precondition(failurePreparationBody.contains(required))
         }
 
-        precondition(source.contains("@MainActor\n    private func finishRecordingAfterJournalPersistenceFailure("))
-        precondition(source.contains("@MainActor\n    private func finishStoppedSegmentedRecording("))
         let finishFailureBody = try functionBody(
             named: "finishRecordingAfterJournalPersistenceFailure",
             in: source
         )
-        precondition(finishFailureBody.contains("RecordingJournalFinalizationWork("))
-        precondition(finishFailureBody.contains("recoverAfterPersistenceFailure()"))
+        precondition(finishFailureBody.contains("recoverRecordingAfterJournalPersistenceFailure("))
         precondition(finishFailureBody.contains("controller.closeAfterPersistenceFailure()") == false)
         precondition(finishFailureBody.contains("SegmentedRecordingArtifactFinalizer(") == false)
         precondition(finishFailureBody.contains("completeRecordingStorageFailureRecovery("))
-        precondition(finalizationWorkSource.contains("func recoverAfterPersistenceFailure()"))
-        precondition(finalizationWorkSource.contains("controller.closeAfterPersistenceFailure()"))
-        precondition(finalizationWorkSource.contains("SegmentedRecordingArtifactFinalizer("))
+        let coreFailureRecoveryBody = try functionBody(
+            named: "recoverRecordingAfterJournalPersistenceFailure",
+            in: source
+        )
+        precondition(coreFailureRecoveryBody.contains("controller.closeAfterPersistenceFailure()"))
+        precondition(coreFailureRecoveryBody.contains("SegmentedRecordingArtifactFinalizer("))
 
         let completeFailureBody = try functionBody(
             named: "completeRecordingStorageFailureRecovery",
             in: source
         )
         precondition(completeFailureBody.contains("RecordingRecoveryHistory("))
-        precondition(completeFailureBody.contains("loadPipelineHistory()"))
+        precondition(completeFailureBody.contains("pipelineHistoryStore.loadAllHistory()"))
         precondition(completeFailureBody.contains("pipelineHistoryStore.delete(id:"))
 
         let storageBodies = storageFailureBody
@@ -267,13 +251,12 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             in: source
         )
         precondition(finishBody.contains("recordingJournalFinalizationQueue.async"))
-        precondition(finishBody.contains("RecordingJournalFinalizationWork("))
-        precondition(finishBody.contains("finalizeStoppedRecording()"))
+        precondition(finishBody.contains("controller.stopAndClose()"))
+        precondition(finishBody.contains("SegmentedRecordingArtifactFinalizer("))
         precondition(finishBody.contains("case .complete:"))
         precondition(finishBody.contains("case .partial:"))
-        precondition(finishBody.contains("hasTerminalPersistenceFailure"))
-        precondition(finishBody.contains("recoverAfterPersistenceFailure()"))
-        precondition(finalizationWorkSource.contains("func finalizeStoppedRecording()"))
+        precondition(finishBody.contains("controller.terminalPersistenceFailure"))
+        precondition(finishBody.contains("recoverRecordingAfterJournalPersistenceFailure("))
         precondition(finishBody.contains(".recoveredWithoutTranscription"))
         precondition(!finishBody.contains("temporaryCombinedFallback"))
 
@@ -405,7 +388,7 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         let catchBody = String(persist[catchRange.upperBound...])
 
         assert(catchBody.contains("journalRecordingID == nil"))
-        assert(catchBody.contains("!loadPipelineHistory().contains(where: { $0.id == recordingID })"))
+        assert(catchBody.contains("!pipelineHistoryStore.loadAllHistory().contains(where: { $0.id == recordingID })"))
         assert(catchBody.contains("Self.deleteStoredFiles("))
         assert(catchBody.contains("audioFileName: audioFileName"))
         assert(catchBody.contains("transcriptFileName: nil"))

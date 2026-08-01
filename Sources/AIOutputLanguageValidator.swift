@@ -9,14 +9,14 @@ enum AIOutputLanguageValidation: Equatable, Sendable {
 }
 
 struct AIOutputLanguageValidator: Sendable {
-    private let expectedLanguage: NLLanguage?
+    private let expectedLanguages: Set<NLLanguage>?
 
     init(outputLanguage: String?) {
-        expectedLanguage = Self.language(for: outputLanguage)
+        expectedLanguages = Self.languages(for: outputLanguage)
     }
 
     func validate(generatedProse: String) -> AIOutputLanguageValidation {
-        guard let expectedLanguage else { return .notRequested }
+        guard let expectedLanguages else { return .notRequested }
 
         let prose = Self.removingProtectedAtoms(from: generatedProse)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -29,10 +29,10 @@ struct AIOutputLanguageValidator: Sendable {
         guard let detectedLanguage = recognizer.dominantLanguage else {
             return .uncertain
         }
-        return detectedLanguage == expectedLanguage ? .accepted : .mismatch
+        return expectedLanguages.contains(detectedLanguage) ? .accepted : .mismatch
     }
 
-    private static func language(for outputLanguage: String?) -> NLLanguage? {
+    private static func languages(for outputLanguage: String?) -> Set<NLLanguage>? {
         let language = outputLanguage?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
@@ -40,21 +40,25 @@ struct AIOutputLanguageValidator: Sendable {
         case "", "auto":
             nil
         case "korean", "ko", "ko-kr":
-            .korean
+            [.korean]
         case "english", "en", "en-us", "en-gb":
-            .english
+            [.english]
         case "japanese", "ja", "ja-jp":
-            .japanese
-        case "chinese", "zh", "zh-cn", "zh-tw":
-            .simplifiedChinese
+            [.japanese]
+        case "chinese", "zh":
+            [.simplifiedChinese, .traditionalChinese]
+        case "zh-hans", "zh-cn", "zh-sg":
+            [.simplifiedChinese]
+        case "zh-hant", "zh-hk", "zh-mo", "zh-tw":
+            [.traditionalChinese]
         case "spanish", "es", "es-es":
-            .spanish
+            [.spanish]
         case "french", "fr", "fr-fr":
-            .french
+            [.french]
         case "german", "de", "de-de":
-            .german
+            [.german]
         case "portuguese", "pt", "pt-br", "pt-pt":
-            .portuguese
+            [.portuguese]
         default:
             nil
         }

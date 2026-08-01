@@ -12,6 +12,7 @@ struct MeetingSummaryUIContractTests {
             noteBrowser: noteBrowser,
             summaryView: summaryView
         )
+        testSummaryFailurePresentationContract(noteBrowser)
         testNoteListRowSummaryBadgeOrder(noteBrowser)
         print("MeetingSummaryUIContractTests passed")
     }
@@ -98,10 +99,13 @@ struct MeetingSummaryUIContractTests {
             "MeetingSummarySourceLocator.range(",
             "scrollRangeToVisible",
             ".accessibilityLabel(\"Note Content\")",
-            "? \"Create Summary\"",
-            ": \"Regenerate Summary\"",
+            "private var summaryToolbarAction: SummaryToolbarAction",
+            "summaryToolbarAction.systemImage",
+            "help: summaryToolbarAction.help",
+            "private var currentSummaryAttempt: MeetingSummaryAttempt? {",
+            "summaryAttempt.isCurrent(for: appState.meetingSummarySource(for: item))",
             "private var showsSummaryTab: Bool {",
-            "summaryEnvelope != nil || summaryIssue != nil",
+            "summaryEnvelope != nil || (currentSummaryAttempt?.outcome == .failed && currentSummaryAttempt?.issue != nil) || summaryIssue != nil",
             "summaryActionIsDisabled",
             "handleSummaryAction",
             "@State private var showDeleteSummaryConfirmation = false",
@@ -168,7 +172,9 @@ struct MeetingSummaryUIContractTests {
             ".accessibilityLabel(item.task)",
             "sourceQuoteIsValid: (String) -> Bool",
             "onDelete: () -> Void",
-            "Label(\"Delete Summary\", systemImage: \"trash\")"
+            "Label(\"Delete Summary\", systemImage: \"trash\")",
+            "effectiveEvidenceVerification == .unverified",
+            "Some evidence could not be verified."
         ] {
             precondition(summaryView.contains(expected), "Missing Summary view contract: \(expected)")
         }
@@ -185,6 +191,97 @@ struct MeetingSummaryUIContractTests {
             precondition(
                 !summaryView.contains(unexpected),
                 "Summary view should no longer contain: \(unexpected)"
+            )
+        }
+    }
+
+    private static func testSummaryFailurePresentationContract(
+        _ noteBrowser: String
+    ) {
+        for expected in [
+            "summaryEnvelope != nil || (currentSummaryAttempt?.outcome == .failed && currentSummaryAttempt?.issue != nil) || summaryIssue != nil",
+            "issuePresentation()",
+            "MeetingSummaryIssueAction.resolve",
+            "summaryIssueAction(for: presentation)",
+            "summaryFailureContent(",
+            "QuillUserIssueView(",
+            "style: .full",
+            "action: summaryAction.action",
+            "actionTitleOverride: summaryAction.actionTitleOverride",
+            "private var summaryToolbarAction:",
+            "case retry",
+            "Retry Summary",
+            "case .retry, .regenerate:",
+            "arrow.triangle.2.circlepath",
+            "Delete Summary",
+            "private var canDeleteSummary:",
+            "if canDeleteSummary",
+            "showDeleteSummaryConfirmation",
+            "deleteMeetingSummary(noteID: item.id)",
+            ".frame(maxWidth: .infinity, maxHeight: .infinity)"
+        ] {
+            precondition(noteBrowser.contains(expected), "Missing failure contract: \(expected)")
+        }
+        for unexpected in [
+            "MeetingSummaryGenerationFailureView(",
+            "View Transcript",
+            "Clear Summary Failure",
+            "showClearSummaryFailureConfirmation",
+            "clearMeetingSummaryState("
+        ] {
+            precondition(
+                !noteBrowser.contains(unexpected),
+                "Summary failures must use the shared non-scrolling error card, not: \(unexpected)"
+            )
+        }
+        let fullFailureArea = block(
+            in: noteBrowser,
+            from: "private func summaryFailureContent(",
+            to: "\n    @ViewBuilder\n    private var emptyContentState"
+        )
+        for unexpected in ["GeometryReader", "ScrollView", "Spacer(minLength: 48)", "Spacer(minLength: 92)"] {
+            precondition(
+                !fullFailureArea.contains(unexpected),
+                "The shared summary error card must not force scrolling or fixed offsets: \(unexpected)"
+            )
+        }
+        precondition(
+            !FileManager.default.fileExists(
+                atPath: "Sources/MeetingSummaryGenerationFailureView.swift"
+            ),
+            "The dedicated summary failure view is removed"
+        )
+
+        guard let summaryBranch = noteBrowser.range(of: "if let summaryEnvelope {"),
+              let summaryView = noteBrowser.range(of: "MeetingSummaryView("),
+              let failureBranch = noteBrowser.range(
+                  of: "} else if let attempt = currentSummaryAttempt,"
+              ) else {
+            preconditionFailure("Missing saved-summary failure handling")
+        }
+        precondition(
+            summaryBranch.lowerBound < summaryView.lowerBound
+                && summaryView.lowerBound < failureBranch.lowerBound,
+            "A saved summary must remain visible when a newer attempt failed"
+        )
+
+        let savedSummaryArea = block(
+            in: noteBrowser,
+            from: "if let summaryEnvelope {",
+            to: "} else if let attempt = currentSummaryAttempt,"
+        )
+        for expected in [
+            "summaryIssue?.presentation()",
+            "if let presentation =",
+            "let summaryAction = summaryIssueAction(for: presentation)",
+            "style: .warningBanner",
+            "action: summaryAction.action",
+            "actionTitleOverride: summaryAction.actionTitleOverride",
+            "isSummaryIssueBannerDismissed = true"
+        ] {
+            precondition(
+                savedSummaryArea.contains(expected),
+                "A transient summary issue must remain visible above a saved summary: \(expected)"
             )
         }
     }
