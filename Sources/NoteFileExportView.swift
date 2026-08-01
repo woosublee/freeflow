@@ -1,30 +1,6 @@
 import AppKit
 import SwiftUI
 
-enum NoteFileExportNaming {
-    static func suggestedBaseName(
-        preferredTitle: String?,
-        transcript: String,
-        timestamp: Date
-    ) -> String {
-        if let preferredTitle {
-            let trimmed = preferredTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
-        }
-        if let firstLine = transcript
-            .components(separatedBy: .newlines)
-            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
-            .first(where: { !$0.isEmpty }) {
-            return String(firstLine.prefix(60))
-        }
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd HH-mm"
-        return formatter.string(from: timestamp)
-    }
-}
-
 struct NoteFileExportView: View {
     let source: NoteFileExportSource
     let suggestedBaseName: String

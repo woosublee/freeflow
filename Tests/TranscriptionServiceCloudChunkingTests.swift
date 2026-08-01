@@ -11,6 +11,12 @@ struct TranscriptionServiceCloudChunkingTests {
             try realtimeMissingAPIKeyStopsBeforeWebSocketCreation()
             try await smallWAVUsesExistingSingleRequestPath()
             try await smallMP3UsesExistingSingleRequestPath()
+            try await cloudVerboseJSONLanguageFlowsIntoResult()
+            try await cloudExplicitRequestLanguageDrivesResolutionWhenResponseOmitsLanguage()
+            try await cloudSnapshotVariantRequestPreservesConfiguredLanguagePrecedence()
+            try await cloudSnapshotExplicitLanguageOverridesVerboseResponseLanguage()
+            try await plainTextCloudResponseUsesTranscriptNormalizer()
+            try await punctuationOnlyPlainTextResponseIsRejected()
             try await largeCanonicalWAVUsesSequentialBoundedChunks()
             try await retryableHTTPFailureRetriesCurrentChunkOnly()
             try await terminalProviderFailuresUseStableIssueRecords()
@@ -128,7 +134,7 @@ struct TranscriptionServiceCloudChunkingTests {
         )
 
         let transcript = try await service.transcribe(fileURL: url)
-        try expectEqual(transcript, "short wav", "small WAV transcript")
+        try expectEqual(transcript.text, "short wav", "small WAV transcript")
         let uploads = await recorder.uploads()
         try expectEqual(uploads.count, 1, "small WAV upload count")
         try expectEqual(uploads[0].timeout, 20, "small WAV timeout")
@@ -154,15 +160,223 @@ struct TranscriptionServiceCloudChunkingTests {
         )
 
         let transcript = try await service.transcribe(fileURL: url)
-        try expectEqual(transcript, "short mp3", "small MP3 transcript")
+        try expectEqual(transcript.text, "short mp3", "small MP3 transcript")
         let uploads = await recorder.uploads()
         try expectEqual(uploads.count, 1, "small MP3 upload count")
         try expectContains(uploads[0].body, "Content-Type: audio/mpeg", "small MP3 content type")
         try expectEqual(await store.loadCount(), 0, "small MP3 checkpoint load")
     }
 
+    private static func cloudVerboseJSONLanguageFlowsIntoResult() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mp3")
+        try Data(repeating: 0x44, count: 128).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let recorder = UploadRecorder(results: [
+            .verboseJSON(text: "회의 전사문", language: "ko")
+        ])
+        let service = try makeService(
+            ceiling: 10_000,
+            language: nil,
+            recorder: recorder,
+            checkpointStore: CountingCheckpointStore()
+        )
+
+        let result = try await service.transcribe(fileURL: url)
+
+        try expectEqual(result.text, "회의 전사문", "cloud verbose JSON transcript")
+        try expectEqual(result.spokenLanguage.languageCode, "ko", "cloud verbose JSON language")
+        try expectEqual(
+            result.spokenLanguage.source,
+            .engineDetected,
+            "cloud verbose JSON language source"
+        )
+    }
+
+    private static func cloudExplicitRequestLanguageDrivesResolutionWhenResponseOmitsLanguage() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mp3")
+        try Data(repeating: 0x44, count: 128).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let recorder = UploadRecorder(results: [.success("12345 ---")])
+        let service = try makeService(
+            ceiling: 10_000,
+            language: "ko",
+            recorder: recorder,
+            checkpointStore: CountingCheckpointStore()
+        )
+
+        let result = try await service.transcribe(fileURL: url)
+
+        try expectEqual(result.spokenLanguage.languageCode, "ko", "explicit request language")
+        try expectEqual(result.spokenLanguage.source, .configured, "explicit request language source")
+        let uploads = await recorder.uploads()
+        try expectContains(
+            uploads[0].body,
+            "name=\"language\"\r\n\r\nko",
+            "explicit request language is preserved in upload"
+        )
+    }
+
+    private static func cloudSnapshotVariantRequestPreservesConfiguredLanguagePrecedence() async throws {
+        for (language, result) in [
+            ("pt-BR", UploadRecorder.ScriptedResult.success("12345 ---")),
+            ("pt-PT", UploadRecorder.ScriptedResult.verboseJSON(text: "English transcript", language: "en"))
+        ] {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension("mp3")
+            try Data(repeating: 0x44, count: 128).write(to: url)
+            defer { try? FileManager.default.removeItem(at: url) }
+            let recorder = UploadRecorder(results: [result])
+            let cloud = try CloudTranscriptionExecutionSnapshot(
+                baseURL: "https://provider.example/v1",
+                apiKey: "test-key",
+                model: "whisper-large-v3",
+                language: language,
+                encodedUploadCeilingBytes: 10_000
+            )
+            let service = try TranscriptionExecutionSnapshot.cloud(
+                cloud,
+                TranscriptionCompletionSnapshot(
+                    postProcessingEnabled: false,
+                    outputLanguage: "",
+                    pressEnterCommandEnabled: false
+                )
+            ).makeTranscriptionService(
+                cloudDependencies: CloudTranscriptionDependencies(
+                    encodedUploadCeilingBytes: 10_000,
+                    upload: { request, body in
+                        try await recorder.upload(request: request, body: body)
+                    },
+                    checkpointStore: CountingCheckpointStore(),
+                    progress: { _ in },
+                    temporaryRoot: FileManager.default.temporaryDirectory
+                        .appendingPathComponent(UUID().uuidString, isDirectory: true),
+                    sleep: { _ in }
+                )
+            )
+
+            let transcription = try await service.transcribe(fileURL: url)
+
+            try expectEqual(
+                transcription.spokenLanguage.languageCode,
+                "pt",
+                "\(language) snapshot configured language"
+            )
+            try expectEqual(
+                transcription.spokenLanguage.source,
+                .configured,
+                "\(language) snapshot configured language source"
+            )
+            let uploads = await recorder.uploads()
+            try expectContains(
+                uploads[0].body,
+                "name=\"language\"\r\n\r\n\(language)",
+                "\(language) request language stays unnormalized"
+            )
+        }
+    }
+
+    private static func cloudSnapshotExplicitLanguageOverridesVerboseResponseLanguage() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mp3")
+        try Data(repeating: 0x44, count: 128).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let recorder = UploadRecorder(results: [
+            .verboseJSON(text: "English transcript", language: "en")
+        ])
+        let cloud = try CloudTranscriptionExecutionSnapshot(
+            baseURL: "https://provider.example/v1",
+            apiKey: "test-key",
+            model: "whisper-large-v3",
+            language: "ko",
+            encodedUploadCeilingBytes: 10_000
+        )
+        let service = try TranscriptionExecutionSnapshot.cloud(
+            cloud,
+            TranscriptionCompletionSnapshot(
+                postProcessingEnabled: false,
+                outputLanguage: "",
+                pressEnterCommandEnabled: false
+            )
+        ).makeTranscriptionService(
+            cloudDependencies: CloudTranscriptionDependencies(
+                encodedUploadCeilingBytes: 10_000,
+                upload: { request, body in
+                    try await recorder.upload(request: request, body: body)
+                },
+                checkpointStore: CountingCheckpointStore(),
+                progress: { _ in },
+                temporaryRoot: FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString, isDirectory: true),
+                sleep: { _ in }
+            )
+        )
+
+        let result = try await service.transcribe(fileURL: url)
+
+        try expectEqual(result.spokenLanguage.languageCode, "ko", "cloud snapshot configured language")
+        try expectEqual(result.spokenLanguage.source, .configured, "cloud snapshot configured language source")
+    }
+
+    private static func plainTextCloudResponseUsesTranscriptNormalizer() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mp3")
+        try Data(repeating: 0x44, count: 128).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let recorder = UploadRecorder(results: [.rawSuccess(" Wait...  really?! \n")])
+        let service = try makeService(
+            ceiling: 10_000,
+            recorder: recorder,
+            checkpointStore: CountingCheckpointStore()
+        )
+
+        let result = try await service.transcribe(fileURL: url)
+
+        try expectEqual(
+            result.text,
+            "Wait. really?!",
+            "plain-text cloud transcript uses shared normalization"
+        )
+    }
+
+    private static func punctuationOnlyPlainTextResponseIsRejected() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mp3")
+        try Data(repeating: 0x44, count: 128).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let recorder = UploadRecorder(results: [.rawSuccess("...?!")])
+        let service = try makeService(
+            ceiling: 10_000,
+            recorder: recorder,
+            checkpointStore: CountingCheckpointStore()
+        )
+
+        do {
+            _ = try await service.transcribe(fileURL: url)
+            throw TestFailure("punctuation-only plain-text response must fail")
+        } catch let issue as QuillUserIssueError {
+            try expectEqual(
+                issue.record.code,
+                .invalidProviderResponse,
+                "punctuation-only plain text uses invalid response issue"
+            )
+        }
+    }
+
     private static func largeCanonicalWAVUsesSequentialBoundedChunks() async throws {
-        let multipart = testMultipartLayout
+        let multipart = CloudTranscriptionMultipartLayout(
+            model: "whisper-large-v3",
+            responseFormat: "verbose_json",
+            language: nil,
+            boundaryByteCount: 36
+        )
         let ceiling = try multipart.encodedByteCount(
             audioDataByteCount: CanonicalPCM16WAV.headerByteCount + 4,
             fileName: CloudTranscriptionChunkPlanner.uploadFileName,
@@ -171,19 +385,22 @@ struct TranscriptionServiceCloudChunkingTests {
         let url = try writeCanonicalWAV(samples: [1, 1, 2, 2, 3, 3])
         defer { try? FileManager.default.removeItem(at: url) }
         let recorder = UploadRecorder(results: [
-            .success("zero"),
+            .verboseJSON(text: "zero", language: "ko"),
             .success("one"),
             .success("two")
         ])
         let store = CountingCheckpointStore()
         let service = try makeService(
             ceiling: ceiling,
+            language: nil,
             recorder: recorder,
             checkpointStore: store
         )
 
         let transcript = try await service.transcribe(fileURL: url)
-        try expectEqual(transcript, "zero one two", "large ordered transcript")
+        try expectEqual(transcript.text, "zero one two", "large ordered transcript")
+        try expectEqual(transcript.spokenLanguage.languageCode, "ko", "large detected language")
+        try expectEqual(transcript.spokenLanguage.source, .engineDetected, "large detected language source")
         let uploads = await recorder.uploads()
         try expectEqual(uploads.count, 3, "large upload count")
         try expectEqual(await recorder.maximumConcurrentUploads(), 1, "sequential upload count")
@@ -214,7 +431,7 @@ struct TranscriptionServiceCloudChunkingTests {
         )
 
         let transcript = try await service.transcribe(fileURL: url)
-        try expectEqual(transcript, "zero one", "503 retry transcript")
+        try expectEqual(transcript.text, "zero one", "503 retry transcript")
         let markers = try await recorder.chunkMarkers()
         try expectEqual(markers, [1, 1, 2], "503 retries current chunk only")
     }
@@ -311,6 +528,7 @@ struct TranscriptionServiceCloudChunkingTests {
     private static func makeService(
         apiKey: String = "test-key",
         ceiling: UInt64,
+        language: String? = "en",
         recorder: UploadRecorder,
         checkpointStore: CountingCheckpointStore
     ) throws -> TranscriptionService {
@@ -320,7 +538,7 @@ struct TranscriptionServiceCloudChunkingTests {
             useLocalTranscription: false,
             transcriptionLanguage: .auto,
             transcriptionModel: "whisper-large-v3",
-            language: "en",
+            language: language,
             cloudDependencies: CloudTranscriptionDependencies(
                 encodedUploadCeilingBytes: ceiling,
                 upload: { request, body in
@@ -441,6 +659,7 @@ private actor UploadRecorder {
 
     enum ScriptedResult: Sendable {
         case success(String)
+        case verboseJSON(text: String, language: String)
         case rawSuccess(String)
         case http(status: Int, body: String)
         case urlError(URLError.Code)
@@ -481,6 +700,11 @@ private actor UploadRecorder {
         case .success(let text):
             status = 200
             responseData = try JSONSerialization.data(withJSONObject: ["text": text])
+        case .verboseJSON(let text, let language):
+            status = 200
+            responseData = try JSONSerialization.data(
+                withJSONObject: ["text": text, "language": language]
+            )
         case .rawSuccess(let body):
             status = 200
             responseData = Data(body.utf8)

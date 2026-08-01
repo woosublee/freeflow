@@ -19,12 +19,14 @@ struct QuillUserIssueUIContractTests {
         try testRunLogSanitizesMachineStatuses(settings)
         try testRecoveryActionsUseExistingRoutes(noteBrowser, appState)
         try testDismissibleBannerScopedToWarningStyle(issueView, noteBrowser, appState)
+        try testSummaryRetryUsesSummarySpecificCopy(issueView)
+        try testSummaryInvalidationDoesNotBecomeTransientFailure(noteBrowser)
         try testHistoryUnavailableProtectionAndArchiveNotice(
-            noteBrowser,
-            settings,
+            noteBrowser, settings, menuBar, appState, historyRecovery
+        )
+        try testNonDurableHistoryWarningIsVisibleAndDoesNotExposeBackups(
             menuBar,
-            appState,
-            historyRecovery
+            appState
         )
         print("QuillUserIssueUIContractTests passed")
     }
@@ -223,6 +225,59 @@ struct QuillUserIssueUIContractTests {
         try expect(
             retryBody.contains("incrementNoteRetryGeneration(for: item.id)"),
             "retry bumps the note's retry generation, invalidating stale dismissals"
+        )
+    }
+
+    private static func testSummaryInvalidationDoesNotBecomeTransientFailure(
+        _ source: String
+    ) throws {
+        let generation = block(
+            source,
+            from: "private func generateSummary() {",
+            to: "\n    private func deleteSummary"
+        )
+        try expect(
+            generation.contains("if let error = error as? MeetingSummaryError, error == .sourceChanged {"),
+            "source and lifecycle invalidation return without a transient Summary failure"
+        )
+    }
+
+    private static func testSummaryRetryUsesSummarySpecificCopy(
+        _ source: String
+    ) throws {
+        try expect(
+            source.contains("var actionTitleOverride: String?"),
+            "shared issue renderer accepts a context-specific retry title"
+        )
+        try expect(
+            source.contains("actionTitleOverride ?? actionTitle"),
+            "summary retry copy overrides the transcription retry title"
+        )
+    }
+
+    private static func testNonDurableHistoryWarningIsVisibleAndDoesNotExposeBackups(
+        _ menuBar: String,
+        _ appState: String
+    ) throws {
+        try expect(
+            appState.contains("@Published private(set) var historyPersistenceWarning"),
+            "AppState publishes a session-only history persistence warning"
+        )
+        try expect(
+            appState.contains(".historyPersistenceUnavailable"),
+            "AppState uses the structured non-durable history warning"
+        )
+        try expect(
+            menuBar.contains("appState.historyPersistenceWarning"),
+            "Menu Bar shows the non-durable history warning"
+        )
+        try expect(
+            !menuBar.contains("backupName"),
+            "Menu Bar never exposes a history recovery backup name"
+        )
+        try expect(
+            !menuBar.contains("History Recovery"),
+            "Menu Bar never exposes a history recovery path"
         )
     }
 

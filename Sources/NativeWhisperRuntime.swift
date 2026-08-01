@@ -87,7 +87,7 @@ struct NativeWhisperRuntime {
         }
     }
 
-    func transcribe(audioURL: URL, modelURL: URL, languageCode: String?) async throws -> String {
+    func transcribe(audioURL: URL, modelURL: URL, languageCode: String?) async throws -> TranscriptionResult {
         let worker = Task.detached(priority: .userInitiated) {
             try validateRunnerAndModel(modelURL: modelURL)
             try validateAudio(at: audioURL)
@@ -155,12 +155,26 @@ struct NativeWhisperRuntime {
                 throw NativeWhisperRuntimeError.processFailed(exitCode: process.terminationStatus, output: combinedOutput)
             }
 
-            if let jsonTranscript = Self.transcriptFromJSON(at: outputBase.appendingPathExtension("json")), !jsonTranscript.isEmpty {
-                return jsonTranscript
+            if let jsonTranscript = Self.transcriptFromJSON(at: outputBase.appendingPathExtension("json")), !jsonTranscript.text.isEmpty {
+                return TranscriptionResult(
+                    text: jsonTranscript.text,
+                    spokenLanguage: SpokenLanguageResolver.resolve(
+                        requestedLanguageCode: languageCode ?? "auto",
+                        engineLanguageCode: jsonTranscript.languageCode,
+                        transcript: jsonTranscript.text
+                    )
+                )
             }
             let stdoutTranscript = Self.normalizedTranscript(stdoutText)
             if !stdoutTranscript.isEmpty {
-                return stdoutTranscript
+                return TranscriptionResult(
+                    text: stdoutTranscript,
+                    spokenLanguage: SpokenLanguageResolver.resolve(
+                        requestedLanguageCode: languageCode ?? "auto",
+                        engineLanguageCode: nil,
+                        transcript: stdoutTranscript
+                    )
+                )
             }
             throw NativeWhisperRuntimeError.noTranscript(output: combinedOutput)
         }
@@ -236,31 +250,52 @@ struct NativeWhisperRuntime {
         }
     }
 
-    private static func transcriptFromJSON(at url: URL) -> String? {
+    private struct JSONTranscript {
+        let text: String
+        let languageCode: String?
+    }
+
+    private struct WhisperCLIJSONV191: Decodable {
+        struct Result: Decodable {
+            let language: String?
+        }
+
+        struct Segment: Decodable {
+            let text: String?
+        }
+
+        let result: Result?
+        let transcription: [Segment]?
+
+        // Older bundled helpers wrote these at the root. Keep their saved
+        // output readable while preferring the v1.9.1 `result` shape.
+        let text: String?
+        let language: String?
+    }
+
+    private static func transcriptFromJSON(at url: URL) -> JSONTranscript? {
         guard let data = try? Data(contentsOf: url),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+              let payload = try? JSONDecoder().decode(
+                WhisperCLIJSONV191.self,
+                from: data
+              ) else {
             return nil
         }
-        if let text = object["text"] as? String {
-            return normalizedTranscript(text)
-        }
-        if let transcription = object["transcription"] as? [[String: Any]] {
-            let joined = transcription.compactMap { $0["text"] as? String }.joined(separator: " ")
-            return normalizedTranscript(joined)
-        }
-        return nil
+        let rawText = payload.text ?? payload.transcription?
+            .compactMap(\.text)
+            .joined(separator: " ")
+        guard let rawText else { return nil }
+        return JSONTranscript(
+            text: normalizedTranscript(rawText),
+            languageCode: payload.result?.language ?? payload.language
+        )
     }
 
     private static func normalizedTranscript(_ text: String) -> String {
-        text
-            .split(separator: "\n")
-            .map { line in
-                String(line).replacingOccurrences(of: #"^\[[^\]]+\]\s*"#, with: "", options: .regularExpression)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        TranscriptTextNormalizer.normalized(
+            text,
+            removingTimestampPrefixes: true
+        )
     }
 
     private static func summarizedOutput(_ text: String) -> String {

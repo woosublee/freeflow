@@ -4233,26 +4233,22 @@ struct RunLogView: View {
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity)
+            } else if appState.pipelineHistory.isEmpty {
+                VStack {
+                    Spacer()
+                    Text("No runs yet. Use dictation to populate history.")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
             } else {
-                VStack(spacing: 0) {
-                    if appState.pipelineHistory.isEmpty {
-                        VStack {
-                            Spacer()
-                            Text("No runs yet. Use dictation to populate history.")
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                        }
-                        .frame(maxWidth: .infinity)
-                    } else {
-                        ScrollView {
-                            LazyVStack(spacing: 12) {
-                                ForEach(appState.pipelineHistory) { item in
-                                    RunLogEntryView(item: item)
-                                }
-                            }
-                            .padding(20)
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(appState.pipelineHistory) { item in
+                            RunLogEntryView(item: item)
                         }
                     }
+                    .padding(20)
                 }
             }
         }
@@ -4427,7 +4423,7 @@ struct RunLogEntryView: View {
                             }
                         }
                         .buttonStyle(.plain)
-                        .disabled(isRetrying || appState.isHistoryUnavailable)
+                        .disabled(isRetrying)
                         .help("Retry transcription")
                     } else {
                         Color.clear
@@ -4450,11 +4446,7 @@ struct RunLogEntryView: View {
                         copyTranscriptToPasteboard()
                     }
 
-                    actionIconButton(
-                        systemName: "trash",
-                        help: "Delete this run",
-                        disabled: appState.isHistoryUnavailable
-                    ) {
+                    actionIconButton(systemName: "trash", help: "Delete this run") {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             appState.deleteHistoryEntry(id: item.id)
                         }

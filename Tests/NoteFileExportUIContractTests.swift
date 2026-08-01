@@ -49,6 +49,23 @@ struct NoteFileExportUIContractTests {
             noteBrowser.contains("ToolbarIconMenu(help: \"More Actions\")"),
             "more-actions menu uses the toolbar hover control"
         )
+        let namingCall = try sourceSection(
+            noteBrowser,
+            from: "suggestedBaseName(",
+            to: "onDismiss:"
+        )
+        try expect(
+            namingCall.contains("timestamp: item.timestamp"),
+            "file export names untitled notes from their timestamp"
+        )
+        try expect(
+            !namingCall.contains("transcript:"),
+            "file export naming does not use the transcript"
+        )
+        try expect(
+            !exportView.contains("enum NoteFileExportNaming"),
+            "file export naming stays outside the SwiftUI view"
+        )
         let toolbarIconMenu = try sourceSection(
             noteBrowser,
             from: "private struct ToolbarIconMenu",

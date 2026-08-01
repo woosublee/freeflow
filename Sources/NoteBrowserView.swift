@@ -506,8 +506,7 @@ struct NoteBrowserView: View {
             if appState.isHistoryUnavailable {
                 historyUnavailableView
             } else {
-                VStack(spacing: 0) {
-                    HStack(spacing: 0) {
+                HStack(spacing: 0) {
             sidebarPanel
             detailPanel
         }
@@ -549,9 +548,8 @@ struct NoteBrowserView: View {
                 selectedItemID = newest
             }
             knownHistoryIDs = Set(ids)
-        }
-            }
                 }
+            }
         }
     }
 
@@ -1325,6 +1323,8 @@ private struct NoteDetailView: View {
     @State private var showDeleteSummaryConfirmation = false
     @State private var selectedContentMode: NoteContentMode = .transcript
     @State private var summaryIssue: QuillUserIssueRecord?
+    @State private var isSummaryIssueBannerDismissed = false
+    @State private var dismissedSummaryAttemptAt: Date?
     @State private var highlightedSourceQuote: String?
 
     private var isError: Bool {
@@ -1335,10 +1335,7 @@ private struct NoteDetailView: View {
         item.machineStatus == .audioOnly
     }
     private var transcriptionActionHelp: LocalizedStringKey {
-        if retryAvailability == .noAudio {
-            return "Audio file unavailable"
-        }
-        return isAudioOnly ? "Transcribe audio" : "Retry transcription"
+        isAudioOnly ? "Transcribe audio" : "Retry transcription"
     }
     private var isCloudTranscribing: Bool {
         item.machineStatus == .cloudTranscribing
@@ -1382,11 +1379,24 @@ private struct NoteDetailView: View {
     private var summaryEnvelope: MeetingSummaryEnvelope? {
         item.meetingSummary
     }
+    private var summaryAttempt: MeetingSummaryAttempt? {
+        item.meetingSummaryAttempt
+    }
+    private var currentSummaryAttempt: MeetingSummaryAttempt? {
+        guard let summaryAttempt,
+              summaryAttempt.isCurrent(for: appState.meetingSummarySource(for: item)) else {
+            return nil
+        }
+        return summaryAttempt
+    }
     private var summaryAvailability: MeetingSummaryAvailability {
         appState.meetingSummaryAvailability(for: item)
     }
     private var showsSummaryTab: Bool {
-        summaryEnvelope != nil || summaryIssue != nil
+        summaryEnvelope != nil || (currentSummaryAttempt?.outcome == .failed && currentSummaryAttempt?.issue != nil) || summaryIssue != nil
+    }
+    private var isSummaryAttemptBannerDismissed: Bool {
+        dismissedSummaryAttemptAt == currentSummaryAttempt?.occurredAt
     }
     private var isGeneratingSummary: Bool {
         appState.meetingSummaryGeneratingNoteIDs.contains(item.id)
@@ -1395,6 +1405,30 @@ private struct NoteDetailView: View {
         guard let summaryEnvelope else { return false }
         return summaryEnvelope.sourceFingerprint
             != appState.meetingSummarySource(for: item).fingerprint
+    }
+    private var summaryToolbarAction: SummaryToolbarAction {
+        if summaryEnvelope != nil {
+            return .regenerate
+        }
+        if currentSummaryAttempt?.outcome == .failed
+            || hasRetryableTransientSummaryIssue {
+            return .retry
+        }
+        return .create
+    }
+    private var hasRetryableTransientSummaryIssue: Bool {
+        guard let summaryIssue else { return false }
+        if case .retrySummary = MeetingSummaryIssueAction.resolve(
+            summaryIssue.presentation()
+        ) {
+            return true
+        }
+        return false
+    }
+    private var canDeleteSummary: Bool {
+        summaryEnvelope != nil
+            || (currentSummaryAttempt?.outcome == .failed
+                && currentSummaryAttempt?.issue != nil)
     }
     private var summaryActionIsDisabled: Bool {
         switch summaryAvailability {
@@ -1514,6 +1548,9 @@ private struct NoteDetailView: View {
                 revealSummaryIfPending()
             }
         }
+        .onChange(of: item.meetingSummaryAttempt) { _ in
+            dismissedSummaryAttemptAt = nil
+        }
         .onChange(of: selectedContentMode) { newValue in
             if newValue != .transcript {
                 highlightedSourceQuote = nil
@@ -1526,9 +1563,8 @@ private struct NoteDetailView: View {
                     audioURL: storedAudioURL
                 ),
                 suggestedBaseName: NoteFileExportNaming.suggestedBaseName(
-                    preferredTitle: item.customTitle
-                        ?? item.calendarMatch?.appliedTitle,
-                    transcript: displayContent,
+                    customTitle: item.customTitle,
+                    calendarTitle: item.calendarMatch?.appliedTitle,
                     timestamp: item.timestamp
                 ),
                 onDismiss: { showFileExportSheet = false },
@@ -1844,52 +1880,102 @@ private struct NoteDetailView: View {
     }
 
     private var summaryContentArea: some View {
-        VStack(spacing: 0) {
-            if let summaryIssue {
-                let presentation = summaryIssue.presentation()
-                QuillUserIssueView(
-                    presentation: presentation,
-                    style: .warningBanner,
-                    action: {
-                        performRecoveryAction(presentation.recoveryAction)
-                    },
-                    onDismiss: {
-                        self.summaryIssue = nil
-                        if summaryEnvelope == nil {
-                            selectedContentMode = .transcript
-                        }
-                    }
-                )
-                .padding(.horizontal, 40)
-                .padding(.top, 16)
-            }
+        Group {
             if let summaryEnvelope {
-                MeetingSummaryView(
-                    envelope: summaryEnvelope,
-                    availability: summaryAvailability,
-                    isStale: isSummaryStale,
-                    sourceQuoteIsValid: { quote in
-                        MeetingSummarySourceLocator.range(
-                            of: quote,
-                            in: displayContent
-                        ) != nil
-                    },
-                    onToggleAction: { actionID, isCompleted in
-                        do {
-                            try appState.setMeetingSummaryActionCompleted(
-                                noteID: item.id,
-                                actionID: actionID,
-                                isCompleted: isCompleted
-                            )
-                        } catch {
-                            showToast(localizedCatalogString("Could not update action item."))
-                        }
-                    },
-                    onViewSource: viewSource,
-                    onDelete: { showDeleteSummaryConfirmation = true }
-                )
+                VStack(spacing: 0) {
+                    let failedAttemptPresentation = currentSummaryAttempt?.outcome == .failed
+                        ? currentSummaryAttempt?.issuePresentation()
+                        : nil
+                    if let presentation = summaryIssue?.presentation()
+                        ?? failedAttemptPresentation,
+                       summaryIssue != nil
+                           ? !isSummaryIssueBannerDismissed
+                           : !isSummaryAttemptBannerDismissed {
+                        let summaryAction = summaryIssueAction(for: presentation)
+                        QuillUserIssueView(
+                            presentation: presentation,
+                            style: .warningBanner,
+                            action: summaryAction.action,
+                            actionTitleOverride: summaryAction.actionTitleOverride,
+                            onDismiss: {
+                                if summaryIssue != nil {
+                                    isSummaryIssueBannerDismissed = true
+                                } else {
+                                    dismissedSummaryAttemptAt = currentSummaryAttempt?.occurredAt
+                                }
+                            }
+                        )
+                        .padding(.horizontal, 40)
+                        .padding(.top, 16)
+                    }
+                    MeetingSummaryView(
+                        envelope: summaryEnvelope,
+                        availability: summaryAvailability,
+                        isStale: isSummaryStale,
+                        sourceQuoteIsValid: { quote in
+                            MeetingSummarySourceLocator.range(
+                                of: quote,
+                                in: displayContent
+                            ) != nil
+                        },
+                        onToggleAction: { actionID, isCompleted in
+                            do {
+                                try appState.setMeetingSummaryActionCompleted(
+                                    noteID: item.id,
+                                    actionID: actionID,
+                                    isCompleted: isCompleted
+                                )
+                            } catch {
+                                showToast(localizedCatalogString(
+                                    "Could not update action item."
+                                ))
+                            }
+                        },
+                        onViewSource: viewSource,
+                        onDelete: { showDeleteSummaryConfirmation = true }
+                    )
+                }
+            } else if let attempt = currentSummaryAttempt,
+                      let presentation = attempt.issuePresentation() {
+                summaryFailureContent(presentation: presentation)
+            } else if let summaryIssue {
+                summaryFailureContent(presentation: summaryIssue.presentation())
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func summaryFailureContent(
+        presentation: QuillUserIssuePresentation
+    ) -> some View {
+        let summaryAction = summaryIssueAction(for: presentation)
+        return VStack(spacing: 0) {
+            if canDeleteSummary {
+                HStack {
+                    Spacer()
+                    Button(role: .destructive) {
+                        showDeleteSummaryConfirmation = true
+                    } label: {
+                        Label("Delete Summary", systemImage: "trash")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Delete Summary")
+                }
+                .padding(.horizontal, 40)
+                .padding(.top, 24)
+            }
+            Spacer()
+            QuillUserIssueView(
+                presentation: presentation,
+                style: .full,
+                action: summaryAction.action,
+                actionTitleOverride: summaryAction.actionTitleOverride
+            )
+            .padding(.horizontal, 60)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
@@ -2034,11 +2120,7 @@ private struct NoteDetailView: View {
                             .controlSize(.mini)
                             .frame(width: 14, height: 14)
                     } else {
-                        Image(
-                            systemName: summaryEnvelope == nil
-                                ? "sparkles"
-                                : "arrow.triangle.2.circlepath"
-                        )
+                        Image(systemName: summaryToolbarAction.systemImage)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(
                             summaryActionIsDisabled
@@ -2048,9 +2130,7 @@ private struct NoteDetailView: View {
                     }
                 },
                 disabled: summaryActionIsDisabled,
-                help: summaryEnvelope == nil
-                    ? "Create Summary"
-                    : "Regenerate Summary"
+                help: summaryToolbarAction.help
             )
 
             ToolbarIconMenu(help: "More Actions") {
@@ -2189,11 +2269,7 @@ private struct NoteDetailView: View {
                 )
             )
         case .noAudio:
-            showToast(
-                localizedCatalogString(
-                    "This recording's audio file is unavailable, so it can't be transcribed."
-                )
-            )
+            break
         }
     }
 
@@ -2256,25 +2332,58 @@ private struct NoteDetailView: View {
         }
     }
 
+    private func summaryIssueAction(
+        for presentation: QuillUserIssuePresentation
+    ) -> SummaryIssueViewAction {
+        switch MeetingSummaryIssueAction.resolve(presentation) {
+        case .retrySummary:
+            return SummaryIssueViewAction(
+                action: generateSummary,
+                actionTitleOverride: "Retry Summary"
+            )
+        case .recovery(let recoveryAction):
+            return SummaryIssueViewAction(
+                action: { performRecoveryAction(recoveryAction) },
+                actionTitleOverride: nil
+            )
+        }
+    }
+
     private func generateSummary() {
+        let attemptBeforeGeneration = appState.pipelineHistory.first {
+            $0.id == item.id
+        }?.meetingSummaryAttempt?.occurredAt
         Task { @MainActor in
             do {
                 try await appState.generateMeetingSummary(id: item.id)
                 summaryIssue = nil
-            } catch let error as MeetingSummaryError {
-                summaryIssue = error.userIssue(
-                    providerHost: URL(string: appState.apiBaseURL)?.host,
-                    modelID: appState.meetingSummaryBackendChoice.modelID,
-                    localBackend: appState.meetingSummaryBackendChoice.isLocal
-                        ? "Local AI"
-                        : nil
-                )
-                switchToSummaryTab()
-            } catch let error as QuillUserIssueError {
-                summaryIssue = error.record
-                switchToSummaryTab()
+                isSummaryIssueBannerDismissed = false
             } catch {
-                summaryIssue = QuillUserIssueRecord(code: .unknown)
+                if let error = error as? MeetingSummaryError, error == .sourceChanged {
+                    return
+                }
+                let persistedAttempt = appState.pipelineHistory.first {
+                    $0.id == item.id
+                }?.meetingSummaryAttempt
+                if persistedAttempt?.outcome == .failed,
+                   persistedAttempt?.occurredAt != attemptBeforeGeneration,
+                   persistedAttempt?.issue != nil {
+                    summaryIssue = nil
+                    isSummaryIssueBannerDismissed = false
+                } else if let error = error as? MeetingSummaryError {
+                    summaryIssue = error.userIssue(
+                        providerHost: URL(string: appState.apiBaseURL)?.host,
+                        modelID: appState.meetingSummaryBackendChoice.modelID,
+                        localBackend: appState.meetingSummaryBackendChoice.isLocal
+                            ? "Local AI"
+                            : nil
+                    )
+                } else if let error = error as? QuillUserIssueError {
+                    summaryIssue = error.record
+                } else {
+                    summaryIssue = QuillUserIssueRecord(code: .unknown)
+                }
+                isSummaryIssueBannerDismissed = false
                 switchToSummaryTab()
             }
         }
@@ -2283,6 +2392,9 @@ private struct NoteDetailView: View {
     private func deleteSummary() {
         do {
             try appState.deleteMeetingSummary(noteID: item.id)
+            summaryIssue = nil
+            isSummaryIssueBannerDismissed = false
+            dismissedSummaryAttemptAt = nil
         } catch {
             showToast(localizedCatalogString("Could not delete summary."))
         }
@@ -2308,6 +2420,37 @@ private struct NoteDetailView: View {
 }
 
 // MARK: - Note Audio Player View (wireframe design)
+
+private enum SummaryToolbarAction {
+    case create
+    case retry
+    case regenerate
+
+    var systemImage: String {
+        switch self {
+        case .create:
+            "sparkles"
+        case .retry, .regenerate:
+            "arrow.triangle.2.circlepath"
+        }
+    }
+
+    var help: LocalizedStringKey {
+        switch self {
+        case .create:
+            "Create Summary"
+        case .retry:
+            "Retry Summary"
+        case .regenerate:
+            "Regenerate Summary"
+        }
+    }
+}
+
+private struct SummaryIssueViewAction {
+    let action: () -> Void
+    let actionTitleOverride: String?
+}
 
 struct NoteAudioPlayerView: View {
     let audioURL: URL

@@ -24,6 +24,25 @@ struct PipelineHistoryItem: Identifiable, Codable {
     static let cloudTranscribingStatus = "cloud-transcribing"
     static let audioOnlyStatus = "audio-only"
 
+    var spokenLanguage: SpokenLanguageResolution? {
+        guard let spokenLanguageResolution else { return nil }
+        if spokenLanguageResolution == .unavailable {
+            return SpokenLanguageResolution(
+                languageCode: nil,
+                source: .unavailable
+            )
+        }
+        guard let languageCode = spokenLanguageCode?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !languageCode.isEmpty else {
+            return nil
+        }
+        return SpokenLanguageResolution(
+            languageCode: languageCode,
+            source: spokenLanguageResolution
+        )
+    }
+
     var machineStatus: PipelineHistoryMachineStatus {
         if postProcessingStatus == "importing" { return .importing }
         if postProcessingStatus == "live-recording" { return .liveRecording }
@@ -114,6 +133,9 @@ struct PipelineHistoryItem: Identifiable, Codable {
     let usedContextCapture: Bool
     let usedPostProcessing: Bool
     let transcriptionLanguageCode: String
+    let spokenLanguageCode: String?
+    let spokenLanguageResolution: SpokenLanguageResolutionSource?
+    let meetingSummaryAttempt: MeetingSummaryAttempt?
     let localTranscriptionModelID: String
     let transcriptFileName: String?
     let contextAppName: String?
@@ -150,6 +172,9 @@ struct PipelineHistoryItem: Identifiable, Codable {
         usedContextCapture: Bool = true,
         usedPostProcessing: Bool = true,
         transcriptionLanguageCode: String = "auto",
+        spokenLanguageCode: String? = nil,
+        spokenLanguageResolution: SpokenLanguageResolutionSource? = nil,
+        meetingSummaryAttempt: MeetingSummaryAttempt? = nil,
         localTranscriptionModelID: String? = nil,
         transcriptFileName: String? = nil,
         contextAppName: String? = nil,
@@ -185,6 +210,9 @@ struct PipelineHistoryItem: Identifiable, Codable {
         self.usedContextCapture = usedContextCapture
         self.usedPostProcessing = usedPostProcessing
         self.transcriptionLanguageCode = transcriptionLanguageCode
+        self.spokenLanguageCode = spokenLanguageCode
+        self.spokenLanguageResolution = spokenLanguageResolution
+        self.meetingSummaryAttempt = meetingSummaryAttempt
         self.localTranscriptionModelID = localTranscriptionModelID ?? "mlx-community/whisper-large-v3-turbo"
         self.transcriptFileName = transcriptFileName
         self.contextAppName = contextAppName
@@ -314,6 +342,22 @@ struct PipelineHistoryItem: Identifiable, Codable {
     func withCustomTitle(_ customTitle: String?) -> PipelineHistoryItem {
         copying(
             meetingSummaryJSON: meetingSummaryJSON,
+            spokenLanguageCode: spokenLanguageCode,
+            spokenLanguageResolution: spokenLanguageResolution,
+            meetingSummaryAttempt: meetingSummaryAttempt,
+            customTitle: customTitle,
+            postProcessedTranscript: postProcessedTranscript
+        )
+    }
+
+    func withSpokenLanguage(
+        _ spokenLanguage: SpokenLanguageResolution
+    ) -> PipelineHistoryItem {
+        copying(
+            meetingSummaryJSON: meetingSummaryJSON,
+            spokenLanguageCode: spokenLanguage.languageCode,
+            spokenLanguageResolution: spokenLanguage.source,
+            meetingSummaryAttempt: meetingSummaryAttempt,
             customTitle: customTitle,
             postProcessedTranscript: postProcessedTranscript
         )
@@ -321,6 +365,9 @@ struct PipelineHistoryItem: Identifiable, Codable {
 
     func copying(
         meetingSummaryJSON: Data?,
+        spokenLanguageCode: String?,
+        spokenLanguageResolution: SpokenLanguageResolutionSource?,
+        meetingSummaryAttempt: MeetingSummaryAttempt?,
         customTitle: String?,
         postProcessedTranscript: String
     ) -> PipelineHistoryItem {
@@ -352,6 +399,9 @@ struct PipelineHistoryItem: Identifiable, Codable {
             usedContextCapture: usedContextCapture,
             usedPostProcessing: usedPostProcessing,
             transcriptionLanguageCode: transcriptionLanguageCode,
+            spokenLanguageCode: spokenLanguageCode,
+            spokenLanguageResolution: spokenLanguageResolution,
+            meetingSummaryAttempt: meetingSummaryAttempt,
             localTranscriptionModelID: localTranscriptionModelID,
             transcriptFileName: transcriptFileName,
             contextAppName: contextAppName,
@@ -462,6 +512,9 @@ struct PipelineHistoryItem: Identifiable, Codable {
             usedContextCapture: usedContextCapture,
             usedPostProcessing: usedPostProcessing,
             transcriptionLanguageCode: transcriptionLanguageCode,
+            spokenLanguageCode: spokenLanguageCode,
+            spokenLanguageResolution: spokenLanguageResolution,
+            meetingSummaryAttempt: meetingSummaryAttempt,
             localTranscriptionModelID: localTranscriptionModelID,
             transcriptFileName: transcriptFileName,
             contextAppName: contextAppName,

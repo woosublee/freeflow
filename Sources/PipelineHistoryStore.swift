@@ -10,6 +10,7 @@ struct DeletedPipelineHistoryAssets {
 enum PipelineHistoryStoreError: Error {
     case storeUnavailable
     case durableStoreUnavailable
+    case historyEntryNotFound
 }
 
 struct HistoryArchiveSnapshotComponent: Codable, Equatable, Sendable {
@@ -83,6 +84,7 @@ final class PipelineHistoryStore {
     nonisolated(unsafe) private static let managedObjectModel = makeModel()
 
     private let container: NSPersistentContainer
+    private let contextSaver: (NSManagedObjectContext) throws -> Void
     private let historyFetcher: (NSManagedObjectContext, NSFetchRequest<PipelineHistoryEntry>) throws -> [PipelineHistoryEntry]
     private let assetReferenceSnapshotURL: URL?
     private var isStoreLoaded: Bool
@@ -129,6 +131,19 @@ final class PipelineHistoryStore {
 
     convenience init(
         storeURL: URL,
+        persistentStoreLoader: @escaping (NSPersistentContainer) -> Error?,
+        contextSaver: @escaping (NSManagedObjectContext) throws -> Void
+    ) {
+        self.init(
+            storeURL: storeURL,
+            usesInMemoryStore: false,
+            persistentStoreLoader: persistentStoreLoader,
+            contextSaver: contextSaver
+        )
+    }
+
+    convenience init(
+        storeURL: URL,
         historyFetcher: @escaping (
             NSManagedObjectContext,
             NSFetchRequest<PipelineHistoryEntry>
@@ -146,6 +161,9 @@ final class PipelineHistoryStore {
         storeURL: URL?,
         usesInMemoryStore: Bool,
         persistentStoreLoader: @escaping (NSPersistentContainer) -> Error?,
+        contextSaver: @escaping (NSManagedObjectContext) throws -> Void = { context in
+            try context.save()
+        },
         historyFetcher: @escaping (
             NSManagedObjectContext,
             NSFetchRequest<PipelineHistoryEntry>
@@ -157,6 +175,7 @@ final class PipelineHistoryStore {
             name: "PipelineHistory",
             managedObjectModel: Self.managedObjectModel
         )
+        self.contextSaver = contextSaver
         self.historyFetcher = historyFetcher
         assetReferenceSnapshotURL = Self.assetReferenceSnapshotURL(for: storeURL)
         isStoreLoaded = false
@@ -422,7 +441,9 @@ final class PipelineHistoryStore {
             do {
                 let request = pipelineHistoryRequest()
                 request.predicate = NSPredicate(format: "id == %@", item.id as CVarArg)
-                guard let entity = try container.viewContext.fetch(request).first else { return }
+                guard let entity = try container.viewContext.fetch(request).first else {
+                    throw PipelineHistoryStoreError.historyEntryNotFound
+                }
                 didChangeAssetReferences = entity.audioFileName != item.audioFileName
                     || entity.transcriptFileName != item.transcriptFileName
                 Self.apply(item, to: entity)
@@ -439,10 +460,14 @@ final class PipelineHistoryStore {
 
     func delete(
         id: UUID,
+        requiresDurableStore: Bool = false,
         beforeDeleting: (DeletedPipelineHistoryAssets) -> Void = { _ in }
     ) throws -> DeletedPipelineHistoryAssets? {
         guard availability == .ready, isStoreLoaded else {
             throw PipelineHistoryStoreError.storeUnavailable
+        }
+        if requiresDurableStore, !isDurableStore {
+            throw PipelineHistoryStoreError.durableStoreUnavailable
         }
 
         var deletedAssets: DeletedPipelineHistoryAssets?
@@ -451,7 +476,9 @@ final class PipelineHistoryStore {
             do {
                 let request = pipelineHistoryRequest()
                 request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
-                guard let entity = try container.viewContext.fetch(request).first else { return }
+                guard let entity = try container.viewContext.fetch(request).first else {
+                    throw PipelineHistoryStoreError.historyEntryNotFound
+                }
                 let assets = Self.deletedAssets(from: entity)
                 beforeDeleting(assets)
                 deletedAssets = assets
@@ -469,10 +496,14 @@ final class PipelineHistoryStore {
     }
 
     func clearAll(
+        requiresDurableStore: Bool = false,
         beforeDeleting: ([DeletedPipelineHistoryAssets]) -> Void = { _ in }
     ) throws -> [DeletedPipelineHistoryAssets] {
         guard availability == .ready, isStoreLoaded else {
             throw PipelineHistoryStoreError.storeUnavailable
+        }
+        if requiresDurableStore, !isDurableStore {
+            throw PipelineHistoryStoreError.durableStoreUnavailable
         }
 
         var deletedAssets: [DeletedPipelineHistoryAssets] = []
@@ -586,6 +617,11 @@ final class PipelineHistoryStore {
         entity.usedContextCapture = item.usedContextCapture
         entity.usedPostProcessing = item.usedPostProcessing
         entity.transcriptionLanguageCode = item.transcriptionLanguageCode
+        entity.spokenLanguageCode = item.spokenLanguageCode
+        entity.spokenLanguageResolution = item.spokenLanguageResolution?.rawValue
+        entity.meetingSummaryAttemptJSON = encodeMeetingSummaryAttempt(
+            item.meetingSummaryAttempt
+        )
         entity.localTranscriptionModelID = item.localTranscriptionModelID
         entity.transcriptFileName = item.transcriptFileName
         entity.contextAppName = item.contextAppName
@@ -598,7 +634,7 @@ final class PipelineHistoryStore {
     private func saveContext() throws {
         guard container.viewContext.hasChanges else { return }
         do {
-            try container.viewContext.save()
+            try contextSaver(container.viewContext)
         } catch {
             container.viewContext.rollback()
             throw error
@@ -879,6 +915,12 @@ final class PipelineHistoryStore {
         return try? JSONDecoder().decode(CalendarEventMatch.self, from: data)
     }
 
+    private static func encodeMeetingSummaryAttempt(
+        _ attempt: MeetingSummaryAttempt?
+    ) -> Data? {
+        attempt.flatMap { try? JSONEncoder().encode($0) }
+    }
+
     private static func makeHistoryItem(from entity: PipelineHistoryEntry) -> PipelineHistoryItem {
         PipelineHistoryItem(
             intent: PipelineHistoryItemIntent(rawValue: entity.intent ?? "") ?? .dictation,
@@ -908,6 +950,13 @@ final class PipelineHistoryStore {
             usedContextCapture: entity.usedContextCapture,
             usedPostProcessing: entity.usedPostProcessing,
             transcriptionLanguageCode: entity.transcriptionLanguageCode ?? "auto",
+            spokenLanguageCode: entity.spokenLanguageCode,
+            spokenLanguageResolution: entity.spokenLanguageResolution.flatMap(
+                SpokenLanguageResolutionSource.init(rawValue:)
+            ),
+            meetingSummaryAttempt: entity.meetingSummaryAttemptJSON.flatMap {
+                try? JSONDecoder().decode(MeetingSummaryAttempt.self, from: $0)
+            },
             localTranscriptionModelID: entity.localTranscriptionModelID ?? TranscriptionModel.default.id,
             transcriptFileName: entity.transcriptFileName,
             contextAppName: entity.contextAppName,
@@ -953,6 +1002,9 @@ final class PipelineHistoryStore {
             makeAttribute(name: "usedContextCapture", type: .booleanAttributeType, isOptional: false),
             makeAttribute(name: "usedPostProcessing", type: .booleanAttributeType, isOptional: false),
             makeAttribute(name: "transcriptionLanguageCode", type: .stringAttributeType, isOptional: true),
+            makeAttribute(name: "spokenLanguageCode", type: .stringAttributeType, isOptional: true),
+            makeAttribute(name: "spokenLanguageResolution", type: .stringAttributeType, isOptional: true),
+            makeAttribute(name: "meetingSummaryAttemptJSON", type: .binaryDataAttributeType, isOptional: true),
             makeAttribute(name: "localTranscriptionModelID", type: .stringAttributeType, isOptional: false, defaultValue: "mlx-community/whisper-large-v3-turbo"),
             makeAttribute(name: "transcriptFileName", type: .stringAttributeType, isOptional: true),
             makeAttribute(name: "contextAppName", type: .stringAttributeType, isOptional: true),
@@ -1010,6 +1062,9 @@ final class PipelineHistoryEntry: NSManagedObject {
     @NSManaged var usedContextCapture: Bool
     @NSManaged var usedPostProcessing: Bool
     @NSManaged var transcriptionLanguageCode: String?
+    @NSManaged var spokenLanguageCode: String?
+    @NSManaged var spokenLanguageResolution: String?
+    @NSManaged var meetingSummaryAttemptJSON: Data?
     @NSManaged var localTranscriptionModelID: String?
     @NSManaged var transcriptFileName: String?
     @NSManaged var contextAppName: String?

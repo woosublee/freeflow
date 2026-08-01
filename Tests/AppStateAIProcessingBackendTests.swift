@@ -2,8 +2,9 @@ import AppKit
 import Combine
 import Foundation
 
-// AppState tests run only through FullSourceAppStateTestRunner so its process
-// isolation always protects production preferences and stored recordings.
+#if !QUILL_GROUPED_TEST_RUNNER
+@main
+#endif
 struct AppStateAIProcessingBackendTests {
     static func main() async throws {
         let defaultsSnapshot = UserDefaultsSnapshot()
@@ -1748,9 +1749,6 @@ struct AppStateAIProcessingBackendTests {
         let seams = LocalAISeamSnapshot()
         AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
         AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIModelDelete = { model in
-            deletionHarness.record(modelID: model.id, managerWasStopped: true)
-        }
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
@@ -1763,6 +1761,9 @@ struct AppStateAIProcessingBackendTests {
             approximateResidentRAMBytes: canonical.approximateResidentRAMBytes
         )
         let appState = await makeRefreshedAppState()
+        AppState.localAIModelDelete = { model in
+            deletionHarness.record(modelID: model.id, managerWasStopped: true)
+        }
         await MainActor.run {
             precondition(
                 !appState.isAIProcessingChoiceAvailable(

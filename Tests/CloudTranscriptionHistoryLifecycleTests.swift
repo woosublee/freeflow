@@ -15,6 +15,7 @@ struct CloudTranscriptionHistoryLifecycleTests {
             try await localRetryIgnoresCloudCheckpointAndPreservesItOnFailure()
             try startupReconciliationResumesOnlyExactCompatibleJobs()
             try await repeatedRelaunchResumesFromFirstIncompleteChunk()
+            try await resumedCheckpointPreservesDetectedLanguage()
             print("CloudTranscriptionHistoryLifecycleTests passed")
         } catch {
             fputs("CloudTranscriptionHistoryLifecycleTests failed: \(error)\n", stderr)
@@ -43,7 +44,7 @@ struct CloudTranscriptionHistoryLifecycleTests {
 
         let transcript = try await service.transcribe(fileURL: fixture.audioURL)
 
-        try expectEqual(transcript, "zero one two", "assembled transcript")
+        try expectEqual(transcript.text, "zero one two", "assembled transcript")
         try expectEqual(await recorder.uploadCount(), 3, "provider upload count")
         let preparedBeforeFirstUpload = await recorder
             .sawPreparedRecordBeforeFirstUpload()
@@ -175,7 +176,7 @@ struct CloudTranscriptionHistoryLifecycleTests {
 
         var savedTranscript = ""
         try committer.commit(historyID: historyID) {
-            savedTranscript = transcript
+            savedTranscript = transcript.text
         }
 
         try expectEqual(savedTranscript, "zero one two", "history receives full transcript once")
@@ -242,7 +243,7 @@ struct CloudTranscriptionHistoryLifecycleTests {
             fileURL: fixture.audioURL
         )
 
-        try expectEqual(transcript, "zero one two", "same cloud retry transcript")
+        try expectEqual(transcript.text, "zero one two", "same cloud retry transcript")
         try expectEqual(
             try await retryRecorder.chunkMarkers(),
             [2, 3],
@@ -304,7 +305,7 @@ struct CloudTranscriptionHistoryLifecycleTests {
         )
 
         try expectEqual(
-            transcript,
+            transcript.text,
             "new-zero new-one new-two",
             "different cloud ignores old prefix"
         )
@@ -566,7 +567,7 @@ struct CloudTranscriptionHistoryLifecycleTests {
         )
         let transcript = try await serviceC.transcribe(fileURL: fixture.audioURL)
 
-        try expectEqual(transcript, "zero one two", "repeated relaunch transcript")
+        try expectEqual(transcript.text, "zero one two", "repeated relaunch transcript")
         try expectEqual(
             try await recorderC.chunkMarkers(),
             [3],
@@ -581,6 +582,61 @@ struct CloudTranscriptionHistoryLifecycleTests {
             FileManager.default.fileExists(atPath: fixture.audioURL.path),
             "one permanent WAV survives every relaunch"
         )
+    }
+
+    private static func resumedCheckpointPreservesDetectedLanguage() async throws {
+        let fixture = try makeFixture(language: nil)
+        defer { fixture.cleanup() }
+        let historyID = UUID()
+        let firstStore = fixture.store
+        let firstSession = firstStore.beginSession(historyID: historyID)
+        let firstRecorder = LifecycleUploadRecorder(
+            store: firstStore,
+            historyID: historyID,
+            responses: [
+                LifecycleProviderResponse(text: "korean chunk", language: "ko"),
+                LifecycleProviderResponse(text: "unused", language: nil)
+            ],
+            failAfterUploadCount: 1
+        )
+        let firstService = try makeService(
+            fixture: fixture,
+            historyID: historyID,
+            session: firstSession,
+            recorder: firstRecorder,
+            progress: ProgressRecorder(),
+            language: nil
+        )
+        do {
+            _ = try await firstService.transcribe(fileURL: fixture.audioURL)
+            throw TestFailure("first auto-detect pass must be interrupted after first chunk")
+        } catch let issue as QuillUserIssueError {
+            try expectEqual(issue.record.code, .providerUnavailable, "first pass interruption")
+        }
+
+        let resumedStore = fixture.makeStore()
+        let resumedSession = resumedStore.beginSession(historyID: historyID)
+        let resumedRecorder = LifecycleUploadRecorder(
+            store: resumedStore,
+            historyID: historyID,
+            responses: [
+                LifecycleProviderResponse(text: "english chunk", language: nil),
+                LifecycleProviderResponse(text: "final english chunk", language: nil)
+            ]
+        )
+        let resumedService = try makeService(
+            fixture: fixture.withStore(resumedStore),
+            historyID: historyID,
+            session: resumedSession,
+            recorder: resumedRecorder,
+            progress: ProgressRecorder(),
+            language: nil
+        )
+
+        let result = try await resumedService.transcribe(fileURL: fixture.audioURL)
+
+        try expectEqual(result.spokenLanguage.languageCode, "ko", "resumed checkpoint language")
+        try expectEqual(result.spokenLanguage.source, .engineDetected, "resumed checkpoint language source")
     }
 
     private static func makeStoredRecord(
@@ -659,7 +715,8 @@ struct CloudTranscriptionHistoryLifecycleTests {
         session: CloudTranscriptionJobSession,
         recorder: LifecycleUploadRecorder,
         progress: ProgressRecorder,
-        baseURL: String = "https://provider.example/v1"
+        baseURL: String = "https://provider.example/v1",
+        language: String? = "en"
     ) throws -> TranscriptionService {
         let completionPolicy = CloudTranscriptionCompletionPolicy(
             postProcessingEnabled: true,
@@ -676,7 +733,7 @@ struct CloudTranscriptionHistoryLifecycleTests {
             useLocalTranscription: false,
             transcriptionLanguage: .auto,
             transcriptionModel: "whisper-large-v3",
-            language: "en",
+            language: language,
             cloudDependencies: CloudTranscriptionDependencies(
                 encodedUploadCeilingBytes: fixture.ceiling,
                 upload: { request, body in
@@ -698,7 +755,7 @@ struct CloudTranscriptionHistoryLifecycleTests {
         )
     }
 
-    private static func makeFixture() throws -> LifecycleFixture {
+    private static func makeFixture(language: String? = "en") throws -> LifecycleFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let audioRoot = root.appendingPathComponent("audio", isDirectory: true)
@@ -710,7 +767,7 @@ struct CloudTranscriptionHistoryLifecycleTests {
         let multipart = CloudTranscriptionMultipartLayout(
             model: "whisper-large-v3",
             responseFormat: "verbose_json",
-            language: "en",
+            language: language,
             boundaryByteCount: 36
         )
         let ceiling = try multipart.encodedByteCount(
@@ -815,10 +872,15 @@ private struct LifecycleFixture {
     }
 }
 
+private struct LifecycleProviderResponse: Sendable {
+    let text: String
+    let language: String?
+}
+
 private actor LifecycleUploadRecorder {
     private let store: CloudTranscriptionJobStore
     private let historyID: UUID
-    private var results: [String]
+    private var responses: [LifecycleProviderResponse]
     private var recordedBodies: [Data] = []
     private var count = 0
     private var preparedBeforeFirstUpload = false
@@ -834,7 +896,23 @@ private actor LifecycleUploadRecorder {
     ) {
         self.store = store
         self.historyID = historyID
-        self.results = results
+        self.responses = results.map {
+            LifecycleProviderResponse(text: $0, language: nil)
+        }
+        self.failAfterUploadCount = failAfterUploadCount
+        self.afterUpload = afterUpload
+    }
+
+    init(
+        store: CloudTranscriptionJobStore,
+        historyID: UUID,
+        responses: [LifecycleProviderResponse],
+        failAfterUploadCount: Int? = nil,
+        afterUpload: @escaping @Sendable (Int) async throws -> Void = { _ in }
+    ) {
+        self.store = store
+        self.historyID = historyID
+        self.responses = responses
         self.failAfterUploadCount = failAfterUploadCount
         self.afterUpload = afterUpload
     }
@@ -853,12 +931,16 @@ private actor LifecycleUploadRecorder {
            record.completedChunks.isEmpty {
             preparedBeforeFirstUpload = true
         }
-        guard !results.isEmpty else { throw TestFailure("unexpected upload") }
-        let value = results.removeFirst()
+        guard !responses.isEmpty else { throw TestFailure("unexpected upload") }
+        let providerResponse = responses.removeFirst()
         recordedBodies.append(body)
         count += 1
         try await afterUpload(count)
-        let data = Data(#"{"text":"\#(value)","segments":[]}"#.utf8)
+        var payload: [String: Any] = ["text": providerResponse.text, "segments": []]
+        if let language = providerResponse.language {
+            payload["language"] = language
+        }
+        let data = try JSONSerialization.data(withJSONObject: payload)
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: 200,

@@ -5,18 +5,83 @@ struct MeetingSummaryGenerationResult: Equatable, Sendable {
     let promptVersion: Int
     let modelID: String
     let backendKind: MeetingSummaryBackendKind
+    let evidenceVerification: MeetingSummaryEvidenceVerification
+
+    init(
+        draft: MeetingSummaryDraftContentV2,
+        promptVersion: Int,
+        modelID: String,
+        backendKind: MeetingSummaryBackendKind,
+        evidenceVerification: MeetingSummaryEvidenceVerification = .verified
+    ) {
+        self.draft = draft
+        self.promptVersion = promptVersion
+        self.modelID = modelID
+        self.backendKind = backendKind
+        self.evidenceVerification = evidenceVerification
+    }
 }
 
 enum MeetingSummaryError: Error, Equatable {
     case invalidInput
-    case requestFailed(statusCode: Int, providerCode: String?)
-    case rateLimited(model: String, retryAfter: TimeInterval)
-    case invalidResponse(String)
-    case outputRejected(MeetingSummaryOutputValidationError)
-    case emptyOutput
-    case requestTimedOut(TimeInterval)
+    case requestFailed(
+        statusCode: Int,
+        providerCode: String?,
+        modelID: String? = nil
+    )
+    case rateLimited(
+        model: String,
+        retryAfter: TimeInterval,
+        providerCode: String? = nil
+    )
+    case invalidResponse(
+        MeetingSummaryFailureSubtype,
+        modelID: String? = nil
+    )
+    case outputRejected(
+        MeetingSummaryOutputValidationError,
+        modelID: String? = nil
+    )
+    case emptyOutput(modelID: String? = nil)
+    case requestTimedOut(TimeInterval, modelID: String? = nil)
     case allModelsCoolingDown
     case sourceChanged
+
+    func effectiveModelID(fallback: String) -> String {
+        switch self {
+        case .rateLimited(let model, _, _):
+            model
+        case .requestFailed(_, _, let modelID),
+             .invalidResponse(_, let modelID),
+             .outputRejected(_, let modelID),
+             .emptyOutput(let modelID),
+             .requestTimedOut(_, let modelID):
+            modelID ?? fallback
+        case .invalidInput, .allModelsCoolingDown, .sourceChanged:
+            fallback
+        }
+    }
+
+    func attributing(modelID: String) -> Self {
+        switch self {
+        case .requestFailed(let statusCode, let providerCode, nil):
+            .requestFailed(
+                statusCode: statusCode,
+                providerCode: providerCode,
+                modelID: modelID
+            )
+        case .invalidResponse(let subtype, nil):
+            .invalidResponse(subtype, modelID: modelID)
+        case .outputRejected(let rejection, nil):
+            .outputRejected(rejection, modelID: modelID)
+        case .emptyOutput(nil):
+            .emptyOutput(modelID: modelID)
+        case .requestTimedOut(let timeout, nil):
+            .requestTimedOut(timeout, modelID: modelID)
+        default:
+            self
+        }
+    }
 
     func userIssue(
         providerHost: String?,
@@ -25,36 +90,71 @@ enum MeetingSummaryError: Error, Equatable {
     ) -> QuillUserIssueRecord {
         let code: QuillUserIssueCode
         let status: Int?
+        let providerCode: String?
+        let effectiveModelID: String
         switch self {
-        case .requestTimedOut:
+        case .requestTimedOut(_, let endpointModelID):
             code = .meetingSummaryUnavailable
             status = nil
-        case .rateLimited, .allModelsCoolingDown:
+            providerCode = nil
+            effectiveModelID = endpointModelID ?? modelID
+        case .rateLimited(let endpointModelID, _, let responseCode):
             code = .meetingSummaryUnavailable
             status = 429
-        case .requestFailed(let statusCode, _):
+            providerCode = ProviderDiagnosticCode.normalized(responseCode)
+            effectiveModelID = endpointModelID
+        case .allModelsCoolingDown:
+            code = .meetingSummaryUnavailable
+            status = 429
+            providerCode = nil
+            effectiveModelID = modelID
+        case .requestFailed(let statusCode, let responseCode, let endpointModelID):
             status = statusCode > 0 ? statusCode : nil
+            providerCode = ProviderDiagnosticCode.normalized(responseCode)
+            effectiveModelID = endpointModelID ?? modelID
             if statusCode == 401 || statusCode == 403 {
                 code = .authenticationFailed
             } else {
                 code = .meetingSummaryUnavailable
             }
-        case .invalidResponse, .outputRejected, .emptyOutput:
+        case .invalidResponse(_, let endpointModelID),
+             .outputRejected(_, let endpointModelID),
+             .emptyOutput(let endpointModelID):
             code = .meetingSummaryInvalidResponse
             status = nil
+            providerCode = nil
+            effectiveModelID = endpointModelID ?? modelID
         case .invalidInput, .sourceChanged:
             code = .meetingSummaryUnavailable
             status = nil
+            providerCode = nil
+            effectiveModelID = modelID
         }
         return QuillUserIssueRecord(
             code: code,
             context: QuillUserIssueContext(
                 httpStatus: status,
                 providerHost: providerHost,
-                modelID: modelID,
-                localBackend: localBackend
+                providerCode: providerCode,
+                modelID: effectiveModelID,
+                localBackend: localBackend,
+                meetingSummaryFailureSubtype: failureSubtype
             )
         )
+    }
+
+    private var failureSubtype: MeetingSummaryFailureSubtype? {
+        switch self {
+        case .invalidResponse(let subtype, _):
+            return subtype
+        case .outputRejected(let rejection, _):
+            return rejection.failureSubtype
+        case .emptyOutput:
+            return .emptyOutput
+        case .invalidInput, .requestFailed, .rateLimited,
+             .requestTimedOut, .allModelsCoolingDown, .sourceChanged:
+            return nil
+        }
     }
 }
 
@@ -63,7 +163,7 @@ enum MeetingSummaryStrictDecoder {
         guard let data = text.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data),
               let root = object as? [String: Any] else {
-            throw MeetingSummaryError.invalidResponse("Invalid summary JSON.")
+            throw MeetingSummaryError.invalidResponse(.jsonSchema)
         }
         try requireKeys(
             root,
@@ -87,17 +187,14 @@ enum MeetingSummaryStrictDecoder {
 
     private static func overview(_ value: Any?) throws -> MeetingSummaryEvidenceText {
         guard let dictionary = value as? [String: Any] else {
-            throw MeetingSummaryError.invalidResponse("Invalid overview.")
+            throw MeetingSummaryError.invalidResponse(.jsonSchema)
         }
         try requireKeys(dictionary, expected: ["text", "sourceQuotes"])
         guard let sourceQuotes = dictionary["sourceQuotes"] as? [Any] else {
-            throw MeetingSummaryError.invalidResponse("Invalid overview source quotes.")
+            throw MeetingSummaryError.invalidResponse(.jsonSchema)
         }
-        let quotes = try sourceQuotes.map {
-            try requiredString($0, field: "sourceQuotes")
-        }
-        guard !quotes.isEmpty else {
-            throw MeetingSummaryError.invalidResponse("Overview needs source evidence.")
+        let quotes = try sourceQuotes.compactMap {
+            try optionalEvidenceString($0)
         }
         return MeetingSummaryEvidenceText(
             text: try requiredString(dictionary["text"], field: "overview text"),
@@ -110,19 +207,18 @@ enum MeetingSummaryStrictDecoder {
         field: String
     ) throws -> [MeetingSummaryPoint] {
         guard let values = value as? [Any] else {
-            throw MeetingSummaryError.invalidResponse("Invalid \(field).")
+            throw MeetingSummaryError.invalidResponse(.jsonSchema)
         }
         return try values.map { value in
             guard let dictionary = value as? [String: Any] else {
-                throw MeetingSummaryError.invalidResponse("Invalid \(field) item.")
+                throw MeetingSummaryError.invalidResponse(.jsonSchema)
             }
             try requireKeys(dictionary, expected: ["text", "sourceQuote"])
             return MeetingSummaryPoint(
                 id: UUID(),
                 text: try requiredString(dictionary["text"], field: "text"),
-                sourceQuote: try requiredString(
-                    dictionary["sourceQuote"],
-                    field: "sourceQuote"
+                sourceQuote: try optionalEvidenceString(
+                    dictionary["sourceQuote"]
                 )
             )
         }
@@ -132,13 +228,11 @@ enum MeetingSummaryStrictDecoder {
         _ value: Any?
     ) throws -> [MeetingSummaryActionItem] {
         guard let values = value as? [Any] else {
-            throw MeetingSummaryError.invalidResponse("Invalid actionItems.")
+            throw MeetingSummaryError.invalidResponse(.jsonSchema)
         }
         return try values.map { value in
             guard let dictionary = value as? [String: Any] else {
-                throw MeetingSummaryError.invalidResponse(
-                    "Invalid actionItems item."
-                )
+                throw MeetingSummaryError.invalidResponse(.jsonSchema)
             }
             try requireKeys(
                 dictionary,
@@ -152,9 +246,8 @@ enum MeetingSummaryStrictDecoder {
                     dictionary["dueDate"],
                     field: "dueDate"
                 ),
-                sourceQuote: try requiredString(
-                    dictionary["sourceQuote"],
-                    field: "sourceQuote"
+                sourceQuote: try optionalEvidenceString(
+                    dictionary["sourceQuote"]
                 ),
                 isCompleted: false
             )
@@ -166,9 +259,7 @@ enum MeetingSummaryStrictDecoder {
         expected: Set<String>
     ) throws {
         guard Set(dictionary.keys) == expected else {
-            throw MeetingSummaryError.invalidResponse(
-                "Unexpected summary fields."
-            )
+            throw MeetingSummaryError.invalidResponse(.jsonSchema)
         }
     }
 
@@ -177,13 +268,24 @@ enum MeetingSummaryStrictDecoder {
         field: String
     ) throws -> String {
         guard let value = value as? String else {
-            throw MeetingSummaryError.invalidResponse("Invalid \(field).")
+            throw MeetingSummaryError.invalidResponse(.jsonSchema)
         }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            throw MeetingSummaryError.invalidResponse("Empty \(field).")
+            throw MeetingSummaryError.invalidResponse(.jsonSchema)
         }
         return trimmed
+    }
+
+    private static func optionalEvidenceString(
+        _ value: Any?
+    ) throws -> String? {
+        if value == nil || value is NSNull { return nil }
+        guard let value = value as? String else {
+            throw MeetingSummaryError.invalidResponse(.jsonSchema)
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func optionalString(
@@ -192,7 +294,7 @@ enum MeetingSummaryStrictDecoder {
     ) throws -> String? {
         if value == nil || value is NSNull { return nil }
         guard let value = value as? String else {
-            throw MeetingSummaryError.invalidResponse("Invalid \(field).")
+            throw MeetingSummaryError.invalidResponse(.jsonSchema)
         }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
@@ -218,12 +320,14 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
         let draft: MeetingSummaryDraftContentV2
         let modelID: String
         let backendKind: MeetingSummaryBackendKind
+        let evidenceVerification: MeetingSummaryEvidenceVerification
     }
 
     private struct MergeRecord {
         let draft: MeetingSummaryDraftContentV2
         let modelID: String
         let backendKind: MeetingSummaryBackendKind
+        let evidenceVerification: MeetingSummaryEvidenceVerification
     }
 
     private static let requestTimeout: TimeInterval = 120
@@ -235,7 +339,6 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
 
     private let backendExecutor: AIProcessingBackendExecutor
     private let cloudFallbackModelID: String?
-    private let outputLanguage: String
     private let chunker: MeetingSummaryTextChunker
     private let tokenBudgeter: LocalAITokenBudgeter
     private let transport: Transport
@@ -243,14 +346,12 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
     init(
         backendExecutor: AIProcessingBackendExecutor,
         cloudFallbackModelID: String?,
-        outputLanguage: String,
         chunker: MeetingSummaryTextChunker = MeetingSummaryTextChunker(),
         tokenBudgeter: LocalAITokenBudgeter? = nil,
         transport: @escaping Transport = MeetingSummaryService.defaultTransport
     ) {
         self.backendExecutor = backendExecutor
         self.cloudFallbackModelID = cloudFallbackModelID
-        self.outputLanguage = outputLanguage
         self.chunker = chunker
         self.tokenBudgeter = tokenBudgeter ?? LocalAITokenBudgeter(
             contextWindow: Self.contextWindow,
@@ -263,13 +364,22 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
         source: MeetingSummarySource
     ) async throws -> MeetingSummaryGenerationResult {
         let normalizedTranscript = source.normalizedTranscript
-        guard !normalizedTranscript.isEmpty else {
+        let languageCode = source.languageContext.appliedLanguageCode
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTranscript.isEmpty, !languageCode.isEmpty else {
             throw MeetingSummaryError.invalidInput
         }
+        let promptLanguage = TranscriptionLanguage.summaryPromptLanguage(
+            for: languageCode
+        )
 
         let extractionBudgetPrompt = try MeetingSummaryPromptFactory.singlePass(
-            source: MeetingSummarySource(transcript: "", calendar: source.calendar),
-            outputLanguage: outputLanguage
+            source: MeetingSummarySource(
+                transcript: "",
+                calendar: source.calendar,
+                languageContext: source.languageContext
+            ),
+            outputLanguage: promptLanguage
         )
         let extractionBudget = try await sourceBudget(
             for: extractionBudgetPrompt,
@@ -286,29 +396,32 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
             throw MeetingSummaryError.invalidInput
         }
 
+        let sourceData = SummarySourceData(
+            transcript: normalizedTranscript,
+            calendar: source.calendar
+        )
         var records: [MergeRecord] = []
         for chunk in chunks {
             let prompt = try MeetingSummaryPromptFactory.chunkExtraction(
                 chunk: chunk,
                 calendar: source.calendar,
-                outputLanguage: outputLanguage
+                outputLanguage: promptLanguage
             )
             let partial = try await generateDraft(
                 prompt: prompt,
                 role: .summaryExtraction
             )
-            try validate(
-                partial.draft,
-                against: SummarySourceData(
-                    transcript: chunk.text,
-                    calendar: source.calendar
-                )
+            let repaired = try repairAndValidate(
+                partial,
+                outputLanguageCode: languageCode,
+                source: sourceData
             )
             records.append(
                 MergeRecord(
-                    draft: partial.draft,
-                    modelID: partial.modelID,
-                    backendKind: partial.backendKind
+                    draft: repaired.draft,
+                    modelID: repaired.modelID,
+                    backendKind: repaired.backendKind,
+                    evidenceVerification: repaired.evidenceVerification
                 )
             )
         }
@@ -318,27 +431,39 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
             final = DraftResult(
                 draft: only.draft,
                 modelID: only.modelID,
-                backendKind: only.backendKind
+                backendKind: only.backendKind,
+                evidenceVerification: only.evidenceVerification
             )
         } else {
-            final = try await merge(records: records)
+            final = try await merge(
+                records: records,
+                promptLanguage: promptLanguage,
+                outputLanguageCode: languageCode,
+                source: sourceData
+            )
         }
 
         return MeetingSummaryGenerationResult(
             draft: final.draft,
             promptVersion: MeetingSummaryPromptFactory.version,
             modelID: final.modelID,
-            backendKind: final.backendKind
+            backendKind: final.backendKind,
+            evidenceVerification: final.evidenceVerification
         )
     }
 
-    private func merge(records initialRecords: [MergeRecord]) async throws -> DraftResult {
+    private func merge(
+        records initialRecords: [MergeRecord],
+        promptLanguage: String?,
+        outputLanguageCode: String,
+        source: SummarySourceData
+    ) async throws -> DraftResult {
         var records = initialRecords
         while records.count > 1 {
             let allDrafts = records.map(\.draft)
             let finalPrompt = try MeetingSummaryPromptFactory.merge(
                 validatedPartials: allDrafts,
-                outputLanguage: outputLanguage
+                outputLanguage: promptLanguage
             )
             if try await fits(
                 finalPrompt,
@@ -348,15 +473,28 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
                     prompt: finalPrompt,
                     role: .summaryFinalMerge
                 )
-                try validate(final.draft, againstValidatedRecords: allDrafts)
-                return final
+                let repaired = try repairAndValidate(
+                    final,
+                    outputLanguageCode: outputLanguageCode,
+                    source: source
+                )
+                return DraftResult(
+                    draft: repaired.draft,
+                    modelID: repaired.modelID,
+                    backendKind: repaired.backendKind,
+                    evidenceVerification: combinedVerification(
+                        repaired.evidenceVerification,
+                        records.map(\.evidenceVerification)
+                    )
+                )
             }
 
-            let batches = try await largestMergeBatches(from: records)
+            let batches = try await largestMergeBatches(
+                from: records,
+                promptLanguage: promptLanguage
+            )
             guard batches.contains(where: { $0.count > 1 }) else {
-                throw MeetingSummaryError.invalidResponse(
-                    "Validated summary partial exceeds the safe merge budget."
-                )
+                throw MeetingSummaryError.invalidResponse(.mergeBudget)
             }
 
             var merged: [MergeRecord] = []
@@ -368,18 +506,26 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
                 let inputs = batch.map(\.draft)
                 let prompt = try MeetingSummaryPromptFactory.merge(
                     validatedPartials: inputs,
-                    outputLanguage: outputLanguage
+                    outputLanguage: promptLanguage
                 )
                 let result = try await generateDraft(
                     prompt: prompt,
                     role: .summaryIntermediateMerge
                 )
-                try validate(result.draft, againstValidatedRecords: inputs)
+                let repaired = try repairAndValidate(
+                    result,
+                    outputLanguageCode: outputLanguageCode,
+                    source: source
+                )
                 merged.append(
                     MergeRecord(
-                        draft: result.draft,
-                        modelID: result.modelID,
-                        backendKind: result.backendKind
+                        draft: repaired.draft,
+                        modelID: repaired.modelID,
+                        backendKind: repaired.backendKind,
+                        evidenceVerification: combinedVerification(
+                            repaired.evidenceVerification,
+                            batch.map(\.evidenceVerification)
+                        )
                     )
                 )
             }
@@ -387,17 +533,19 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
         }
 
         guard let record = records.first else {
-            throw MeetingSummaryError.invalidResponse("Missing summary merge result.")
+            throw MeetingSummaryError.invalidResponse(.mergeBudget)
         }
         return DraftResult(
             draft: record.draft,
             modelID: record.modelID,
-            backendKind: record.backendKind
+            backendKind: record.backendKind,
+            evidenceVerification: record.evidenceVerification
         )
     }
 
     private func largestMergeBatches(
-        from records: [MergeRecord]
+        from records: [MergeRecord],
+        promptLanguage: String?
     ) async throws -> [[MergeRecord]] {
         var batches: [[MergeRecord]] = []
         var current: [MergeRecord] = []
@@ -406,7 +554,7 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
             let candidate = current + [record]
             let prompt = try MeetingSummaryPromptFactory.merge(
                 validatedPartials: candidate.map(\.draft),
-                outputLanguage: outputLanguage
+                outputLanguage: promptLanguage
             )
             if try await fits(prompt, role: .summaryIntermediateMerge) {
                 current = candidate
@@ -414,23 +562,19 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
             }
 
             if current.isEmpty {
-                throw MeetingSummaryError.invalidResponse(
-                    "Validated summary partial exceeds the safe merge budget."
-                )
+                throw MeetingSummaryError.invalidResponse(.mergeBudget)
             }
             batches.append(current)
             current = [record]
             let singlePrompt = try MeetingSummaryPromptFactory.merge(
                 validatedPartials: [record.draft],
-                outputLanguage: outputLanguage
+                outputLanguage: promptLanguage
             )
             guard try await fits(
                 singlePrompt,
                 role: .summaryIntermediateMerge
             ) else {
-                throw MeetingSummaryError.invalidResponse(
-                    "Validated summary partial exceeds the safe merge budget."
-                )
+                throw MeetingSummaryError.invalidResponse(.mergeBudget)
             }
         }
         if !current.isEmpty {
@@ -444,9 +588,7 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
         role: LocalAITokenBudgetRole
     ) async throws -> DraftResult {
         guard try await fits(prompt, role: role) else {
-            throw MeetingSummaryError.invalidResponse(
-                "Summary request exceeds the safe context budget."
-            )
+            throw MeetingSummaryError.invalidResponse(.contextBudget)
         }
         if backendExecutor.choice.isLocal {
             return try await requestDraft(
@@ -465,9 +607,7 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
             forRenderedChatPrompt: renderedPrompt(prompt),
             role: role
         ) else {
-            throw MeetingSummaryError.invalidResponse(
-                "Summary request exceeds the safe context budget."
-            )
+            throw MeetingSummaryError.invalidResponse(.contextBudget)
         }
         return budget
     }
@@ -486,34 +626,39 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
         "[System]\n\(prompt.system)\n\n[User]\n\(prompt.user)"
     }
 
-    private func validate(
-        _ draft: MeetingSummaryDraftContentV2,
-        against source: SummarySourceData
-    ) throws {
+    private func repairAndValidate(
+        _ result: DraftResult,
+        outputLanguageCode: String,
+        source: SummarySourceData
+    ) throws -> DraftResult {
+        let repaired = MeetingSummaryEvidenceRepairer().repair(
+            result.draft,
+            sourceTexts: MeetingSummaryOutputValidator.sourceTexts(for: source)
+        )
         do {
-            try MeetingSummaryOutputValidator().validate(
-                draft,
-                outputLanguage: outputLanguage,
-                against: source
+            try MeetingSummaryOutputValidator().validateLanguage(
+                repaired.draft,
+                outputLanguage: outputLanguageCode
             )
         } catch let error as MeetingSummaryOutputValidationError {
-            throw MeetingSummaryError.outputRejected(error)
+            throw MeetingSummaryError.outputRejected(error, modelID: result.modelID)
         }
+        return DraftResult(
+            draft: repaired.draft,
+            modelID: result.modelID,
+            backendKind: result.backendKind,
+            evidenceVerification: combinedVerification(
+                result.evidenceVerification,
+                [repaired.verification]
+            )
+        )
     }
 
-    private func validate(
-        _ draft: MeetingSummaryDraftContentV2,
-        againstValidatedRecords records: [MeetingSummaryDraftContentV2]
-    ) throws {
-        do {
-            try MeetingSummaryOutputValidator().validate(
-                draft,
-                outputLanguage: outputLanguage,
-                againstValidatedRecords: records
-            )
-        } catch let error as MeetingSummaryOutputValidationError {
-            throw MeetingSummaryError.outputRejected(error)
-        }
+    private func combinedVerification(
+        _ first: MeetingSummaryEvidenceVerification,
+        _ rest: [MeetingSummaryEvidenceVerification]
+    ) -> MeetingSummaryEvidenceVerification {
+        ([first] + rest).contains(.unverified) ? .unverified : .verified
     }
 
     private func requestCloudDraft(
@@ -545,7 +690,7 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
                 )
             } catch let error as MeetingSummaryError {
                 lastError = error
-                if case .rateLimited(_, let retryAfter) = error {
+                if case .rateLimited(_, let retryAfter, _) = error {
                     await LLMCooldownManager.shared.setCooldown(
                         LLMCooldownIdentity(
                             baseURL: backendExecutor.cloudBaseURL,
@@ -577,17 +722,22 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
             do {
                 (data, response) = try await transport(request)
             } catch let error as URLError where error.code == .timedOut {
-                throw MeetingSummaryError.requestTimedOut(Self.requestTimeout)
+                throw MeetingSummaryError.requestTimedOut(
+                    Self.requestTimeout,
+                    modelID: endpoint.selectedModelID
+                )
             } catch {
                 throw MeetingSummaryError.requestFailed(
                     statusCode: 0,
-                    providerCode: nil
+                    providerCode: nil,
+                    modelID: endpoint.selectedModelID
                 )
             }
 
             guard let http = response as? HTTPURLResponse else {
                 throw MeetingSummaryError.invalidResponse(
-                    "Missing HTTP response."
+                    .responseEnvelope,
+                    modelID: endpoint.selectedModelID
                 )
             }
             guard (200..<300).contains(http.statusCode) else {
@@ -596,16 +746,23 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
                     let cooldown = LLMCooldownManager.rateLimitCooldown(from: http)
                     throw MeetingSummaryError.rateLimited(
                         model: endpoint.selectedModelID,
-                        retryAfter: cooldown.seconds
+                        retryAfter: cooldown.seconds,
+                        providerCode: providerCode
                     )
                 }
                 throw MeetingSummaryError.requestFailed(
                     statusCode: http.statusCode,
-                    providerCode: providerCode
+                    providerCode: providerCode,
+                    modelID: endpoint.selectedModelID
                 )
             }
 
-            let content = try responseContent(data)
+            let content: String
+            do {
+                content = try responseContent(data)
+            } catch let error as MeetingSummaryError {
+                throw error.attributing(modelID: endpoint.selectedModelID)
+            }
             let config = ModelConfiguration.config(for: endpoint.selectedModelID)
             let cleaned = config.shouldStripThinkTags
                 ? ModelConfiguration.stripThinkTags(content)
@@ -614,13 +771,21 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
                 in: .whitespacesAndNewlines
             )
             guard !trimmed.isEmpty else {
-                throw MeetingSummaryError.emptyOutput
+                throw MeetingSummaryError.emptyOutput(
+                    modelID: endpoint.selectedModelID
+                )
             }
-            let draft = try MeetingSummaryStrictDecoder.decode(trimmed)
+            let draft: MeetingSummaryDraftContentV2
+            do {
+                draft = try MeetingSummaryStrictDecoder.decode(trimmed)
+            } catch let error as MeetingSummaryError {
+                throw error.attributing(modelID: endpoint.selectedModelID)
+            }
             return DraftResult(
                 draft: draft,
                 modelID: endpoint.selectedModelID,
-                backendKind: endpoint.kind == .local ? .local : .cloud
+                backendKind: endpoint.kind == .local ? .local : .cloud,
+                evidenceVerification: .verified
             )
         }
     }
@@ -692,9 +857,7 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
               let first = choices.first,
               let message = first["message"] as? [String: Any],
               let content = message["content"] as? String else {
-            throw MeetingSummaryError.invalidResponse(
-                "Missing summary response content."
-            )
+            throw MeetingSummaryError.invalidResponse(.responseEnvelope)
         }
         return content
     }
@@ -705,6 +868,6 @@ final class MeetingSummaryService: MeetingSummaryGenerating, @unchecked Sendable
               let error = root["error"] as? [String: Any] else {
             return nil
         }
-        return error["code"] as? String
+        return ProviderDiagnosticCode.normalized(error["code"] as? String)
     }
 }

@@ -29,9 +29,9 @@ enum QuillUserIssueCode: String, Codable, CaseIterable, Sendable {
     case contextUnavailable = "context-unavailable"
     case meetingSummaryUnavailable = "meeting-summary-unavailable"
     case meetingSummaryInvalidResponse = "meeting-summary-invalid-response"
+    case meetingSummaryLanguageUnavailable = "meeting-summary-language-unavailable"
     case historyPersistenceUnavailable = "history-persistence-unavailable"
     case historyRecovered = "history-recovered"
-    case historyArchived = "history-archived"
     case unknown
     case legacy
 }
@@ -41,28 +41,102 @@ enum QuillUserIssueSeverity: String, Codable, Equatable, Sendable {
     case warning
 }
 
+/// A bounded, app-owned classification for a rejected meeting-summary result.
+/// This value is deliberately safe to persist and display: it cannot represent
+/// unbounded generated content, external service payloads, source text, request templates, or secrets.
+enum MeetingSummaryFailureSubtype: String, Codable, Equatable, Sendable {
+    case emptyOutput
+    case responseEnvelope
+    case jsonSchema
+    case contextBudget
+    case mergeBudget
+    case sourceEvidenceMissing
+    case sourceQuoteNotFound
+    case overviewEvidenceCountInvalid
+    case overviewEvidenceQuoteDuplicate
+    case ownerNotGrounded
+    case dueDateNotGrounded
+    case languageMismatch
+}
+
+enum ProviderDiagnosticCode {
+    private static let allowedCodes: Set<String> = [
+        "context_length_exceeded",
+        "insufficient_quota",
+        "internal_error",
+        "invalid_request_error",
+        "model_not_found",
+        "overloaded_error",
+        "rate_limit",
+        "rate_limit_exceeded",
+        "server_error",
+        "service_unavailable",
+        "temporarily_unavailable"
+    ]
+
+    static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let code = value.lowercased()
+        return allowedCodes.contains(code) ? code : nil
+    }
+}
+
 struct QuillUserIssueContext: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey {
+        case httpStatus
+        case providerHost
+        case providerCode
+        case modelID
+        case localBackend
+        case processExitCode
+        case retryExhausted
+        case meetingSummaryFailureSubtype
+    }
+
     let httpStatus: Int?
     let providerHost: String?
+    let providerCode: String?
     let modelID: String?
     let localBackend: String?
     let processExitCode: Int32?
     let retryExhausted: Bool?
+    let meetingSummaryFailureSubtype: MeetingSummaryFailureSubtype?
 
     init(
         httpStatus: Int? = nil,
         providerHost: String? = nil,
+        providerCode: String? = nil,
         modelID: String? = nil,
         localBackend: String? = nil,
         processExitCode: Int32? = nil,
-        retryExhausted: Bool? = nil
+        retryExhausted: Bool? = nil,
+        meetingSummaryFailureSubtype: MeetingSummaryFailureSubtype? = nil
     ) {
         self.httpStatus = httpStatus
         self.providerHost = providerHost
+        self.providerCode = ProviderDiagnosticCode.normalized(providerCode)
         self.modelID = modelID
         self.localBackend = localBackend
         self.processExitCode = processExitCode
         self.retryExhausted = retryExhausted
+        self.meetingSummaryFailureSubtype = meetingSummaryFailureSubtype
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            httpStatus: try container.decodeIfPresent(Int.self, forKey: .httpStatus),
+            providerHost: try container.decodeIfPresent(String.self, forKey: .providerHost),
+            providerCode: try container.decodeIfPresent(String.self, forKey: .providerCode),
+            modelID: try container.decodeIfPresent(String.self, forKey: .modelID),
+            localBackend: try container.decodeIfPresent(String.self, forKey: .localBackend),
+            processExitCode: try container.decodeIfPresent(Int32.self, forKey: .processExitCode),
+            retryExhausted: try container.decodeIfPresent(Bool.self, forKey: .retryExhausted),
+            meetingSummaryFailureSubtype: try? container.decodeIfPresent(
+                MeetingSummaryFailureSubtype.self,
+                forKey: .meetingSummaryFailureSubtype
+            )
+        )
     }
 }
 
@@ -89,6 +163,22 @@ struct QuillUserIssuePresentation: Equatable, Sendable {
     let detailsRows: [QuillUserIssueDetailsRow]
     let recoveryAction: QuillUserRecoveryAction
     let severity: QuillUserIssueSeverity
+}
+
+enum MeetingSummaryIssueAction: Equatable {
+    case retrySummary
+    case recovery(QuillUserRecoveryAction)
+
+    static func resolve(
+        _ presentation: QuillUserIssuePresentation
+    ) -> MeetingSummaryIssueAction {
+        switch presentation.recoveryAction {
+        case .none, .retryTranscription:
+            return .retrySummary
+        default:
+            return .recovery(presentation.recoveryAction)
+        }
+    }
 }
 
 enum QuillUserIssuePersistenceError: Error, Equatable {
@@ -132,7 +222,8 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
              .providerConfigurationInvalid:
             return .openProviderSettings
         case .localRuntimeMissing, .localModelMissing,
-             .localDependencyMissing, .localAIModelUnavailable:
+             .localDependencyMissing, .localAIModelUnavailable,
+             .meetingSummaryLanguageUnavailable:
             return .openModelsSettings
         case .microphonePermissionDenied:
             return .openMicrophoneSettings
@@ -142,7 +233,7 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
             return .openScreenRecordingSettings
         case .postProcessingGuardFallback, .contextUnavailable,
              .meetingSummaryUnavailable, .meetingSummaryInvalidResponse,
-             .historyPersistenceUnavailable, .historyRecovered, .historyArchived:
+             .historyPersistenceUnavailable, .historyRecovered:
             return .none
         case .networkUnavailable, .requestTimedOut, .rateLimited,
              .providerUnavailable, .audioFileTooLarge,
@@ -178,7 +269,11 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
                 bundle: bundle
             ),
             compactMessage: title,
-            detailsRows: context.detailsRows(language: language, bundle: bundle),
+            detailsRows: context.detailsRows(
+                for: code,
+                language: language,
+                bundle: bundle
+            ),
             recoveryAction: recoveryAction,
             severity: severity
         )
@@ -252,6 +347,10 @@ struct QuillUserIssueError: Error, Sendable {
 
     static func historyPersistenceUnavailable() -> Self {
         Self(record: QuillUserIssueRecord(code: .historyPersistenceUnavailable))
+    }
+
+    static func meetingSummaryLanguageUnavailable() -> Self {
+        Self(record: QuillUserIssueRecord(code: .meetingSummaryLanguageUnavailable))
     }
 
     static func missingProviderAPIKey(
@@ -405,7 +504,7 @@ private extension QuillUserIssueCode {
              .localAIStartFailed, .localAIProcessExited,
              .contextUnavailable, .meetingSummaryUnavailable,
              .meetingSummaryInvalidResponse, .historyPersistenceUnavailable,
-             .historyRecovered, .historyArchived:
+             .historyRecovered:
             return .warning
         default:
             return .error
@@ -582,23 +681,23 @@ private extension QuillUserIssueCode {
                 bodyKey: "The provider returned a response Quill could not use for the summary.",
                 suggestionKey: "Try Regenerate again. If it continues, check the provider configuration."
             )
+        case .meetingSummaryLanguageUnavailable:
+            return QuillUserIssueCopy(
+                titleKey: "Summary language could not be determined",
+                bodyKey: "Quill could not determine the spoken language for this meeting summary.",
+                suggestionKey: "Choose an output language in Models settings, then try again."
+            )
         case .historyPersistenceUnavailable:
             return QuillUserIssueCopy(
-                titleKey: "Recording history couldn’t be opened",
-                bodyKey: "Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery.",
-                suggestionKey: "Open the data folder to keep the original history available for support and recovery."
+                titleKey: "History isn't being saved",
+                bodyKey: "Quill cannot save history for this session.",
+                suggestionKey: "Keep Quill open while you work, then restart it after checking available disk space and permissions."
             )
         case .historyRecovered:
             return QuillUserIssueCopy(
                 titleKey: "History was recovered",
                 bodyKey: "Quill couldn't open earlier history. A recovery backup was retained, and new notes will keep saving.",
                 suggestionKey: "No action is needed. Your new notes and history are being saved."
-            )
-        case .historyArchived:
-            return QuillUserIssueCopy(
-                titleKey: "Old history was archived",
-                bodyKey: "New history is saving separately. Restore, import, and merge are not available yet.",
-                suggestionKey: "Open the recovery folder to keep the archived history available for a future recovery."
             )
         case .unknown:
             return QuillUserIssueCopy(
@@ -622,8 +721,45 @@ private struct QuillUserIssueCopy {
     let suggestionKey: String
 }
 
+private extension MeetingSummaryFailureSubtype {
+    func localizedDetailsValue(language: String, bundle: Bundle) -> String {
+        let key: String
+        switch self {
+        case .emptyOutput:
+            key = "Empty output"
+        case .responseEnvelope:
+            key = "Response envelope"
+        case .jsonSchema:
+            key = "Summary format"
+        case .contextBudget:
+            key = "Context budget"
+        case .mergeBudget:
+            key = "Merge budget"
+        case .sourceEvidenceMissing:
+            key = "Source evidence missing"
+        case .sourceQuoteNotFound:
+            key = "Source quote not found"
+        case .overviewEvidenceCountInvalid:
+            key = "Overview evidence"
+        case .overviewEvidenceQuoteDuplicate:
+            key = "Duplicate overview evidence"
+        case .ownerNotGrounded:
+            key = "Owner is not grounded"
+        case .dueDateNotGrounded:
+            key = "Due date is not grounded"
+        case .languageMismatch:
+            key = "Output language mismatch"
+        }
+        return localizedCatalogString(key, language: language, bundle: bundle)
+    }
+}
+
 private extension QuillUserIssueContext {
-    func detailsRows(language: String, bundle: Bundle) -> [QuillUserIssueDetailsRow] {
+    func detailsRows(
+        for issueCode: QuillUserIssueCode,
+        language: String,
+        bundle: Bundle
+    ) -> [QuillUserIssueDetailsRow] {
         var rows: [QuillUserIssueDetailsRow] = []
         if let httpStatus {
             rows.append(
@@ -641,11 +777,35 @@ private extension QuillUserIssueContext {
                 )
             )
         }
+        if let providerCode, !providerCode.isEmpty {
+            rows.append(
+                QuillUserIssueDetailsRow(
+                    label: localizedCatalogString("Provider code", language: language, bundle: bundle),
+                    value: providerCode
+                )
+            )
+        }
         if let modelID, !modelID.isEmpty {
             rows.append(
                 QuillUserIssueDetailsRow(
                     label: localizedCatalogString("Model", language: language, bundle: bundle),
                     value: modelID
+                )
+            )
+        }
+        if issueCode == .meetingSummaryInvalidResponse,
+           let meetingSummaryFailureSubtype {
+            rows.append(
+                QuillUserIssueDetailsRow(
+                    label: localizedCatalogString(
+                        "Failure reason",
+                        language: language,
+                        bundle: bundle
+                    ),
+                    value: meetingSummaryFailureSubtype.localizedDetailsValue(
+                        language: language,
+                        bundle: bundle
+                    )
                 )
             )
         }

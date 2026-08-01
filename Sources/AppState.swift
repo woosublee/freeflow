@@ -262,6 +262,7 @@ struct StoppedTranscriptionCompletionSummary {
     let prompt: String
     let processingStatus: String
     let shouldPressEnterAfterPaste: Bool
+    let spokenLanguage: SpokenLanguageResolution?
     let shouldPersistRawDictationFallback: Bool
     let aiProcessingOutcome: AIProcessingOutcome
 
@@ -271,6 +272,7 @@ struct StoppedTranscriptionCompletionSummary {
         prompt: String,
         processingStatus: String,
         shouldPressEnterAfterPaste: Bool,
+        spokenLanguage: SpokenLanguageResolution? = nil,
         outcomeWasPostProcessingFailedFallback: Bool,
         aiProcessingOutcome: AIProcessingOutcome = .succeeded
     ) {
@@ -279,6 +281,7 @@ struct StoppedTranscriptionCompletionSummary {
         self.prompt = prompt
         self.processingStatus = processingStatus
         self.shouldPressEnterAfterPaste = shouldPressEnterAfterPaste
+        self.spokenLanguage = spokenLanguage
         self.shouldPersistRawDictationFallback = outcomeWasPostProcessingFailedFallback && !self.finalTranscript.isEmpty
         self.aiProcessingOutcome = aiProcessingOutcome
     }
@@ -404,6 +407,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 .appendingPathComponent("cloud-transcription", isDirectory: true)
         )
     }
+    static var retryCloudTranscriptionDependenciesFactory:
+        () -> CloudTranscriptionDependencies = {
+            .live
+        }
 
     static var googleCalendarTokenLoader: (Bool) -> GoogleCalendarOAuthToken? = { allowsAuthenticationUI in
         GoogleCalendarTokenStore.load(allowsAuthenticationUI: allowsAuthenticationUI)
@@ -2118,8 +2125,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         [UUID: CloudTranscriptionDisplayProgress] = [:]
     @Published var lastTranscript: String = ""
     @Published var errorMessage: String?
-    @Published private(set) var isHistoryUnavailable = false
     @Published private(set) var historyPersistenceWarning: QuillUserIssueRecord?
+    @Published private(set) var isHistoryUnavailable = false
     @Published private(set) var historyArchiveSafety: HistoryArchiveSafety = .normal
     @Published private(set) var isHistoryArchiveTransitioning = false
     @Published private(set) var historyRecoverySnapshots: [HistoryRecoverySnapshotDescriptor] = []
@@ -2146,6 +2153,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var selectedSettingsTab: SettingsTab? = .general
     @Published var pipelineHistory: [PipelineHistoryItem] = []
     @Published private(set) var meetingSummaryGeneratingNoteIDs: Set<UUID> = []
+    private var meetingSummaryGenerationRevisionByID: [UUID: Int] = [:]
     private var meetingSummaryPendingRevealNoteIDs: Set<UUID> = []
     @Published var debugStatusMessage = "Idle"
     @Published var debugShowsUpdateReminderAfterDictation = false
@@ -2499,6 +2507,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var pendingShortcutStartTask: Task<Void, Never>?
     private var pendingShortcutStartMode: RecordingTriggerMode?
     private var realtimeService: RealtimeTranscriptionService?
+    private var realtimeLanguageConfiguration: RealtimeTranscriptionLanguageConfiguration?
     private var criticalDictationActivityState = CriticalDictationActivityState()
     private var activeAudioInterruption: ActiveAudioInterruption?
     private var pendingOverlayDismissToken: UUID?
@@ -2521,6 +2530,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         let initialHistoryArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
         pipelineHistoryStore = Self.pipelineHistoryStoreFactory()
+        let initialHistoryUnavailable = pipelineHistoryStore.availability == .unavailable
+            || initialHistoryArchiveSafety == .unresolvedInterruptedTransaction
         let audioDirectory = Self.audioStorageDirectory()
         recordingJournalStore = Self.makeRecordingJournalStore()
         cloudTranscriptionJobStore = Self.makeCloudTranscriptionJobStore()
@@ -2867,9 +2878,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 if referenceTrust.permitsStartupReferenceCleanup {
                     var removedStoredFiles: [DeletedPipelineHistoryAssets] = []
                     do {
-                        removedStoredFiles = try pipelineHistoryStore.trim(
-                            to: maxPipelineHistoryCount
-                        )
+                        removedStoredFiles = try pipelineHistoryStore.trim(to: maxPipelineHistoryCount)
                     } catch {
                         print("Failed to trim pipeline history during init: \(error)")
                     }
@@ -3058,15 +3067,24 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.localTranscriptionModel = localTranscriptionModel
         self.soundVolume = soundVolume
         self.voiceMacros = initialMacros
-        let initialHistoryUnavailable = pipelineHistoryStore.availability == .unavailable
-            || initialHistoryArchiveSafety == .unresolvedInterruptedTransaction
         self.pipelineHistory = savedHistory
         self.isHistoryUnavailable = initialHistoryUnavailable
         self.historyArchiveSafety = initialHistoryArchiveSafety
         self.historyRecoverySnapshots = HistoryRecoveryService(storageRoot: storageRoot).listSnapshots()
-        self.historyPersistenceWarning = initialHistoryUnavailable
-            ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
-            : nil
+        if initialHistoryUnavailable {
+            self.historyPersistenceWarning = QuillUserIssueRecord(
+                code: .historyPersistenceUnavailable
+            )
+        } else {
+            switch pipelineHistoryStore.durability {
+            case .durable:
+                self.historyPersistenceWarning = nil
+            case .inMemory:
+                self.historyPersistenceWarning = QuillUserIssueRecord(
+                    code: .historyPersistenceUnavailable
+                )
+            }
+        }
         self.hasAccessibility = initialAccessibility
         self.hasScreenRecordingPermission = initialScreenCapturePermission
         self.launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -4453,8 +4471,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             ),
             cloudFallbackModelID: meetingSummaryBackendChoice.isLocal
                 ? nil
-                : meetingSummaryFallbackModel,
-            outputLanguage: meetingSummaryOutputLanguage
+                : meetingSummaryFallbackModel
         )
     }
 
@@ -5133,27 +5150,19 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     static func audioStorageDirectory() -> URL {
-        let audioDirectory = appStorageRootDirectory()
-            .appendingPathComponent("audio", isDirectory: true)
-        if !FileManager.default.fileExists(atPath: audioDirectory.path) {
-            try? FileManager.default.createDirectory(
-                at: audioDirectory,
-                withIntermediateDirectories: true
-            )
+        let audioDir = appStorageRootDirectory().appendingPathComponent("audio", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: audioDir.path) {
+            try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true)
         }
-        return audioDirectory
+        return audioDir
     }
 
     static func transcriptStorageDirectory() -> URL {
-        let directory = appStorageRootDirectory()
-            .appendingPathComponent("transcripts", isDirectory: true)
-        if !FileManager.default.fileExists(atPath: directory.path) {
-            try? FileManager.default.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true
-            )
+        let dir = appStorageRootDirectory().appendingPathComponent("transcripts", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
-        return directory
+        return dir
     }
 
     private static func recoverRecordingJournalsBeforeHistoryLoad(
@@ -5799,7 +5808,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
-    @MainActor
     private func finishRecordingAfterJournalPersistenceFailure(
         controller: SegmentedRecordingJournalController,
         sourceFailure: RecordingJournalSourcePersistenceFailure,
@@ -5808,23 +5816,40 @@ final class AppState: ObservableObject, @unchecked Sendable {
         for url in temporaryURLs {
             try? FileManager.default.removeItem(at: url)
         }
-        activeSegmentedJournalController = nil
-        activeRecordingID = nil
-        let finalizationWork = RecordingJournalFinalizationWork(
-            controller: controller,
-            store: recordingJournalStore
-        )
-        pendingRecordingJournalFinalizationCount += 1
         recordingJournalFinalizationQueue.async {
-            let result = finalizationWork.recoverAfterPersistenceFailure()
+            let result = self.recoverRecordingAfterJournalPersistenceFailure(
+                controller: controller
+            )
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.pendingRecordingJournalFinalizationCount -= 1
-                self.completeRecordingStorageFailureRecovery(
+                self?.completeRecordingStorageFailureRecovery(
                     result,
                     sourceFailure: sourceFailure
                 )
             }
+        }
+    }
+
+    private func recoverRecordingAfterJournalPersistenceFailure(
+        controller: SegmentedRecordingJournalController
+    ) -> Result<RecoveredRecordingArtifact, Error> {
+        do {
+            _ = try controller.closeAfterPersistenceFailure()
+            let artifact = try SegmentedRecordingArtifactFinalizer(
+                store: recordingJournalStore,
+                mixdownService: AudioMixdownService()
+            ).finalizeAndPromote(recordingID: controller.recordingID)
+            let manifest = try recordingJournalStore.loadManifest(
+                recordingID: controller.recordingID
+            )
+            return .success(RecoveredRecordingArtifact(
+                recordingID: artifact.recordingID,
+                audioURL: artifact.destinationURL,
+                promotion: artifact.promotion,
+                manifest: manifest,
+                mode: artifact.mode
+            ))
+        } catch {
+            return .failure(error)
         }
     }
 
@@ -5859,7 +5884,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 for assets in removedAssets {
                     cleanupDeletedPipelineHistoryAssets(assets)
                 }
-                if let item = loadPipelineHistory().first(where: {
+                if let item = pipelineHistoryStore.loadAllHistory().first(where: {
                     $0.id == recovered.recordingID
                 }), item.isIncompleteTranscription {
                     try pipelineHistoryStore.update(
@@ -5867,7 +5892,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     )
                 }
                 pipelineHistory = Self.markInterruptedRecoveryPlaceholders(
-                    in: loadPipelineHistory(),
+                    in: pipelineHistoryStore.loadAllHistory(),
                     store: pipelineHistoryStore
                 )
                 let context = RecoveredRecordingContext(
@@ -5952,22 +5977,19 @@ final class AppState: ObservableObject, @unchecked Sendable {
     ) {
         let inputID = activeAudioInputID ?? selectedMicrophoneID
         stopPhysicalAudioRecorder(inputID: inputID) { [weak self] temporaryURLs in
-            Task { @MainActor [weak self] in
-                guard let self else {
-                    for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
-                    completion(.empty)
-                    return
-                }
-                self.detachSegmentedJournalSinks()
-                self.finishStoppedSegmentedRecording(
-                    temporaryURLs: temporaryURLs,
-                    completion: completion
-                )
+            guard let self else {
+                for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
+                completion(.empty)
+                return
             }
+            self.detachSegmentedJournalSinks()
+            self.finishStoppedSegmentedRecording(
+                temporaryURLs: temporaryURLs,
+                completion: completion
+            )
         }
     }
 
-    @MainActor
     private func finishStoppedSegmentedRecording(
         temporaryURLs: [URL],
         completion: @escaping (StoppedAudioRecording) -> Void
@@ -5981,55 +6003,55 @@ final class AppState: ObservableObject, @unchecked Sendable {
         activeRecordingID = nil
         activeInputSwitchToken = nil
         isActiveInputSwitchPhysicalStopInProgress = false
-        let finalizationWork = RecordingJournalFinalizationWork(
-            controller: controller,
-            store: recordingJournalStore
-        )
-        pendingRecordingJournalFinalizationCount += 1
         recordingJournalFinalizationQueue.async {
             do {
-                let finalized = try finalizationWork.finalizeStoppedRecording()
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    self.pendingRecordingJournalFinalizationCount -= 1
-                    for url in temporaryURLs where url.path != finalized.artifact.destinationURL.path {
+                try controller.stopAndClose()
+                let artifact = try SegmentedRecordingArtifactFinalizer(
+                    store: self.recordingJournalStore,
+                    mixdownService: AudioMixdownService()
+                ).finalizeAndPromote(recordingID: controller.recordingID)
+                let promotedManifest = try self.recordingJournalStore.loadManifest(
+                    recordingID: artifact.recordingID
+                )
+                DispatchQueue.main.async {
+                    for url in temporaryURLs where url.path != artifact.destinationURL.path {
                         try? FileManager.default.removeItem(at: url)
                     }
-                    switch finalized.artifact.mode {
+                    switch artifact.mode {
                     case .complete:
                         completion(.transcribable(
-                            fileURL: finalized.artifact.destinationURL,
+                            fileURL: artifact.destinationURL,
                             recoverableJournalID: nil
                         ))
                     case .partial:
                         let recovered = RecoveredRecordingArtifact(
-                            recordingID: finalized.artifact.recordingID,
-                            audioURL: finalized.artifact.destinationURL,
-                            promotion: finalized.artifact.promotion,
-                            manifest: finalized.manifest,
+                            recordingID: artifact.recordingID,
+                            audioURL: artifact.destinationURL,
+                            promotion: artifact.promotion,
+                            manifest: promotedManifest,
                             mode: .partial
                         )
                         completion(.recoveredWithoutTranscription(recovered))
                     case .microphoneOnly, .systemAudioOnly:
                         completion(.preservedForRecovery(
-                            recordingID: finalizationWork.recordingID,
+                            recordingID: controller.recordingID,
                             message: "Unexpected segmented recovery mode"
                         ))
                     }
                 }
             } catch {
-                if finalizationWork.hasTerminalPersistenceFailure {
-                    let result = finalizationWork.recoverAfterPersistenceFailure()
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        self.pendingRecordingJournalFinalizationCount -= 1
+                if controller.terminalPersistenceFailure != nil {
+                    let result = self.recoverRecordingAfterJournalPersistenceFailure(
+                        controller: controller
+                    )
+                    DispatchQueue.main.async {
                         for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
                         switch result {
                         case .success(let recovered):
                             completion(.recoveredWithoutTranscription(recovered))
                         case .failure(let recoveryError):
                             completion(.preservedForRecovery(
-                                recordingID: finalizationWork.recordingID,
+                                recordingID: controller.recordingID,
                                 message: recoveryError.localizedDescription
                             ))
                         }
@@ -6042,13 +6064,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     "segmented journal finalization failed: %{public}@",
                     error.localizedDescription
                 )
-                try? finalizationWork.preserveForRecovery()
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    self.pendingRecordingJournalFinalizationCount -= 1
+                try? controller.preserveForRecovery()
+                DispatchQueue.main.async {
                     for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
                     completion(.preservedForRecovery(
-                        recordingID: finalizationWork.recordingID,
+                        recordingID: controller.recordingID,
                         message: error.localizedDescription
                     ))
                 }
@@ -6702,6 +6722,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         do {
             let removedStoredFiles = try pipelineHistoryStore.clearAll(
+                requiresDurableStore: true,
                 beforeDeleting: { assets in
                     for asset in assets {
                         cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(
@@ -6715,6 +6736,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 cleanupDeletedPipelineHistoryAssets(removedAssets)
             }
             pipelineHistory = []
+            forgetAllMeetingSummaryGenerationState()
             forgetAllWarningBannerState()
         } catch {
             errorMessage = LocalizedUserMessage.providerFailure(prefix: localizedCatalogString("Unable to clear run history"), providerDetail: error.localizedDescription)
@@ -6732,6 +6754,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         do {
             if let deletedAssets = try pipelineHistoryStore.delete(
                 id: id,
+                requiresDurableStore: true,
                 beforeDeleting: { assets in
                     cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(
                         historyID: assets.historyID,
@@ -6742,6 +6765,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 cleanupDeletedPipelineHistoryAssets(deletedAssets)
             }
             pipelineHistory.remove(at: index)
+            forgetMeetingSummaryGenerationState(for: id)
             forgetWarningBannerState(for: id)
         } catch {
             errorMessage = LocalizedUserMessage.providerFailure(prefix: localizedCatalogString("Unable to delete run history entry"), providerDetail: error.localizedDescription)
@@ -6797,10 +6821,21 @@ final class AppState: ObservableObject, @unchecked Sendable {
     func meetingSummarySource(
         for item: PipelineHistoryItem
     ) -> MeetingSummarySource {
-        let processed = item.postProcessedTranscript.trimmingCharacters(
-            in: .whitespacesAndNewlines
+        meetingSummarySource(
+            for: item,
+            languageContext: MeetingSummaryLanguageContext(
+                requestedOutputLanguage: "",
+                appliedLanguageCode: "",
+                resolutionSource: .unavailable
+            )
         )
-        let transcript = processed.isEmpty ? item.rawTranscript : processed
+    }
+
+    @MainActor
+    private func meetingSummarySource(
+        for item: PipelineHistoryItem,
+        languageContext: MeetingSummaryLanguageContext
+    ) -> MeetingSummarySource {
         let calendar = item.calendarMatch.map { match in
             MeetingSummaryCalendarContext(
                 title: match.title,
@@ -6819,42 +6854,258 @@ final class AppState: ObservableObject, @unchecked Sendable {
             )
         }
         return MeetingSummarySource(
-            transcript: transcript,
-            calendar: calendar
+            transcript: meetingSummaryTranscript(for: item),
+            calendar: calendar,
+            languageContext: languageContext
         )
     }
 
     @MainActor
-    func generateMeetingSummary(id: UUID) async throws {
-        guard requireAvailableHistoryForMutation() else {
-            throw QuillUserIssueError.historyPersistenceUnavailable()
+    private func meetingSummaryTranscript(for item: PipelineHistoryItem) -> String {
+        let processed = item.postProcessedTranscript.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return processed.isEmpty ? item.rawTranscript : processed
+    }
+
+    @MainActor
+    func resolvedMeetingSummaryLanguage(
+        for item: PipelineHistoryItem,
+        transcript: String
+    ) throws -> (
+        context: MeetingSummaryLanguageContext,
+        resolvedSpokenLanguage: SpokenLanguageResolution?
+    ) {
+        let requested = meetingSummaryOutputLanguage.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        if let explicitCode = TranscriptionLanguage.code(forSummaryOutput: requested) {
+            return (
+                MeetingSummaryLanguageContext(
+                    requestedOutputLanguage: requested,
+                    appliedLanguageCode: explicitCode,
+                    resolutionSource: .configured
+                ),
+                nil
+            )
         }
+        let existingSpokenLanguage = item.spokenLanguage
+        let requiresTranscriptResolution = existingSpokenLanguage?.source == .transcriptInferred
+            || existingSpokenLanguage?.source == .unavailable
+        let spoken = requiresTranscriptResolution
+            ? SpokenLanguageResolver.resolve(
+                requestedLanguageCode: item.transcriptionLanguageCode,
+                engineLanguageCode: nil,
+                transcript: transcript
+            )
+            : existingSpokenLanguage ?? SpokenLanguageResolver.resolve(
+                requestedLanguageCode: item.transcriptionLanguageCode,
+                engineLanguageCode: nil,
+                transcript: transcript
+            )
+        guard let code = spoken.languageCode else {
+            throw QuillUserIssueError.meetingSummaryLanguageUnavailable()
+        }
+        return (
+            MeetingSummaryLanguageContext(
+                requestedOutputLanguage: "",
+                appliedLanguageCode: code,
+                resolutionSource: spoken.source
+            ),
+            requiresTranscriptResolution || existingSpokenLanguage == nil
+                ? spoken
+                : nil
+        )
+    }
+
+    @MainActor
+    private func meetingSummaryProviderHost(
+        for backendKind: MeetingSummaryBackendKind
+    ) -> String? {
+        guard backendKind == .cloud else { return nil }
+        return URL(string: apiBaseURL)?.host
+    }
+
+    @MainActor
+    private func meetingSummaryIssue(
+        for error: Error,
+        providerHost: String?,
+        backendKind: MeetingSummaryBackendKind,
+        modelID: String
+    ) -> QuillUserIssueRecord {
+        if let issue = error as? QuillUserIssueError {
+            return issue.record
+        }
+        let localBackend = backendKind == .local ? "Local AI" : nil
+        if let summaryError = error as? MeetingSummaryError {
+            return summaryError.userIssue(
+                providerHost: providerHost,
+                modelID: modelID,
+                localBackend: localBackend
+            )
+        }
+        return QuillUserIssueRecord(
+            code: .meetingSummaryUnavailable,
+            context: QuillUserIssueContext(
+                providerHost: providerHost,
+                modelID: modelID,
+                localBackend: localBackend
+            )
+        )
+    }
+
+    @MainActor
+    private func persistMeetingSummaryHistoryItem(
+        _ item: PipelineHistoryItem,
+        at index: Int
+    ) throws {
+        try pipelineHistoryStore.update(item, requiresDurableStore: true)
+        pipelineHistory[index] = item
+    }
+
+    @MainActor
+    private func invalidateMeetingSummaryGeneration(for id: UUID) {
+        meetingSummaryGenerationRevisionByID[id, default: 0] += 1
+        meetingSummaryGeneratingNoteIDs.remove(id)
+        meetingSummaryPendingRevealNoteIDs.remove(id)
+    }
+
+    @MainActor
+    private func forgetMeetingSummaryGenerationState(for id: UUID) {
+        meetingSummaryGenerationRevisionByID.removeValue(forKey: id)
+        meetingSummaryGeneratingNoteIDs.remove(id)
+        meetingSummaryPendingRevealNoteIDs.remove(id)
+    }
+
+    @MainActor
+    private func forgetAllMeetingSummaryGenerationState() {
+        meetingSummaryGenerationRevisionByID.removeAll()
+        meetingSummaryGeneratingNoteIDs.removeAll()
+        meetingSummaryPendingRevealNoteIDs.removeAll()
+    }
+
+    @MainActor
+    func generateMeetingSummary(id: UUID) async throws {
         guard let startItem = pipelineHistory.first(where: { $0.id == id }) else {
             throw MeetingSummaryError.invalidInput
         }
         guard meetingSummaryAvailability(for: startItem) == .available else {
             throw MeetingSummaryError.invalidInput
         }
-        guard pipelineHistoryStore.durability == .durable else {
+        switch pipelineHistoryStore.durability {
+        case .durable:
+            break
+        case .inMemory:
             throw QuillUserIssueError.historyPersistenceUnavailable()
         }
 
-        let source = meetingSummarySource(for: startItem)
+        let configuredBackendKind: MeetingSummaryBackendKind = meetingSummaryBackendChoice.isLocal
+            ? .local
+            : .cloud
+        let configuredModelID = meetingSummaryBackendChoice.modelID
+        let generationRevision = meetingSummaryGenerationRevisionByID[id, default: 0]
+        var languageContext: MeetingSummaryLanguageContext?
+        var attemptSourceFingerprint = meetingSummarySource(for: startItem).fingerprint
         meetingSummaryGeneratingNoteIDs.insert(id)
-        defer { meetingSummaryGeneratingNoteIDs.remove(id) }
-
-        let result = try await Self.meetingSummaryGeneratorFactory(self)
-            .generate(source: source)
-
-        guard let currentIndex = pipelineHistory.firstIndex(
-            where: { $0.id == id }
-        ) else {
-            throw MeetingSummaryError.sourceChanged
+        defer {
+            if meetingSummaryGenerationRevisionByID[id, default: 0] == generationRevision {
+                meetingSummaryGeneratingNoteIDs.remove(id)
+            }
         }
-        let currentItem = pipelineHistory[currentIndex]
-        guard meetingSummarySource(for: currentItem).fingerprint
-                == source.fingerprint else {
-            throw MeetingSummaryError.sourceChanged
+
+        let source: MeetingSummarySource
+        let result: MeetingSummaryGenerationResult
+        let currentIndex: Int
+        let currentItem: PipelineHistoryItem
+        do {
+            let transcript = meetingSummaryTranscript(for: startItem)
+            let resolvedLanguage = try resolvedMeetingSummaryLanguage(
+                for: startItem,
+                transcript: transcript
+            )
+            languageContext = resolvedLanguage.context
+
+            var sourceItem = startItem
+            if let spokenLanguage = resolvedLanguage.resolvedSpokenLanguage {
+                guard let sourceIndex = pipelineHistory.firstIndex(
+                    where: { $0.id == id }
+                ) else {
+                    throw MeetingSummaryError.sourceChanged
+                }
+                let updated = pipelineHistory[sourceIndex].withSpokenLanguage(
+                    spokenLanguage
+                )
+                try persistMeetingSummaryHistoryItem(
+                    updated,
+                    at: sourceIndex
+                )
+                sourceItem = updated
+            }
+
+            source = meetingSummarySource(
+                for: sourceItem,
+                languageContext: resolvedLanguage.context
+            )
+            attemptSourceFingerprint = source.fingerprint
+            result = try await Self.meetingSummaryGeneratorFactory(self)
+                .generate(source: source)
+
+            guard let index = pipelineHistory.firstIndex(where: { $0.id == id }) else {
+                throw MeetingSummaryError.sourceChanged
+            }
+            let item = pipelineHistory[index]
+            guard meetingSummaryGenerationRevisionByID[id, default: 0] == generationRevision,
+                  meetingSummarySource(for: item).fingerprint == source.fingerprint else {
+                throw MeetingSummaryError.sourceChanged
+            }
+            currentIndex = index
+            currentItem = item
+        } catch {
+            guard let currentIndex = pipelineHistory.firstIndex(
+                where: { $0.id == id }
+            ), meetingSummaryGenerationRevisionByID[id, default: 0] == generationRevision,
+              meetingSummarySource(for: pipelineHistory[currentIndex]).fingerprint
+                == attemptSourceFingerprint else {
+                throw MeetingSummaryError.sourceChanged
+            }
+            if let summaryError = error as? MeetingSummaryError,
+               summaryError == .sourceChanged {
+                throw summaryError
+            }
+            let index = currentIndex
+            do {
+                let providerHost = meetingSummaryProviderHost(
+                    for: configuredBackendKind
+                )
+                let effectiveModelID = (error as? MeetingSummaryError)
+                    .map { $0.effectiveModelID(fallback: configuredModelID) }
+                    ?? configuredModelID
+                let attempt = MeetingSummaryAttempt(
+                    occurredAt: Date(),
+                    outcome: .failed,
+                    backendKind: configuredBackendKind,
+                    modelID: effectiveModelID,
+                    providerHost: providerHost,
+                    language: languageContext,
+                    issue: meetingSummaryIssue(
+                        for: error,
+                        providerHost: providerHost,
+                        backendKind: configuredBackendKind,
+                        modelID: effectiveModelID
+                    ),
+                    sourceFingerprint: attemptSourceFingerprint
+                )
+                let updated = pipelineHistory[index].withMeetingSummaryAttempt(attempt)
+                do {
+                    try persistMeetingSummaryHistoryItem(
+                        updated,
+                        at: index
+                    )
+                } catch {
+                    throw QuillUserIssueError.historyPersistenceUnavailable()
+                }
+            }
+            throw error
         }
 
         let envelope = MeetingSummaryEnvelope(
@@ -6864,12 +7115,34 @@ final class AppState: ObservableObject, @unchecked Sendable {
             sourceFingerprint: source.fingerprint,
             modelID: result.modelID,
             backendKind: result.backendKind,
+            languageContext: source.languageContext,
+            evidenceVerification: result.evidenceVerification == .unverified
+                ? .unverified
+                : nil,
             content: result.draft.materialized()
         ).preservingCompletion(from: currentItem.meetingSummary)
-        let updated = currentItem.withMeetingSummary(envelope)
-        try pipelineHistoryStore.update(updated, requiresDurableStore: true)
-        pipelineHistory[currentIndex] = updated
-        meetingSummaryPendingRevealNoteIDs.insert(id)
+        let attempt = MeetingSummaryAttempt(
+            occurredAt: Date(),
+            outcome: .succeeded,
+            backendKind: result.backendKind,
+            modelID: result.modelID,
+            providerHost: meetingSummaryProviderHost(for: result.backendKind),
+            language: source.languageContext,
+            issue: nil,
+            sourceFingerprint: source.fingerprint
+        )
+        let updated = currentItem
+            .withMeetingSummary(envelope)
+            .withMeetingSummaryAttempt(attempt)
+        do {
+            try persistMeetingSummaryHistoryItem(
+                updated,
+                at: currentIndex
+            )
+            meetingSummaryPendingRevealNoteIDs.insert(id)
+        } catch {
+            throw QuillUserIssueError.historyPersistenceUnavailable()
+        }
     }
 
     @MainActor
@@ -6904,14 +7177,35 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard requireAvailableHistoryForMutation(),
               let noteIndex = pipelineHistory.firstIndex(
             where: { $0.id == noteID }
-        ), pipelineHistory[noteIndex].meetingSummary != nil else {
+        ) else {
             throw MeetingSummaryError.invalidInput
         }
-        let updated = pipelineHistory[noteIndex].withMeetingSummary(nil)
-        try pipelineHistoryStore.update(updated)
+        let existing = pipelineHistory[noteIndex]
+        let hasSavedSummary = existing.meetingSummary != nil
+        let hasCurrentHardFailure = existing.meetingSummaryAttempt?.outcome == .failed
+            && existing.meetingSummaryAttempt?.isCurrent(
+                for: meetingSummarySource(for: existing)
+            ) == true
+        guard hasSavedSummary || hasCurrentHardFailure else {
+            throw MeetingSummaryError.invalidInput
+        }
+
+        let updated = existing
+            .withMeetingSummary(nil)
+            .withMeetingSummaryAttempt(nil)
+        do {
+            try pipelineHistoryStore.update(
+                updated,
+                requiresDurableStore: true
+            )
+        } catch {
+            throw QuillUserIssueError.historyPersistenceUnavailable()
+        }
         pipelineHistory[noteIndex] = updated
+        invalidateMeetingSummaryGeneration(for: noteID)
     }
 
+    @MainActor
     func updateTranscript(id: UUID, text: String) {
         guard requireAvailableHistoryForMutation(),
               let item = pipelineHistory.first(where: { $0.id == id }) else { return }
@@ -6919,6 +7213,19 @@ final class AppState: ObservableObject, @unchecked Sendable {
         if let fileName = item.transcriptFileName {
             let fileURL = Self.transcriptStorageDirectory().appendingPathComponent(fileName)
             try? text.write(to: fileURL, atomically: true, encoding: .utf8)
+        }
+        let replacementSpokenLanguage: SpokenLanguageResolution?
+        switch item.spokenLanguage?.source {
+        case .transcriptInferred, .unavailable:
+            replacementSpokenLanguage = SpokenLanguageResolver.resolve(
+                requestedLanguageCode: item.transcriptionLanguageCode,
+                engineLanguageCode: nil,
+                transcript: text
+            )
+        case .configured, .engineDetected:
+            replacementSpokenLanguage = item.spokenLanguage
+        case nil:
+            replacementSpokenLanguage = nil
         }
         let updated = PipelineHistoryItem(
             intent: item.intent,
@@ -6944,6 +7251,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             usedContextCapture: item.usedContextCapture,
             usedPostProcessing: item.usedPostProcessing,
             transcriptionLanguageCode: item.transcriptionLanguageCode,
+            spokenLanguageCode: replacementSpokenLanguage?.languageCode,
+            spokenLanguageResolution: replacementSpokenLanguage?.source,
+            meetingSummaryAttempt: item.meetingSummaryAttempt,
             localTranscriptionModelID: item.localTranscriptionModelID,
             transcriptFileName: item.transcriptFileName,
             contextAppName: item.contextAppName,
@@ -6957,6 +7267,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             if let index = pipelineHistory.firstIndex(where: { $0.id == id }) {
                 pipelineHistory[index] = updated
             }
+            invalidateMeetingSummaryGeneration(for: id)
         } catch {
             errorMessage = LocalizedUserMessage.providerFailure(prefix: localizedCatalogString("Failed to save transcript edit"), providerDetail: error.localizedDescription)
         }
@@ -7098,10 +7409,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     let transcriptionService = try configuration.makeTranscriptionService(
                         cloudExecutionContext: cloudExecutionContext
                     )
-                    let rawTranscript = try await transcriptionService.transcribe(fileURL: savedAudioFile.fileURL)
+                    let transcription = try await transcriptionService.transcribe(fileURL: savedAudioFile.fileURL)
                     try Task.checkCancellation()
                     let parsedTranscript = Self.parseTranscriptCommands(
-                        from: rawTranscript,
+                        from: transcription.text,
                         pressEnterCommandEnabled: configuration.pressEnterCommandEnabled
                     )
                     let result = await self.processTranscript(
@@ -7143,6 +7454,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         usedContextCaptureOverride: false,
                         usedPostProcessingOverride: configuration.postProcessingEnabled,
                         transcriptionLanguageCodeOverride: configuration.transcriptionLanguage.code,
+                        spokenLanguage: transcription.spokenLanguage,
                         customVocabularyOverride: configuration.customVocabulary,
                         customSystemPromptOverride: configuration.customSystemPrompt
                     )
@@ -7296,11 +7608,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 let completion = snapshot.execution.completion
                 let transcriptionService = try snapshot.execution
                     .makeTranscriptionService(
+                        cloudDependencies: Self.retryCloudTranscriptionDependenciesFactory(),
                         cloudExecutionContext: snapshot.cloudExecutionContext
                     )
-                let rawTranscript = try await transcriptionService.transcribe(fileURL: snapshot.audioURL)
+                let transcription = try await transcriptionService.transcribe(fileURL: snapshot.audioURL)
                 let parsedTranscript = Self.parseTranscriptCommands(
-                    from: rawTranscript,
+                    from: transcription.text,
                     pressEnterCommandEnabled: completion.pressEnterCommandEnabled
                 )
                 let result = await self.processTranscript(
@@ -7332,7 +7645,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             isRetry: true
                         ),
                     debugStatus: "Retried",
-                    transcriptFileName: transcriptFileName
+                    transcriptFileName: transcriptFileName,
+                    spokenLanguage: transcription.spokenLanguage
                 )
                 retrySucceeded = true
             } catch {
@@ -7371,9 +7685,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     return
                 }
                 do {
-                    try self.pipelineHistoryStore.update(updatedItem)
-                    self.pipelineHistory = self.loadPipelineHistory()
+                    try self.pipelineHistoryStore.update(updatedItem, requiresDurableStore: true)
+                    self.pipelineHistory = self.pipelineHistoryStore.loadAllHistory()
                     if retrySucceeded {
+                        self.invalidateMeetingSummaryGeneration(for: snapshot.item.id)
                         if snapshot.useLocalTranscription,
                            let cloudContext = snapshot.cloudExecutionContext {
                             self.completeCloudTranscriptionHistory(
@@ -7535,9 +7850,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         postProcessingPrompt: String?,
         postProcessingStatus: String,
         debugStatus: String,
-        transcriptFileName: String?
+        transcriptFileName: String?,
+        spokenLanguage: SpokenLanguageResolution? = nil
     ) -> PipelineHistoryItem {
         let completion = snapshot.execution.completion
+        let effectiveSpokenLanguage = spokenLanguage ?? snapshot.item.spokenLanguage
         return PipelineHistoryItem(
             intent: snapshot.item.intent,
             selectedText: snapshot.item.selectedText,
@@ -7565,6 +7882,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             usedContextCapture: snapshot.item.usedContextCapture,
             usedPostProcessing: completion.postProcessingEnabled,
             transcriptionLanguageCode: snapshot.transcriptionLanguage.code,
+            spokenLanguageCode: effectiveSpokenLanguage?.languageCode,
+            spokenLanguageResolution: effectiveSpokenLanguage?.source,
+            meetingSummaryAttempt: snapshot.item.meetingSummaryAttempt,
             localTranscriptionModelID: snapshot.localTranscriptionModel.id,
             transcriptFileName: transcriptFileName,
             contextAppName: snapshot.item.contextAppName,
@@ -8220,7 +8540,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func toggleRecording() {
-        guard isRecording || requireAvailableHistoryForMutation() else { return }
         os_log(.info, log: recordingLog, "toggleRecording() called, isRecording=%{public}d", isRecording)
         cancelPendingShortcutStart()
         if isRecording {
@@ -8247,7 +8566,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func startRecordingFromCalendarReminder(_ action: CalendarRecordingReminderNotificationAction) {
-        guard requireAvailableHistoryForMutation() else { return }
         beginCalendarReminderRecording { [weak self] in
             self?.calendarRecordingReminderScheduler.markReminderHandledExternally(
                 identifier: action.identifier,
@@ -8258,7 +8576,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func startRecordingFromCalendarReminder() {
-        guard requireAvailableHistoryForMutation() else { return }
         beginCalendarReminderRecording()
     }
 
@@ -9715,16 +10032,25 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private static func resolveRawTranscript(
         realtimeService: RealtimeTranscriptionService?,
         fileService: TranscriptionService,
-        fileURL: URL
-    ) async throws -> String {
+        fileURL: URL,
+        requestedLanguageCode: String
+    ) async throws -> TranscriptionResult {
         if let realtimeService {
             do {
                 try Task.checkCancellation()
-                return try await withTaskCancellationHandler {
+                let text = try await withTaskCancellationHandler {
                     try await realtimeService.commitAndAwaitFinal()
                 } onCancel: {
                     realtimeService.cancel()
                 }
+                return TranscriptionResult(
+                    text: text,
+                    spokenLanguage: SpokenLanguageResolver.resolve(
+                        requestedLanguageCode: requestedLanguageCode,
+                        engineLanguageCode: nil,
+                        transcript: text
+                    )
+                )
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -9765,7 +10091,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private func makeStoppedTranscriptionCompletionSummary(
-        rawTranscript: String,
+        transcription: TranscriptionResult,
         intent: SessionIntent,
         context: AppContext,
         postProcessingService: PostProcessingService,
@@ -9776,7 +10102,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         pressEnterCommandEnabled: Bool
     ) async throws -> StoppedTranscriptionCompletionSummary {
         let parsedTranscript = Self.parseTranscriptCommands(
-            from: rawTranscript,
+            from: transcription.text,
             pressEnterCommandEnabled: pressEnterCommandEnabled
         )
         try Task.checkCancellation()
@@ -9813,6 +10139,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             prompt: result.prompt,
             processingStatus: processingStatus,
             shouldPressEnterAfterPaste: parsedTranscript.shouldPressEnterAfterPaste,
+            spokenLanguage: transcription.spokenLanguage,
             outcomeWasPostProcessingFailedFallback: outcomeWasPostProcessingFailedFallback,
             aiProcessingOutcome: result.aiProcessingOutcome
         )
@@ -9861,6 +10188,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 usedContextCaptureOverride: settings.usedContextCapture,
                 usedPostProcessingOverride: settings.usedPostProcessing,
                 transcriptionLanguageCodeOverride: settings.transcriptionLanguage.code,
+                spokenLanguage: completion.spokenLanguage,
                 customVocabularyOverride: settings.customVocabulary,
                 customSystemPromptOverride: settings.customSystemPrompt,
                 calendarMatch: calendarMatch,
@@ -10082,6 +10410,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 guard let self else { return }
                 do {
                     let rawTranscript = try await transcriber.finalize()
+                    let transcription = TranscriptionResult(
+                        text: rawTranscript,
+                        spokenLanguage: SpokenLanguageResolver.resolve(
+                            requestedLanguageCode: capturedSettings.transcriptionLanguage.code,
+                            engineLanguageCode: nil,
+                            transcript: rawTranscript
+                        )
+                    )
                     let savedAudioFile = transcriber.recordedAudioURL.flatMap { url -> SavedAudioFile? in
                         let saved = Self.saveAudioFile(from: url)
                         try? FileManager.default.removeItem(at: url)
@@ -10099,7 +10435,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         inFlightContextTask: inFlightContextTask
                     )
                     let completion = try await self.makeStoppedTranscriptionCompletionSummary(
-                        rawTranscript: rawTranscript,
+                        transcription: transcription,
                         intent: sessionIntent,
                         context: appContext,
                         postProcessingService: postProcessingService,
@@ -10274,7 +10610,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 )
             )
             let activeRealtime = self.realtimeService
+            let activeRealtimeLanguageConfiguration = self.realtimeLanguageConfiguration
             self.realtimeService = nil
+            self.realtimeLanguageConfiguration = nil
             self.setActiveRecorderPCMHandler(nil)
 
             if self.overlayTranscriptionID == myOverlayID {
@@ -10285,10 +10623,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 guard let self else { return }
                 defer { activeRealtime?.cancel() }
                 do {
-                    let rawTranscript: String
+                    let transcription: TranscriptionResult
                     let liveResult = try await capturedLiveTranscriber?.finalize()
                     if let text = liveResult, !text.isEmpty {
-                        rawTranscript = text
+                        transcription = TranscriptionResult(
+                            text: text,
+                            spokenLanguage: SpokenLanguageResolver.resolve(
+                                requestedLanguageCode: capturedSettings.transcriptionLanguage.code,
+                                engineLanguageCode: nil,
+                                transcript: text
+                            )
+                        )
                     } else {
                         let transcriptionService = try TranscriptionService(
                             apiKey: capturedApiKey,
@@ -10301,10 +10646,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             transcriptionModel: capturedTranscriptionModel,
                             cloudExecutionContext: cloudExecutionContext
                         )
-                        rawTranscript = try await Self.resolveRawTranscript(
+                        transcription = try await Self.resolveRawTranscript(
                             realtimeService: activeRealtime,
                             fileService: transcriptionService,
-                            fileURL: transcriptionFileURL
+                            fileURL: transcriptionFileURL,
+                            requestedLanguageCode: activeRealtimeLanguageConfiguration?.requestedLanguageCode
+                                ?? capturedSettings.transcriptionLanguage.code
                         )
                     }
                     try Task.checkCancellation()
@@ -10316,6 +10663,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         )
                     }
                     guard isCurrentCloudExecution else { return }
+                    let rawTranscript = transcription.text
                     await MainActor.run {
                         self.bootstrapLastTranscriptForPasteAgain(rawTranscript, pressEnterCommandEnabled: capturedPressEnterCommandEnabled)
                     }
@@ -10324,7 +10672,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         inFlightContextTask: inFlightContextTask
                     )
                     let completion = try await self.makeStoppedTranscriptionCompletionSummary(
-                        rawTranscript: rawTranscript,
+                        transcription: transcription,
                         intent: sessionIntent,
                         context: appContext,
                         postProcessingService: postProcessingService,
@@ -10597,11 +10945,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 ).makeTranscriptionService(
                     cloudExecutionContext: context
                 )
-                let rawTranscript = try await service.transcribe(
+                let transcription = try await service.transcribe(
                     fileURL: audioURL
                 )
                 let parsed = Self.parseTranscriptCommands(
-                    from: rawTranscript,
+                    from: transcription.text,
                     pressEnterCommandEnabled: completion.pressEnterCommandEnabled
                 )
                 let result = await processTranscript(
@@ -10678,10 +11026,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             isRetry: true
                         ),
                     debugStatus: "Resumed after relaunch",
-                    transcriptFileName: item.transcriptFileName
+                    transcriptFileName: item.transcriptFileName,
+                    spokenLanguage: transcription.spokenLanguage
                 )
                 try pipelineHistoryStore.update(updated)
-                pipelineHistory = loadPipelineHistory()
+                pipelineHistory = pipelineHistoryStore.loadAllHistory()
                 completeCloudTranscriptionHistory(
                     historyID: record.historyID,
                     context: context,
@@ -11004,7 +11353,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             for removedAssets in removed {
                 cleanupDeletedPipelineHistoryAssets(removedAssets)
             }
-            pipelineHistory = loadPipelineHistory()
+            pipelineHistory = pipelineHistoryStore.loadAllHistory()
         } catch {
             updateTranscriptionJob(jobID) { $0.liveNoteID = nil }
         }
@@ -11042,6 +11391,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             usedContextCapture: existing.usedContextCapture,
             usedPostProcessing: existing.usedPostProcessing,
             transcriptionLanguageCode: existing.transcriptionLanguageCode,
+            spokenLanguageCode: existing.spokenLanguageCode,
+            spokenLanguageResolution: existing.spokenLanguageResolution,
+            meetingSummaryAttempt: existing.meetingSummaryAttempt,
             localTranscriptionModelID: existing.localTranscriptionModelID,
             transcriptFileName: existing.transcriptFileName,
             contextAppName: existing.contextAppName,
@@ -11119,7 +11471,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         } catch {
             if journalRecordingID == nil,
-               !loadPipelineHistory().contains(where: { $0.id == recordingID }) {
+               !pipelineHistoryStore.loadAllHistory().contains(where: { $0.id == recordingID }) {
                 Self.deleteStoredFiles(
                     audioFileName: audioFileName,
                     transcriptFileName: nil
@@ -11164,7 +11516,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             for assets in removedAssets {
                 cleanupDeletedPipelineHistoryAssets(assets)
             }
-            if let item = loadPipelineHistory().first(where: {
+            if let item = pipelineHistoryStore.loadAllHistory().first(where: {
                 $0.id == recovered.recordingID
             }) {
                 let normalized = item.isIncompleteTranscription
@@ -11175,7 +11527,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 }
             }
             pipelineHistory = Self.markInterruptedRecoveryPlaceholders(
-                in: loadPipelineHistory(),
+                in: pipelineHistoryStore.loadAllHistory(),
                 store: pipelineHistoryStore
             )
             presentation = (
@@ -11409,6 +11761,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         usedContextCaptureOverride: Bool? = nil,
         usedPostProcessingOverride: Bool? = nil,
         transcriptionLanguageCodeOverride: String? = nil,
+        spokenLanguage: SpokenLanguageResolution? = nil,
         customVocabularyOverride: String? = nil,
         customSystemPromptOverride: String? = nil,
         calendarMatch: CalendarEventMatch? = nil,
@@ -11433,6 +11786,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
         let isJournalAudioFile = journalRecordingID != nil
         let entryID = existingID ?? (journalRecordingID ?? UUID())
+        let effectiveSpokenLanguage = spokenLanguage ?? existingEntry?.spokenLanguage
         let entry = PipelineHistoryItem(
             intent: intent.persistedIntent,
             selectedText: intent.persistedSelectedText,
@@ -11462,6 +11816,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             usedContextCapture: usedContextCaptureOverride ?? !disableContextCapture,
             usedPostProcessing: usedPostProcessingOverride ?? !disablePostProcessing,
             transcriptionLanguageCode: transcriptionLanguageCodeOverride ?? transcriptionLanguage.code,
+            spokenLanguageCode: effectiveSpokenLanguage?.languageCode,
+            spokenLanguageResolution: effectiveSpokenLanguage?.source,
+            meetingSummaryAttempt: existingEntry?.meetingSummaryAttempt,
             localTranscriptionModelID: localTranscriptionModelIDOverride ?? localTranscriptionModel.id,
             transcriptFileName: transcriptFileName,
             contextAppName: context.appName,
@@ -11497,7 +11854,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     audioFileName: audioFileName,
                     transcriptFileName: transcriptFileName
                 )
-            } else if existingID == nil, let transcriptFileName {
+            } else if let transcriptFileName {
                 Self.deleteTranscriptFile(transcriptFileName)
             }
             let issue = self.userIssue(for: error)
@@ -11523,11 +11880,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return
         }
         let model = realtimeStreamingModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let realtimeLanguageConfiguration = RealtimeTranscriptionLanguageConfiguration(
+            transcriptionLanguage: transcriptionLanguage
+        )
         let config = RealtimeTranscriptionService.Configuration(
             baseURL: trimmedBase,
             apiKey: resolvedTranscriptionAPIKey,
             model: model,
-            language: nil
+            language: realtimeLanguageConfiguration.requestLanguage
         )
         let service = RealtimeTranscriptionService(config: config)
         do {
@@ -11537,6 +11897,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return
         }
         realtimeService = service
+        self.realtimeLanguageConfiguration = realtimeLanguageConfiguration
         setActiveRecorderPCMHandler { [weak service] data in
             service?.appendPCM16(data)
         }
@@ -11546,6 +11907,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         setActiveRecorderPCMHandler(nil)
         realtimeService?.cancel()
         realtimeService = nil
+        realtimeLanguageConfiguration = nil
     }
 
     /// Detaches the active live transcriber and tears it down off the main

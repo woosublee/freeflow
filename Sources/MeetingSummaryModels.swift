@@ -6,6 +6,131 @@ enum MeetingSummaryBackendKind: String, Codable, Equatable, Sendable {
     case local
 }
 
+struct MeetingSummaryLanguageContext: Codable, Equatable, Sendable {
+    let requestedOutputLanguage: String
+    let appliedLanguageCode: String
+    let resolutionSource: SpokenLanguageResolutionSource
+}
+
+enum MeetingSummaryEvidenceVerification: String, Codable, Equatable, Sendable {
+    case verified
+    case unverified
+}
+
+enum MeetingSummaryAttemptOutcome: String, Codable, Equatable, Sendable {
+    case succeeded
+    case failed
+}
+
+struct MeetingSummaryAttempt: Codable, Equatable, Sendable {
+    let occurredAt: Date
+    let outcome: MeetingSummaryAttemptOutcome
+    let backendKind: MeetingSummaryBackendKind
+    let modelID: String
+    let providerHost: String?
+    let language: MeetingSummaryLanguageContext?
+    let issue: QuillUserIssueRecord?
+    let sourceFingerprint: String?
+
+    init(
+        occurredAt: Date,
+        outcome: MeetingSummaryAttemptOutcome,
+        backendKind: MeetingSummaryBackendKind,
+        modelID: String,
+        providerHost: String?,
+        language: MeetingSummaryLanguageContext?,
+        issue: QuillUserIssueRecord?,
+        sourceFingerprint: String? = nil
+    ) {
+        self.occurredAt = occurredAt
+        self.outcome = outcome
+        self.backendKind = backendKind
+        self.modelID = modelID
+        self.providerHost = providerHost
+        self.language = language
+        self.issue = issue
+        self.sourceFingerprint = sourceFingerprint
+    }
+
+    func isCurrent(for source: MeetingSummarySource) -> Bool {
+        sourceFingerprint == source.fingerprint
+    }
+
+    func issuePresentation(
+        language presentationLanguage: String = preferredLocalizedStringLanguage(),
+        bundle: Bundle = .main
+    ) -> QuillUserIssuePresentation? {
+        guard let issue else { return nil }
+        let presentation = issue.presentation(
+            language: presentationLanguage,
+            bundle: bundle
+        )
+        return QuillUserIssuePresentation(
+            title: presentation.title,
+            body: presentation.body,
+            suggestion: presentation.suggestion,
+            compactMessage: presentation.compactMessage,
+            detailsRows: presentation.detailsRows
+                + self.language.detailsRows(
+                    language: presentationLanguage,
+                    bundle: bundle
+                ),
+            recoveryAction: presentation.recoveryAction,
+            severity: presentation.severity
+        )
+    }
+}
+
+private extension Optional where Wrapped == MeetingSummaryLanguageContext {
+    func detailsRows(
+        language: String,
+        bundle: Bundle
+    ) -> [QuillUserIssueDetailsRow] {
+        guard let context = self,
+              let localizedLanguage = TranscriptionLanguage
+                .localizedSummaryLanguageName(
+                    for: context.appliedLanguageCode,
+                    language: language,
+                    bundle: bundle
+                ) else {
+            return []
+        }
+        let sourceKey: String
+        switch context.resolutionSource {
+        case .configured:
+            sourceKey = "Explicitly selected"
+        case .engineDetected:
+            sourceKey = "Detected by transcription engine"
+        case .transcriptInferred:
+            sourceKey = "Inferred from transcript"
+        case .unavailable:
+            sourceKey = "Unavailable"
+        }
+        return [
+            QuillUserIssueDetailsRow(
+                label: localizedCatalogString(
+                    "Summary language",
+                    language: language,
+                    bundle: bundle
+                ),
+                value: "\(localizedLanguage) (\(context.appliedLanguageCode))"
+            ),
+            QuillUserIssueDetailsRow(
+                label: localizedCatalogString(
+                    "Language source",
+                    language: language,
+                    bundle: bundle
+                ),
+                value: localizedCatalogString(
+                    sourceKey,
+                    language: language,
+                    bundle: bundle
+                )
+            )
+        ]
+    }
+}
+
 struct MeetingSummaryCalendarContext: Codable, Equatable, Sendable {
     let title: String
     let start: Date
@@ -18,6 +143,7 @@ struct MeetingSummarySource: Equatable, Sendable {
 
     let transcript: String
     let calendar: MeetingSummaryCalendarContext?
+    let languageContext: MeetingSummaryLanguageContext
 
     var normalizedTranscript: String {
         transcript
@@ -62,7 +188,7 @@ struct MeetingSummaryEvidenceText: Codable, Equatable, Sendable {
 }
 
 struct MeetingSummaryEnvelope: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 4
 
     let schemaVersion: Int
     let promptVersion: Int
@@ -70,7 +196,36 @@ struct MeetingSummaryEnvelope: Codable, Equatable, Sendable {
     let sourceFingerprint: String
     let modelID: String
     let backendKind: MeetingSummaryBackendKind
+    let languageContext: MeetingSummaryLanguageContext?
+    /// Nil is legacy verified evidence. New unverified envelopes persist .unverified.
+    let evidenceVerification: MeetingSummaryEvidenceVerification?
     var content: MeetingSummaryContent
+
+    var effectiveEvidenceVerification: MeetingSummaryEvidenceVerification {
+        evidenceVerification ?? .verified
+    }
+
+    init(
+        schemaVersion: Int,
+        promptVersion: Int,
+        generatedAt: Date,
+        sourceFingerprint: String,
+        modelID: String,
+        backendKind: MeetingSummaryBackendKind,
+        languageContext: MeetingSummaryLanguageContext? = nil,
+        evidenceVerification: MeetingSummaryEvidenceVerification? = nil,
+        content: MeetingSummaryContent
+    ) {
+        self.schemaVersion = schemaVersion
+        self.promptVersion = promptVersion
+        self.generatedAt = generatedAt
+        self.sourceFingerprint = sourceFingerprint
+        self.modelID = modelID
+        self.backendKind = backendKind
+        self.languageContext = languageContext
+        self.evidenceVerification = evidenceVerification
+        self.content = content
+    }
 
     func preservingCompletion(
         from previous: MeetingSummaryEnvelope?

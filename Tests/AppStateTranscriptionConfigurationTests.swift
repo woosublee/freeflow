@@ -2,8 +2,9 @@ import Combine
 import Darwin
 import Foundation
 
-// AppState tests run only through FullSourceAppStateTestRunner so its process
-// isolation always protects production preferences and stored recordings.
+#if !QUILL_GROUPED_TEST_RUNNER
+@main
+#endif
 struct AppStateTranscriptionConfigurationTests {
     static func main() async throws {
         let originalNativeWhisperInstallStatusProvider =
@@ -133,8 +134,13 @@ struct AppStateTranscriptionConfigurationTests {
         await testRetryAvailabilityRequiresModelSelection()
         await testRetryAvailabilityRequiresProviderConfiguration()
         await testRetryAvailabilityAcceptsConfiguredAPIStandard()
+        try await testRetryPreservesMeetingSummaryMetadata()
         try testRetryUsesCurrentPostProcessingAndAudioOnlyMetadata()
         try testAudioOnlyRetryCreatesTranscriptFileAndPreservesMetadata()
+        try testHistoryReconstructionPreservesMeetingSummaryMetadata()
+        try testSuccessfulTranscriptionHistoryReceivesSpokenLanguage()
+        try testHistoryDeletionForgetsSummaryGenerationStateAfterPersistence()
+        try testRealtimeConfiguredLanguageUsesOneRequestAndResolutionValue()
         try testAudioOnlyRetryDeletesNewTranscriptFileWhenStale()
         print("AppStateTranscriptionConfigurationTests passed")
     }
@@ -2454,6 +2460,16 @@ struct AppStateTranscriptionConfigurationTests {
         assert(appState.availableGoogleCalendars.map(\.id) == ["primary"])
     }
 
+    private static func requireHistoryItem(
+        withID id: UUID,
+        in history: [PipelineHistoryItem]
+    ) throws -> PipelineHistoryItem {
+        guard let item = history.first(where: { $0.id == id }) else {
+            throw AppStateTranscriptionConfigurationTestError.missingHistoryItem
+        }
+        return item
+    }
+
     private static func waitUntil(
         timeoutNanoseconds: UInt64 = 1_000_000_000,
         condition: @escaping () -> Bool
@@ -2464,6 +2480,10 @@ struct AppStateTranscriptionConfigurationTests {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         assertionFailure("Timed out waiting for condition")
+    }
+
+    private enum AppStateTranscriptionConfigurationTestError: Error {
+        case missingHistoryItem
     }
 
     private struct CalendarListFailure: Error {}
@@ -2578,6 +2598,68 @@ struct AppStateTranscriptionConfigurationTests {
         }
     }
 
+    private static func testRetryPreservesMeetingSummaryMetadata() async throws {
+        resetDefaults()
+        let store = PipelineHistoryStore(inMemory: true)
+        let fileName = "retry-summary-metadata-\(UUID().uuidString).wav"
+        let audioURL = AppState.audioStorageDirectory().appendingPathComponent(fileName)
+        try Data([0]).write(to: audioURL)
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+
+        let attempt = MeetingSummaryAttempt(
+            occurredAt: Date(timeIntervalSince1970: 2_100),
+            outcome: .failed,
+            backendKind: .cloud,
+            modelID: "summary/model",
+            providerHost: "api.example.com",
+            language: MeetingSummaryLanguageContext(
+                requestedOutputLanguage: "",
+                appliedLanguageCode: "ko",
+                resolutionSource: .engineDetected
+            ),
+            issue: QuillUserIssueRecord(code: .meetingSummaryUnavailable)
+        )
+        let item = retryHistoryItem(
+            audioFileName: fileName,
+            spokenLanguageCode: "ko",
+            spokenLanguageResolution: .engineDetected,
+            meetingSummaryAttempt: attempt
+        )
+        _ = try store.append(item, maxCount: 10)
+
+        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
+        defer {
+            AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+        }
+        AppState.pipelineHistoryStoreFactory = { store }
+        let appState = await MainActor.run { AppState() }
+
+        await MainActor.run {
+            appState.transcriptionAPIKey = "test-api-key"
+            appState.transcriptionAPIURL = "http://127.0.0.1:1"
+            appState.setNoteBrowserTranscriptionChoice(
+                .apiStandard(modelID: "whisper-large-v3")
+            )
+            precondition(appState.noteBrowserRetryAvailability(for: item) == .ready)
+            appState.retryTranscription(item: item)
+        }
+
+        await waitUntil { !appState.retryingItemIDs.contains(item.id) }
+
+        let updated = try requireHistoryItem(withID: item.id, in: appState.pipelineHistory)
+        precondition(updated.spokenLanguageCode == "ko")
+        precondition(updated.spokenLanguageResolution == .engineDetected)
+        precondition(updated.meetingSummaryAttempt == attempt)
+
+        let persisted = try requireHistoryItem(
+            withID: item.id,
+            in: store.loadAllHistory()
+        )
+        precondition(persisted.spokenLanguageCode == "ko")
+        precondition(persisted.spokenLanguageResolution == .engineDetected)
+        precondition(persisted.meetingSummaryAttempt == attempt)
+    }
+
     private static func testRetryUsesCurrentPostProcessingAndAudioOnlyMetadata() throws {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
         let retrySnapshot = sourceBlock(
@@ -2621,6 +2703,151 @@ struct AppStateTranscriptionConfigurationTests {
         assert(history.contains("customTitle: snapshot.item.customTitle"))
     }
 
+    private static func testHistoryReconstructionPreservesMeetingSummaryMetadata() throws {
+        let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
+        let paths = [
+            sourceBlock(
+                in: source,
+                from: "func updateTranscript(id: UUID, text: String)",
+                to: "\n    @MainActor\n    func importAudioFile"
+            ),
+            sourceBlock(
+                in: source,
+                from: "private func makeRetryHistoryItem(",
+                to: "\n    func updatePermissionStatus"
+            ),
+            sourceBlock(
+                in: source,
+                from: "private func updateLiveNoteTranscript(",
+                to: "\n    static func resolvedSystemPrompt"
+            ),
+            sourceBlock(
+                in: source,
+                from: "private func recordPipelineHistoryEntry(",
+                to: "\n    private func startRealtimeStreamingIfEnabled"
+            )
+        ]
+
+        for path in paths {
+            assert(path.contains("spokenLanguageCode:"))
+            assert(path.contains("spokenLanguageResolution:"))
+            assert(path.contains("meetingSummaryAttempt:"))
+        }
+
+        let retry = paths[1]
+        let finalRecording = paths[3]
+        for path in [retry, finalRecording] {
+            assert(path.contains("let effectiveSpokenLanguage = spokenLanguage ??"))
+            assert(path.contains("spokenLanguageCode: effectiveSpokenLanguage?.languageCode"))
+            assert(path.contains("spokenLanguageResolution: effectiveSpokenLanguage?.source"))
+        }
+    }
+
+    private static func testSuccessfulTranscriptionHistoryReceivesSpokenLanguage() throws {
+        let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
+        let importedAudioPath = sourceBlock(
+            in: source,
+            from: "func importAudioFile(_ fileURL: URL, choice: TranscriptionBackendChoice)",
+            to: "\n    @MainActor\n    func noteBrowserStoredAudioURL"
+        )
+        let retry = sourceBlock(
+            in: source,
+            from: "func retryTranscription(item: PipelineHistoryItem)",
+            to: "\n    @MainActor\n    private func copyRetryTranscriptToPasteboardIfNeeded"
+        )
+        let resumedCloud = sourceBlock(
+            in: source,
+            from: "private func resumeCloudTranscriptionAfterLaunch(",
+            to: "\n    @MainActor\n    private func installCloudTranscriptionTask"
+        )
+        let stoppedRecording = sourceBlock(
+            in: source,
+            from: "private func runSuccessfulStoppedTranscriptionCompletionPipeline(",
+            to: "\n    @MainActor\n    private func updateForegroundUIForStoppedTranscriptionCompletion"
+        )
+        let history = sourceBlock(
+            in: source,
+            from: "private func recordPipelineHistoryEntry(",
+            to: "\n    private func startRealtimeStreamingIfEnabled"
+        )
+        for successfulPath in [importedAudioPath, retry, resumedCloud] {
+            precondition(successfulPath.contains("spokenLanguage: transcription.spokenLanguage"))
+        }
+        precondition(stoppedRecording.contains("spokenLanguage: completion.spokenLanguage"))
+        precondition(history.contains("let effectiveSpokenLanguage = spokenLanguage ??"))
+        precondition(history.contains("spokenLanguageCode: effectiveSpokenLanguage?.languageCode"))
+        precondition(history.contains("spokenLanguageResolution: effectiveSpokenLanguage?.source"))
+    }
+
+    private static func testHistoryDeletionForgetsSummaryGenerationStateAfterPersistence() throws {
+        let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
+        let clear = sourceBlock(
+            in: source,
+            from: "func clearPipelineHistory()",
+            to: "\n    @MainActor\n    func deleteHistoryEntry"
+        )
+        let delete = sourceBlock(
+            in: source,
+            from: "func deleteHistoryEntry(id: UUID)",
+            to: "\n    @MainActor\n    func updateHistoryItemTitle"
+        )
+        let retry = sourceBlock(
+            in: source,
+            from: "func retryTranscription(item: PipelineHistoryItem)",
+            to: "\n    @MainActor\n    private func copyRetryTranscriptToPasteboardIfNeeded"
+        )
+
+        assert(clear.contains("try pipelineHistoryStore.clearAll("))
+        assert(clear.contains("requiresDurableStore: true"))
+        assert(clear.contains("pipelineHistory = []"))
+        assert(clear.contains("forgetAllMeetingSummaryGenerationState()"))
+        assert(
+            clear.range(of: "pipelineHistory = []")!.lowerBound
+                < clear.range(of: "forgetAllMeetingSummaryGenerationState()")!.lowerBound
+        )
+        assert(delete.contains("try pipelineHistoryStore.delete("))
+        assert(delete.contains("requiresDurableStore: true"))
+        assert(delete.contains("pipelineHistory.remove(at: index)"))
+        assert(delete.contains("forgetMeetingSummaryGenerationState(for: id)"))
+        assert(
+            delete.range(of: "pipelineHistory.remove(at: index)")!.lowerBound
+                < delete.range(of: "forgetMeetingSummaryGenerationState(for: id)")!.lowerBound
+        )
+        assert(retry.contains("try self.pipelineHistoryStore.update("))
+        assert(retry.contains("requiresDurableStore: true"))
+        assert(
+            retry.range(of: "requiresDurableStore: true")!.lowerBound
+                < retry.range(of: "self.invalidateMeetingSummaryGeneration(for: snapshot.item.id)")!.lowerBound
+        )
+    }
+
+    private static func testRealtimeConfiguredLanguageUsesOneRequestAndResolutionValue() throws {
+        let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
+        let start = sourceBlock(
+            in: source,
+            from: "private func startRealtimeStreamingIfEnabled()",
+            to: "\n    private func tearDownRealtimeService"
+        )
+        let completion = sourceBlock(
+            in: source,
+            from: "let activeRealtime = self.realtimeService",
+            to: "\n                    try Task.checkCancellation()"
+        )
+
+        assert(start.contains(
+            "let realtimeLanguageConfiguration = RealtimeTranscriptionLanguageConfiguration("
+        ))
+        assert(start.contains(
+            "language: realtimeLanguageConfiguration.requestLanguage"
+        ))
+        assert(completion.contains(
+            "let activeRealtimeLanguageConfiguration = self.realtimeLanguageConfiguration"
+        ))
+        assert(completion.contains(
+            "requestedLanguageCode: activeRealtimeLanguageConfiguration?.requestedLanguageCode"
+        ))
+    }
+
     private static func testAudioOnlyRetryDeletesNewTranscriptFileWhenStale() throws {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
         let retry = sourceBlock(
@@ -2635,7 +2862,7 @@ struct AppStateTranscriptionConfigurationTests {
         )
         let storeUpdate = sourceBlock(
             in: retry,
-            from: "try self.pipelineHistoryStore.update(updatedItem)",
+            from: "try self.pipelineHistoryStore.update(updatedItem, requiresDurableStore: true)",
             to: "\n                if !retrySucceeded"
         )
 
@@ -2646,7 +2873,12 @@ struct AppStateTranscriptionConfigurationTests {
         }
     }
 
-    private static func retryHistoryItem(audioFileName: String?) -> PipelineHistoryItem {
+    private static func retryHistoryItem(
+        audioFileName: String?,
+        spokenLanguageCode: String? = nil,
+        spokenLanguageResolution: SpokenLanguageResolutionSource? = nil,
+        meetingSummaryAttempt: MeetingSummaryAttempt? = nil
+    ) -> PipelineHistoryItem {
         PipelineHistoryItem(
             timestamp: Date(timeIntervalSince1970: 1),
             rawTranscript: "",
@@ -2659,7 +2891,10 @@ struct AppStateTranscriptionConfigurationTests {
             debugStatus: "Failed",
             customVocabulary: "",
             audioFileName: audioFileName,
-            usedLocalTranscription: true
+            usedLocalTranscription: true,
+            spokenLanguageCode: spokenLanguageCode,
+            spokenLanguageResolution: spokenLanguageResolution,
+            meetingSummaryAttempt: meetingSummaryAttempt
         )
     }
 

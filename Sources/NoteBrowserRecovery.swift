@@ -25,7 +25,7 @@ struct NoteBrowserActionState: Equatable {
         self.retryAvailability = retryAvailability
     }
 
-    var showsRetryButton: Bool { true }
+    var showsRetryButton: Bool { hasStoredAudio }
     var canCopy: Bool { hasTranscriptText }
     var canSaveFiles: Bool { hasStoredAudio || hasTranscriptText }
 }

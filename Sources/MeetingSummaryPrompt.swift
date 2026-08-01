@@ -14,7 +14,7 @@ enum MeetingSummaryPromptFactory {
 
     static func singlePass(
         source: MeetingSummarySource,
-        outputLanguage: String
+        outputLanguage: String?
     ) throws -> MeetingSummaryPrompt {
         try extraction(
             transcript: source.normalizedTranscript,
@@ -26,7 +26,7 @@ enum MeetingSummaryPromptFactory {
     static func chunkExtraction(
         chunk: MeetingSummaryTextChunk,
         calendar: MeetingSummaryCalendarContext?,
-        outputLanguage: String
+        outputLanguage: String?
     ) throws -> MeetingSummaryPrompt {
         try extraction(
             transcript: chunk.text,
@@ -37,7 +37,7 @@ enum MeetingSummaryPromptFactory {
 
     static func merge(
         validatedPartials: [MeetingSummaryDraftContentV2],
-        outputLanguage: String
+        outputLanguage: String?
     ) throws -> MeetingSummaryPrompt {
         let envelope = AIProcessingEnvelope(
             contractVersion: "quill.ai.v2",
@@ -57,7 +57,7 @@ enum MeetingSummaryPromptFactory {
     private static func extraction(
         transcript: String,
         calendar: MeetingSummaryCalendarContext?,
-        outputLanguage: String
+        outputLanguage: String?
     ) throws -> MeetingSummaryPrompt {
         let envelope = AIProcessingEnvelope(
             contractVersion: "quill.ai.v2",
@@ -77,10 +77,10 @@ enum MeetingSummaryPromptFactory {
         )
     }
 
-    private static func systemPrompt(outputLanguage: String) -> String {
-        let language = outputLanguage.trimmingCharacters(
+    private static func systemPrompt(outputLanguage: String?) -> String {
+        let language = outputLanguage?.trimmingCharacters(
             in: .whitespacesAndNewlines
-        )
+        ) ?? ""
         let languageRule = language.isEmpty
             ? "Write generated summary prose in the language primarily used by the transcript."
             : "Write generated summary prose in \(language). Do not translate source quotes."
