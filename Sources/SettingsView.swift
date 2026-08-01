@@ -4223,34 +4223,36 @@ struct RunLogView: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 420)
-                    HStack {
-                        Button("Open Data Folder") {
-                            appState.openHistoryDataFolder()
-                        }
-                        Button("Quit Quill") {
-                            NSApplication.shared.terminate(nil)
-                        }
-                    }
+                    HistoryUnavailableRecoveryActions()
                     Spacer()
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity)
-            } else if appState.pipelineHistory.isEmpty {
-                VStack {
-                    Spacer()
-                    Text("No runs yet. Use dictation to populate history.")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(appState.pipelineHistory) { item in
-                            RunLogEntryView(item: item)
+                VStack(spacing: 0) {
+                    if appState.historyArchiveSafety == .unresolvedArchive {
+                        HistoryArchiveNoticeView()
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 12)
+                    }
+                    if appState.pipelineHistory.isEmpty {
+                        VStack {
+                            Spacer()
+                            Text("No runs yet. Use dictation to populate history.")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 12) {
+                                ForEach(appState.pipelineHistory) { item in
+                                    RunLogEntryView(item: item)
+                                }
+                            }
+                            .padding(20)
                         }
                     }
-                    .padding(20)
                 }
             }
         }

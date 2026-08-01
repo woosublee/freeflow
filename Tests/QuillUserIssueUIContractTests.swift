@@ -9,6 +9,7 @@ struct QuillUserIssueUIContractTests {
         let settings = try source("Sources/SettingsView.swift")
         let menuBar = try source("Sources/MenuBarView.swift")
         let appState = try source("Sources/AppState.swift")
+        let historyRecovery = try source("Sources/HistoryRecoveryView.swift")
 
         try testSharedRenderer(issueView)
         try testNoteBrowserUsesStructuredErrorAndWarningUI(noteBrowser)
@@ -18,11 +19,12 @@ struct QuillUserIssueUIContractTests {
         try testRunLogSanitizesMachineStatuses(settings)
         try testRecoveryActionsUseExistingRoutes(noteBrowser, appState)
         try testDismissibleBannerScopedToWarningStyle(issueView, noteBrowser, appState)
-        try testHistoryUnavailableProtectionIsVisibleAndDoesNotExposeRecoveryPaths(
+        try testHistoryUnavailableProtectionAndArchiveNotice(
             noteBrowser,
             settings,
             menuBar,
-            appState
+            appState,
+            historyRecovery
         )
         print("QuillUserIssueUIContractTests passed")
     }
@@ -224,41 +226,75 @@ struct QuillUserIssueUIContractTests {
         )
     }
 
-    private static func testHistoryUnavailableProtectionIsVisibleAndDoesNotExposeRecoveryPaths(
+    private static func testHistoryUnavailableProtectionAndArchiveNotice(
         _ noteBrowser: String,
         _ settings: String,
         _ menuBar: String,
-        _ appState: String
+        _ appState: String,
+        _ historyRecovery: String
     ) throws {
         try expect(
             appState.contains("@Published private(set) var isHistoryUnavailable = false"),
             "AppState publishes an explicit history-unavailable state"
         )
         try expect(
-            appState.contains(".historyPersistenceUnavailable"),
-            "AppState uses the structured unavailable-history issue"
+            appState.contains("func archiveOldHistoryAndStartFresh() -> Bool")
+                && appState.contains("func openHistoryRecoveryFolder()"),
+            "AppState exposes explicit archive and recovery-folder actions"
+        )
+        try expect(
+            appState.contains(".historyArchived"),
+            "AppState publishes a persistent archived-history notice"
         )
         for source in [noteBrowser, settings, menuBar] {
             try expect(
                 source.contains("appState.isHistoryUnavailable"),
                 "every history surface renders the protected state"
             )
-            try expect(source.contains("Open Data Folder"), "protected state opens the data folder")
-            try expect(source.contains("Quit Quill"), "protected state provides a safe quit action")
+            try expect(
+                source.contains("HistoryUnavailableRecoveryActions"),
+                "every protected history surface uses shared archive actions"
+            )
+            try expect(
+                source.contains("HistoryArchiveNoticeView"),
+                "every history surface renders the persistent archive notice"
+            )
         }
         try expect(
-            menuBar.contains(".disabled(appState.isTranscribing || appState.isHistoryUnavailable)"),
+            menuBar.contains(".disabled(appState.isTranscribing || appState.isHistoryUnavailable"),
             "Menu Bar disables recording while history is unavailable"
         )
+        for source in [noteBrowser, settings] {
+            try expect(
+                source.contains("if appState.historyArchiveSafety == .unresolvedArchive {\n                        HistoryArchiveNoticeView()"),
+                "archive notice padding renders only when an archive notice is visible"
+            )
+        }
         try expect(
             noteBrowser.contains("if appState.isHistoryUnavailable"),
             "Note Browser checks protected state before normal empty history"
         )
-        for source in [noteBrowser, settings, menuBar] {
-            try expect(!source.contains("backupName"), "protected UI never exposes a backup name")
-            try expect(!source.contains("History Recovery"), "protected UI never exposes a recovery path")
-            try expect(!source.contains("start fresh"), "protected UI never offers a replacement history")
+        for marker in [
+            "Archive Old History and Start Fresh…",
+            "Archive and Start Fresh",
+            "Open Data Folder",
+            "Open Recovery Folder",
+            ".confirmationDialog(",
+            "role: .destructive",
+            "appState.archiveOldHistoryAndStartFresh()"
+        ] {
+            try expect(historyRecovery.contains(marker), "shared recovery UI contains \(marker)")
         }
+        try expect(
+            !historyRecovery.contains("Button(\"Restore")
+                && !historyRecovery.contains("Button(\"Import")
+                && !historyRecovery.contains("Button(\"Merge"),
+            "#242 recovery UI does not expose #243 restore, import, or merge actions"
+        )
+        try expect(
+            !historyRecovery.contains("backupName") && !historyRecovery.contains("History Recovery"),
+            "recovery UI does not expose internal backup names or legacy paths"
+        )
     }
 
     private static func source(_ path: String) throws -> String {

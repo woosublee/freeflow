@@ -5,8 +5,9 @@ struct AppStateHistoryProtectionSourceTests {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
 
         try expect(
-            source.contains("if pipelineHistoryStore.availability == .ready {"),
-            "startup work is gated by history availability"
+            source.contains("if initialHistoryArchiveSafety == .normal,")
+                && source.contains("pipelineHistoryStore.availability == .ready"),
+            "startup work is gated by history availability and archive safety"
         )
         let startupRange = try source.range(
             from: "var savedHistory: [PipelineHistoryItem] = []",
@@ -17,13 +18,15 @@ struct AppStateHistoryProtectionSourceTests {
             [
                 "if pipelineHistoryStore.availability == .ready {",
                 "pipelineHistoryStore.verifyHistoryReadable()",
+                "if initialHistoryArchiveSafety == .normal,",
+                "pipelineHistoryStore.availability == .ready {",
                 "recoverRecordingJournalsBeforeHistoryLoad(",
                 "cloudTranscriptionJobStore.reconcile(",
                 "sweepOrphanStoredFiles(",
                 "} else {\n            print(\"Skipping history startup work because persistent history is unavailable.\")"
             ],
             in: startup,
-            label: "ready startup work remains grouped behind availability gate"
+            label: "ready startup work remains grouped behind availability and archive-safety gates"
         )
         let initialHistoryRead = try startup.range(
             of: "pipelineHistoryStore.verifyHistoryReadable()"
@@ -41,13 +44,89 @@ struct AppStateHistoryProtectionSourceTests {
                 && source.contains("private func synchronizeHistoryPersistenceState()")
                 && source.contains("let unavailable = pipelineHistoryStore.availability == .unavailable")
                 && source.contains("isHistoryUnavailable = unavailable")
-                && source.contains("historyPersistenceWarning = isHistoryUnavailable"),
-            "history-unavailable transitions publish protection UI state"
+                && source.contains("historyArchiveSafety == .unresolvedArchive")
+                && source.contains("historyPersistenceWarning = warning"),
+            "history transitions publish protection and archived-history UI state"
         )
         try expect(
             source.contains("private func loadPipelineHistory() -> [PipelineHistoryItem]")
                 && source.contains("synchronizeHistoryPersistenceState()"),
             "runtime history reads synchronize the published protection state"
+        )
+        let archivedStartupRange = try source.range(
+            from: "} else if initialHistoryArchiveSafety == .unresolvedArchive,",
+            to: "        } else {\n            print(\"Skipping history startup work because persistent history is unavailable.\")"
+        )
+        let archivedStartup = String(source[archivedStartupRange])
+        try expect(
+            archivedStartup.contains("recoverRecordingJournalsBeforeHistoryLoad(")
+                && archivedStartup.contains("markInterruptedRecoveryPlaceholders(")
+                && archivedStartup.contains("LegacyNoteTitleMigration.migrate(")
+                && archivedStartup.contains("cloudTranscriptionJobStore.reconcile(")
+                && !archivedStartup.contains("pipelineHistoryStore.trim(")
+                && !archivedStartup.contains("bootstrapAssetReferenceSnapshot(")
+                && !archivedStartup.contains("sweepOrphanStoredFiles("),
+            "published archives recover only the active generation while preserving old-data cleanup safeguards"
+        )
+        try expect(
+            source.contains("func archiveOldHistoryAndStartFresh() -> Bool")
+                && source.contains("try pipelineHistoryStore.detachForHistoryArchive()")
+                && source.contains("HistoryArchiveTransition(")
+                && source.contains("Task.detached(priority: .userInitiated)")
+                && source.contains("completeHistoryArchiveTransition(")
+                && source.contains("let activeStore = Self.pipelineHistoryStoreAtURLFactory(")
+                && source.contains("historyArchiveSafety = HistoryArchiveTransition.inspect("),
+            "explicit archive transitions in the background and installs only a verified fresh history store"
+        )
+        let archiveRange = try source.range(
+            from: "func archiveOldHistoryAndStartFresh() -> Bool",
+            to: "@MainActor\n    func clearPipelineHistory()"
+        )
+        let archiveBody = String(source[archiveRange])
+        for requiredGuard in [
+            "historyArchiveSafety == .normal",
+            "pendingAudioImportJobIDs.isEmpty",
+            "!cloudTranscriptionHistoryCoordinator.hasActiveWork",
+            "meetingSummaryGeneratingNoteIDs.isEmpty",
+            "pendingRecordingJournalFinalizationCount == 0",
+            "pendingRecordingStartCount == 0"
+        ] {
+            try expect(
+                archiveBody.contains(requiredGuard),
+                "archive waits for \(requiredGuard) before moving history files"
+            )
+        }
+        try expect(
+            source.contains("pendingAudioImportJobIDs.insert(jobID)")
+                && source.contains("pendingAudioImportJobIDs.remove(jobID)"),
+            "audio import is tracked before its detached audio copy can touch history storage"
+        )
+        let recordingStartRange = try source.range(
+            from: "private func startRecording(triggerMode: RecordingTriggerMode",
+            to: "/// Whether the configured recording flow will actually exercise Accessibility."
+        )
+        let recordingStart = String(source[recordingStartRange])
+        try expect(
+            source.contains("private var pendingRecordingStartCount = 0")
+                && recordingStart.contains("pendingRecordingStartCount += 1")
+                && recordingStart.contains("defer { self.pendingRecordingStartCount -= 1 }")
+                && recordingStart.components(separatedBy: "requireAvailableHistoryForMutation()").count >= 3
+                && recordingStart.contains("beginRecording("),
+            "an awaited recording start remains pending and rechecks archive protection before creating writers"
+        )
+        let microphonePermissionRange = try source.range(
+            from: "private func ensureMicrophoneAccess() -> Bool",
+            to: "private func applyAudioInterruptionIfNeeded()"
+        )
+        let microphonePermission = String(source[microphonePermissionRange])
+        try expect(
+            microphonePermission.contains("pendingRecordingStartCount += 1")
+                && microphonePermission.contains("defer { strongSelf.pendingRecordingStartCount -= 1 }")
+                && microphonePermission.components(
+                    separatedBy: "strongSelf.requireAvailableHistoryForMutation()"
+                ).count >= 3
+                && microphonePermission.contains("strongSelf.beginRecording("),
+            "microphone permission resumption remains pending and rechecks archive protection before creating writers"
         )
 
         let persistenceRange = try source.range(

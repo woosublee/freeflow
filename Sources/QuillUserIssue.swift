@@ -31,6 +31,7 @@ enum QuillUserIssueCode: String, Codable, CaseIterable, Sendable {
     case meetingSummaryInvalidResponse = "meeting-summary-invalid-response"
     case historyPersistenceUnavailable = "history-persistence-unavailable"
     case historyRecovered = "history-recovered"
+    case historyArchived = "history-archived"
     case unknown
     case legacy
 }
@@ -141,7 +142,7 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
             return .openScreenRecordingSettings
         case .postProcessingGuardFallback, .contextUnavailable,
              .meetingSummaryUnavailable, .meetingSummaryInvalidResponse,
-             .historyPersistenceUnavailable, .historyRecovered:
+             .historyPersistenceUnavailable, .historyRecovered, .historyArchived:
             return .none
         case .networkUnavailable, .requestTimedOut, .rateLimited,
              .providerUnavailable, .audioFileTooLarge,
@@ -404,7 +405,7 @@ private extension QuillUserIssueCode {
              .localAIStartFailed, .localAIProcessExited,
              .contextUnavailable, .meetingSummaryUnavailable,
              .meetingSummaryInvalidResponse, .historyPersistenceUnavailable,
-             .historyRecovered:
+             .historyRecovered, .historyArchived:
             return .warning
         default:
             return .error
@@ -592,6 +593,12 @@ private extension QuillUserIssueCode {
                 titleKey: "History was recovered",
                 bodyKey: "Quill couldn't open earlier history. A recovery backup was retained, and new notes will keep saving.",
                 suggestionKey: "No action is needed. Your new notes and history are being saved."
+            )
+        case .historyArchived:
+            return QuillUserIssueCopy(
+                titleKey: "Old history was archived",
+                bodyKey: "New history is saving separately. Restore, import, and merge are not available yet.",
+                suggestionKey: "Open the recovery folder to keep the archived history available for a future recovery."
             )
         case .unknown:
             return QuillUserIssueCopy(

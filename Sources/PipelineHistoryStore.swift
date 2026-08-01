@@ -12,6 +12,33 @@ enum PipelineHistoryStoreError: Error {
     case durableStoreUnavailable
 }
 
+struct HistoryArchiveSnapshotComponent: Codable, Equatable, Sendable {
+    enum Identifier: String, Codable, CaseIterable, Sendable {
+        case sqlite
+        case sqliteWAL
+        case sqliteSHM
+        case assetReferenceSnapshot
+        case audio
+        case transcripts
+        case cloudTranscriptionJobs
+        case legacyRecoveryEvidence
+    }
+
+    let identifier: Identifier
+    let relativePath: String
+    let byteCount: UInt64
+    let isDirectory: Bool
+}
+
+struct HistoryArchiveSnapshot: Codable, Equatable, Sendable {
+    static let currentSchemaVersion = 1
+
+    let schemaVersion: Int
+    let id: UUID
+    let archivedAt: Date
+    let components: [HistoryArchiveSnapshotComponent]
+}
+
 enum PipelineHistoryStoreAvailability: Equatable, Sendable {
     case ready
     case unavailable
@@ -224,6 +251,35 @@ final class PipelineHistoryStore {
         loadError = error
         referenceTrust = .unavailable
         canSynchronizeAssetReferenceSnapshot = false
+    }
+
+    func detachForHistoryArchive() throws {
+        guard availability == .unavailable else {
+            throw PipelineHistoryStoreError.storeUnavailable
+        }
+        try detachPersistentStores()
+        isStoreLoaded = false
+        canSynchronizeAssetReferenceSnapshot = false
+    }
+
+    func detachForArchiveVerification() throws {
+        try detachPersistentStores()
+    }
+
+    private func detachPersistentStores() throws {
+        var thrownError: Error?
+        container.viewContext.performAndWait {
+            do {
+                container.viewContext.reset()
+                let coordinator = container.persistentStoreCoordinator
+                for store in coordinator.persistentStores {
+                    try coordinator.remove(store)
+                }
+            } catch {
+                thrownError = error
+            }
+        }
+        if let thrownError { throw thrownError }
     }
 
     func assetReferenceSnapshotState(
@@ -675,6 +731,85 @@ final class PipelineHistoryStore {
         near storeURL: URL?
     ) -> RecoveryBackupInspection {
         guard let storeURL else { return .absent }
+        let archiveInspection = inspectPublishedHistoryArchives(near: storeURL)
+        switch archiveInspection {
+        case .present, .unavailable:
+            return archiveInspection
+        case .absent:
+            return inspectLegacyRecoveryEvidence(near: storeURL)
+        }
+    }
+
+    private static func inspectPublishedHistoryArchives(
+        near storeURL: URL
+    ) -> RecoveryBackupInspection {
+        let recoveryRootURL = storeURL.deletingLastPathComponent()
+            .appendingPathComponent("Recovery", isDirectory: true)
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: recoveryRootURL.path) else {
+            return .absent
+        }
+        let transactionsURL = recoveryRootURL.appendingPathComponent(
+            ".transactions",
+            isDirectory: true
+        )
+        if fileManager.fileExists(atPath: transactionsURL.path) {
+            do {
+                guard try transactionsURL.resourceValues(forKeys: [.isDirectoryKey])
+                    .isDirectory == true,
+                      try fileManager.contentsOfDirectory(atPath: transactionsURL.path).isEmpty else {
+                    return .unavailable
+                }
+            } catch {
+                return .unavailable
+            }
+        }
+        do {
+            let entries = try fileManager.contentsOfDirectory(
+                at: recoveryRootURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+            var hasPublishedArchive = false
+            for entry in entries {
+                let isDirectory = try entry.resourceValues(forKeys: [.isDirectoryKey])
+                    .isDirectory == true
+                if entry.lastPathComponent == ".transactions" {
+                    guard isDirectory else { return .unavailable }
+                    if try !fileManager.contentsOfDirectory(atPath: entry.path).isEmpty {
+                        return .unavailable
+                    }
+                    continue
+                }
+                guard entry.lastPathComponent.hasPrefix("history-") else { continue }
+                guard isDirectory else { return .unavailable }
+                let manifestURL = entry.appendingPathComponent("manifest.json")
+                let payloadURL = entry.appendingPathComponent("payload", isDirectory: true)
+                guard fileManager.fileExists(atPath: manifestURL.path),
+                      fileManager.fileExists(atPath: payloadURL.path) else {
+                    return .unavailable
+                }
+                let manifest = try JSONDecoder().decode(
+                    HistoryArchiveSnapshot.self,
+                    from: Data(contentsOf: manifestURL)
+                )
+                guard manifest.schemaVersion == HistoryArchiveSnapshot.currentSchemaVersion,
+                      entry.lastPathComponent.hasSuffix(
+                        "-\(manifest.id.uuidString.lowercased())"
+                      ) else {
+                    return .unavailable
+                }
+                hasPublishedArchive = true
+            }
+            return hasPublishedArchive ? .present : .absent
+        } catch {
+            return .unavailable
+        }
+    }
+
+    private static func inspectLegacyRecoveryEvidence(
+        near storeURL: URL
+    ) -> RecoveryBackupInspection {
         let recoveryRootURL = storeURL.deletingLastPathComponent()
             .appendingPathComponent("History Recovery", isDirectory: true)
         let fileManager = FileManager.default

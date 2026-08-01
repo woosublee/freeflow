@@ -9,6 +9,10 @@ struct PipelineHistoryStoreRecoveryTests {
         try testMetadataOnlyUpdateDoesNotRewriteAssetSnapshot()
         try testSnapshotSynchronizationFetchesOnlyAssetFileNames()
         try testApplicationSupportDirectoryHasDeterministicFallback()
+        try testPublishedArchiveLowersReferenceTrust()
+        try testUnfinishedArchiveTransactionDisablesReferenceCleanup()
+        try testArchivePreparationDetachesReadFailedStoreWithoutMutatingCanonicalFiles()
+        try testArchiveVerificationDetachesReadyStoreWithoutMutatingCanonicalFiles()
         try testUnavailableStorePreservesDatabaseComponentsAndRejectsMutations()
         try testReadFailureEntersProtectionMode()
         try testReadabilityProbeUsesBoundedFetch()
@@ -122,6 +126,92 @@ struct PipelineHistoryStoreRecoveryTests {
             source.contains(".first ?? URL(fileURLWithPath: NSHomeDirectory())")
                 && source.contains(".appendingPathComponent(\"Library/Application Support\", isDirectory: true)"),
             "Application Support lookup falls back without force-unwrapping"
+        )
+    }
+
+    private static func testPublishedArchiveLowersReferenceTrust() throws {
+        let fixture = try PersistentStoreFixture()
+        defer { fixture.remove() }
+        _ = PipelineHistoryStore(storeURL: fixture.storeURL)
+
+        let archiveID = UUID(uuidString: "56B46A6B-8EF0-4BB6-AC13-5A4653133F1D")!
+        let snapshotDirectory = fixture.directoryURL
+            .appendingPathComponent("Recovery", isDirectory: true)
+            .appendingPathComponent(
+                "history-20250801T010323Z-\(archiveID.uuidString.lowercased())",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: snapshotDirectory.appendingPathComponent("payload", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        let manifest = try JSONSerialization.data(withJSONObject: [
+            "schemaVersion": HistoryArchiveSnapshot.currentSchemaVersion,
+            "id": archiveID.uuidString,
+            "archivedAt": 1_754_010_203,
+            "components": []
+        ])
+        try manifest.write(to: snapshotDirectory.appendingPathComponent("manifest.json"))
+
+        let reopened = PipelineHistoryStore(storeURL: fixture.storeURL)
+        try expect(
+            reopened.referenceTrust == .recovered,
+            "published archive blocks automatic cleanup for the active history"
+        )
+    }
+
+    private static func testUnfinishedArchiveTransactionDisablesReferenceCleanup() throws {
+        let fixture = try PersistentStoreFixture()
+        defer { fixture.remove() }
+        _ = PipelineHistoryStore(storeURL: fixture.storeURL)
+
+        let transactionDirectory = fixture.directoryURL
+            .appendingPathComponent("Recovery/.transactions", isDirectory: true)
+        try FileManager.default.createDirectory(at: transactionDirectory, withIntermediateDirectories: true)
+        try Data("incomplete archive journal".utf8).write(
+            to: transactionDirectory.appendingPathComponent("unfinished.json")
+        )
+
+        let reopened = PipelineHistoryStore(storeURL: fixture.storeURL)
+        try expect(
+            reopened.referenceTrust == .unavailable,
+            "unfinished archive transaction never permits automatic cleanup"
+        )
+    }
+
+    private static func testArchivePreparationDetachesReadFailedStoreWithoutMutatingCanonicalFiles() throws {
+        let fixture = try PersistentStoreFixture()
+        defer { fixture.remove() }
+        _ = PipelineHistoryStore(storeURL: fixture.storeURL)
+        let originalBytes = try Data(contentsOf: fixture.storeURL)
+        let store = PipelineHistoryStore(
+            storeURL: fixture.storeURL,
+            historyFetcher: { _, _ in
+                throw RecoveryTestFailure("Injected read failure before archive preparation")
+            }
+        )
+        _ = store.loadAllHistory()
+        try expect(store.availability == .unavailable, "read failure enters protection mode")
+
+        try store.detachForHistoryArchive()
+
+        try expect(
+            try Data(contentsOf: fixture.storeURL) == originalBytes,
+            "archive preparation does not modify the canonical SQLite file"
+        )
+    }
+
+    private static func testArchiveVerificationDetachesReadyStoreWithoutMutatingCanonicalFiles() throws {
+        let fixture = try PersistentStoreFixture()
+        defer { fixture.remove() }
+        let store = PipelineHistoryStore(storeURL: fixture.storeURL)
+        let originalBytes = try Data(contentsOf: fixture.storeURL)
+
+        try store.detachForArchiveVerification()
+
+        try expect(
+            try Data(contentsOf: fixture.storeURL) == originalBytes,
+            "archive verification detaches a ready store without rewriting canonical SQLite"
         )
     }
 

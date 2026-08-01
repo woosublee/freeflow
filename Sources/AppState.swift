@@ -371,11 +371,32 @@ final class AppState: ObservableObject, @unchecked Sendable {
     static var pipelineHistoryStoreFactory: () -> PipelineHistoryStore = {
         makeDefaultPipelineHistoryStore()
     }
+    static var pipelineHistoryStoreAtURLFactory: (URL) -> PipelineHistoryStore = {
+        PipelineHistoryStore(storeURL: $0)
+    }
 
     static func makeDefaultPipelineHistoryStore() -> PipelineHistoryStore {
-        PipelineHistoryStore(
-            storeURL: appStorageRootDirectory()
-                .appendingPathComponent("PipelineHistory.sqlite")
+        pipelineHistoryStoreAtURLFactory(
+            appStorageRootDirectory().appendingPathComponent("PipelineHistory.sqlite")
+        )
+    }
+
+    private static func makeRecordingJournalStore() -> RecordingJournalStore {
+        RecordingJournalStore(audioDirectory: audioStorageDirectory())
+    }
+
+    private static func makeCloudTranscriptionJobStore() -> CloudTranscriptionJobStore {
+        let audioDirectory = audioStorageDirectory()
+        return CloudTranscriptionJobStore(
+            jobsDirectory: audioDirectory
+                .deletingLastPathComponent()
+                .appendingPathComponent("cloud-transcription/jobs", isDirectory: true),
+            temporaryRoot: FileManager.default.temporaryDirectory
+                .appendingPathComponent(
+                    Bundle.main.bundleIdentifier ?? "com.woosublee.quill",
+                    isDirectory: true
+                )
+                .appendingPathComponent("cloud-transcription", isDirectory: true)
         )
     }
 
@@ -2094,6 +2115,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var errorMessage: String?
     @Published private(set) var isHistoryUnavailable = false
     @Published private(set) var historyPersistenceWarning: QuillUserIssueRecord?
+    @Published private(set) var historyArchiveSafety: HistoryArchiveSafety = .normal
+    @Published private(set) var isHistoryArchiveTransitioning = false
     var historyUnavailableMessage: String {
         QuillUserIssueRecord(code: .historyPersistenceUnavailable)
             .presentation().compactMessage
@@ -2327,6 +2350,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var overlayTranscriptionID: UUID = UUID()
     private var foregroundTranscriptionJobID: UUID?
     private var activeTranscriptionJobs: [UUID: TranscriptionJob] = [:]
+    private var pendingAudioImportJobIDs: Set<UUID> = []
     let localAIServerManager: LocalAIServerManager
     @Published private(set) var localAIInstallStates: [String: LocalAIModelInstallViewState] = [:]
     @Published private(set) var contextModelCapabilityWarning: String?
@@ -2439,9 +2463,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var defaultInputDeviceListener: AudioObjectPropertyListenerBlock?
     private var defaultInputDeviceListenerAddress: AudioObjectPropertyAddress?
     private var needsMicrophoneRefreshAfterRecording = false
-    private let pipelineHistoryStore: PipelineHistoryStore
-    private let recordingJournalStore: RecordingJournalStore
-    private let cloudTranscriptionJobStore: CloudTranscriptionJobStore
+    private var pipelineHistoryStore: PipelineHistoryStore
+    private var recordingJournalStore: RecordingJournalStore
+    private var cloudTranscriptionJobStore: CloudTranscriptionJobStore
     @MainActor private let cloudTranscriptionHistoryCoordinator =
         CloudTranscriptionHistoryCoordinator()
     private var activeSegmentedJournalController: SegmentedRecordingJournalController?
@@ -2450,6 +2474,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         label: "com.woosublee.quill.recording-journal.finalization",
         qos: .userInitiated
     )
+    private var pendingRecordingJournalFinalizationCount = 0
+    private var pendingRecordingStartCount = 0
     private var activeRecordingID: UUID?
     private let shortcutSessionController = DictationShortcutSessionController()
     private var activeRecordingTriggerMode: RecordingTriggerMode?
@@ -2473,28 +2499,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let postTranscriptionUpdateReminderDuration: TimeInterval = 7
 
     init() {
+        let initialHistoryArchiveSafety = HistoryArchiveTransition
+            .rollbackInterruptedTransactions(at: Self.appStorageRootDirectory())
         pipelineHistoryStore = Self.pipelineHistoryStoreFactory()
         let audioDirectory = Self.audioStorageDirectory()
-        recordingJournalStore = RecordingJournalStore(
-            audioDirectory: audioDirectory
-        )
-        cloudTranscriptionJobStore = CloudTranscriptionJobStore(
-            jobsDirectory: audioDirectory
-                .deletingLastPathComponent()
-                .appendingPathComponent(
-                    "cloud-transcription/jobs",
-                    isDirectory: true
-                ),
-            temporaryRoot: FileManager.default.temporaryDirectory
-                .appendingPathComponent(
-                    Bundle.main.bundleIdentifier ?? "com.woosublee.quill",
-                    isDirectory: true
-                )
-                .appendingPathComponent(
-                    "cloud-transcription",
-                    isDirectory: true
-                )
-        )
+        recordingJournalStore = Self.makeRecordingJournalStore()
+        cloudTranscriptionJobStore = Self.makeCloudTranscriptionJobStore()
         UserDefaults.standard.removeObject(forKey: "force_http2_transcription")
         Self.migrateModelStorageKeys()
         let hasCompletedSetup = UserDefaults.standard.bool(forKey: "hasCompletedSetup")
@@ -2784,7 +2794,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         if pipelineHistoryStore.availability == .ready {
             pipelineHistoryStore.verifyHistoryReadable()
         }
-        if pipelineHistoryStore.availability == .ready {
+        if initialHistoryArchiveSafety == .normal,
+           pipelineHistoryStore.availability == .ready {
             Self.recoverRecordingJournalsBeforeHistoryLoad(
                 recordingJournalStore: recordingJournalStore,
                 historyStore: pipelineHistoryStore
@@ -2906,6 +2917,33 @@ final class AppState: ObservableObject, @unchecked Sendable {
             } else {
                 print("Skipping history startup work because persistent history is unavailable.")
             }
+        } else if initialHistoryArchiveSafety == .unresolvedArchive,
+                  pipelineHistoryStore.availability == .ready {
+            Self.recoverRecordingJournalsBeforeHistoryLoad(
+                recordingJournalStore: recordingJournalStore,
+                historyStore: pipelineHistoryStore
+            )
+            savedHistory = pipelineHistoryStore.loadAllHistory()
+            if pipelineHistoryStore.availability == .ready {
+                savedHistory = Self.markInterruptedRecoveryPlaceholders(
+                    in: savedHistory,
+                    store: pipelineHistoryStore
+                )
+                try? cloudTranscriptionJobStore.removeStaleTemporaryArtifacts()
+                cloudReconciliation = cloudTranscriptionJobStore.reconcile(
+                    history: savedHistory,
+                    audioRoot: audioDirectory
+                )
+                let historyStore = pipelineHistoryStore
+                do {
+                    savedHistory = try LegacyNoteTitleMigration.migrate(history: savedHistory) { item in
+                        try historyStore.update(item)
+                    }
+                } catch {
+                    print("Failed to migrate legacy note titles: \(error)")
+                }
+            }
+            print("Skipping automatic archive snapshot cleanup because an archived history remains unresolved.")
         } else {
             print("Skipping history startup work because persistent history is unavailable.")
         }
@@ -3002,11 +3040,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.soundVolume = soundVolume
         self.voiceMacros = initialMacros
         let initialHistoryUnavailable = pipelineHistoryStore.availability == .unavailable
+            || initialHistoryArchiveSafety == .unresolvedInterruptedTransaction
         self.pipelineHistory = savedHistory
         self.isHistoryUnavailable = initialHistoryUnavailable
+        self.historyArchiveSafety = initialHistoryArchiveSafety
         self.historyPersistenceWarning = initialHistoryUnavailable
             ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
-            : nil
+            : initialHistoryArchiveSafety == .unresolvedArchive
+                ? QuillUserIssueRecord(code: .historyArchived)
+                : nil
         self.hasAccessibility = initialAccessibility
         self.hasScreenRecordingPermission = initialScreenCapturePermission
         self.launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -4784,6 +4826,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         NSWorkspace.shared.open(Self.appStorageRootDirectory())
     }
 
+    func openHistoryRecoveryFolder() {
+        NSWorkspace.shared.open(
+            Self.appStorageRootDirectory().appendingPathComponent("Recovery", isDirectory: true)
+        )
+    }
+
     static func appStorageRootDirectory() -> URL {
         let rootDirectory = storageRootProvider()
         if !FileManager.default.fileExists(atPath: rootDirectory.path) {
@@ -5462,6 +5510,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
+    @MainActor
     private func finishRecordingAfterJournalPersistenceFailure(
         controller: SegmentedRecordingJournalController,
         sourceFailure: RecordingJournalSourcePersistenceFailure,
@@ -5470,40 +5519,23 @@ final class AppState: ObservableObject, @unchecked Sendable {
         for url in temporaryURLs {
             try? FileManager.default.removeItem(at: url)
         }
+        activeSegmentedJournalController = nil
+        activeRecordingID = nil
+        let finalizationWork = RecordingJournalFinalizationWork(
+            controller: controller,
+            store: recordingJournalStore
+        )
+        pendingRecordingJournalFinalizationCount += 1
         recordingJournalFinalizationQueue.async {
-            let result = self.recoverRecordingAfterJournalPersistenceFailure(
-                controller: controller
-            )
+            let result = finalizationWork.recoverAfterPersistenceFailure()
             Task { @MainActor [weak self] in
-                self?.completeRecordingStorageFailureRecovery(
+                guard let self else { return }
+                self.pendingRecordingJournalFinalizationCount -= 1
+                self.completeRecordingStorageFailureRecovery(
                     result,
                     sourceFailure: sourceFailure
                 )
             }
-        }
-    }
-
-    private func recoverRecordingAfterJournalPersistenceFailure(
-        controller: SegmentedRecordingJournalController
-    ) -> Result<RecoveredRecordingArtifact, Error> {
-        do {
-            _ = try controller.closeAfterPersistenceFailure()
-            let artifact = try SegmentedRecordingArtifactFinalizer(
-                store: recordingJournalStore,
-                mixdownService: AudioMixdownService()
-            ).finalizeAndPromote(recordingID: controller.recordingID)
-            let manifest = try recordingJournalStore.loadManifest(
-                recordingID: controller.recordingID
-            )
-            return .success(RecoveredRecordingArtifact(
-                recordingID: artifact.recordingID,
-                audioURL: artifact.destinationURL,
-                promotion: artifact.promotion,
-                manifest: manifest,
-                mode: artifact.mode
-            ))
-        } catch {
-            return .failure(error)
         }
     }
 
@@ -5631,19 +5663,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
     ) {
         let inputID = activeAudioInputID ?? selectedMicrophoneID
         stopPhysicalAudioRecorder(inputID: inputID) { [weak self] temporaryURLs in
-            guard let self else {
-                for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
-                completion(.empty)
-                return
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
+                    completion(.empty)
+                    return
+                }
+                self.detachSegmentedJournalSinks()
+                self.finishStoppedSegmentedRecording(
+                    temporaryURLs: temporaryURLs,
+                    completion: completion
+                )
             }
-            self.detachSegmentedJournalSinks()
-            self.finishStoppedSegmentedRecording(
-                temporaryURLs: temporaryURLs,
-                completion: completion
-            )
         }
     }
 
+    @MainActor
     private func finishStoppedSegmentedRecording(
         temporaryURLs: [URL],
         completion: @escaping (StoppedAudioRecording) -> Void
@@ -5657,55 +5692,55 @@ final class AppState: ObservableObject, @unchecked Sendable {
         activeRecordingID = nil
         activeInputSwitchToken = nil
         isActiveInputSwitchPhysicalStopInProgress = false
+        let finalizationWork = RecordingJournalFinalizationWork(
+            controller: controller,
+            store: recordingJournalStore
+        )
+        pendingRecordingJournalFinalizationCount += 1
         recordingJournalFinalizationQueue.async {
             do {
-                try controller.stopAndClose()
-                let artifact = try SegmentedRecordingArtifactFinalizer(
-                    store: self.recordingJournalStore,
-                    mixdownService: AudioMixdownService()
-                ).finalizeAndPromote(recordingID: controller.recordingID)
-                let promotedManifest = try self.recordingJournalStore.loadManifest(
-                    recordingID: artifact.recordingID
-                )
-                DispatchQueue.main.async {
-                    for url in temporaryURLs where url.path != artifact.destinationURL.path {
+                let finalized = try finalizationWork.finalizeStoppedRecording()
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.pendingRecordingJournalFinalizationCount -= 1
+                    for url in temporaryURLs where url.path != finalized.artifact.destinationURL.path {
                         try? FileManager.default.removeItem(at: url)
                     }
-                    switch artifact.mode {
+                    switch finalized.artifact.mode {
                     case .complete:
                         completion(.transcribable(
-                            fileURL: artifact.destinationURL,
+                            fileURL: finalized.artifact.destinationURL,
                             recoverableJournalID: nil
                         ))
                     case .partial:
                         let recovered = RecoveredRecordingArtifact(
-                            recordingID: artifact.recordingID,
-                            audioURL: artifact.destinationURL,
-                            promotion: artifact.promotion,
-                            manifest: promotedManifest,
+                            recordingID: finalized.artifact.recordingID,
+                            audioURL: finalized.artifact.destinationURL,
+                            promotion: finalized.artifact.promotion,
+                            manifest: finalized.manifest,
                             mode: .partial
                         )
                         completion(.recoveredWithoutTranscription(recovered))
                     case .microphoneOnly, .systemAudioOnly:
                         completion(.preservedForRecovery(
-                            recordingID: controller.recordingID,
+                            recordingID: finalizationWork.recordingID,
                             message: "Unexpected segmented recovery mode"
                         ))
                     }
                 }
             } catch {
-                if controller.terminalPersistenceFailure != nil {
-                    let result = self.recoverRecordingAfterJournalPersistenceFailure(
-                        controller: controller
-                    )
-                    DispatchQueue.main.async {
+                if finalizationWork.hasTerminalPersistenceFailure {
+                    let result = finalizationWork.recoverAfterPersistenceFailure()
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.pendingRecordingJournalFinalizationCount -= 1
                         for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
                         switch result {
                         case .success(let recovered):
                             completion(.recoveredWithoutTranscription(recovered))
                         case .failure(let recoveryError):
                             completion(.preservedForRecovery(
-                                recordingID: controller.recordingID,
+                                recordingID: finalizationWork.recordingID,
                                 message: recoveryError.localizedDescription
                             ))
                         }
@@ -5718,11 +5753,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     "segmented journal finalization failed: %{public}@",
                     error.localizedDescription
                 )
-                try? controller.preserveForRecovery()
-                DispatchQueue.main.async {
+                try? finalizationWork.preserveForRecovery()
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.pendingRecordingJournalFinalizationCount -= 1
                     for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
                     completion(.preservedForRecovery(
-                        recordingID: controller.recordingID,
+                        recordingID: finalizationWork.recordingID,
                         message: error.localizedDescription
                     ))
                 }
@@ -6138,11 +6175,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private func synchronizeHistoryPersistenceState() {
         let unavailable = pipelineHistoryStore.availability == .unavailable
-        guard isHistoryUnavailable != unavailable else { return }
+            || historyArchiveSafety == .unresolvedInterruptedTransaction
+        let warning: QuillUserIssueRecord?
+        if unavailable {
+            warning = QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+        } else if historyArchiveSafety == .unresolvedArchive {
+            warning = QuillUserIssueRecord(code: .historyArchived)
+        } else {
+            warning = nil
+        }
+        guard isHistoryUnavailable != unavailable || historyPersistenceWarning != warning else { return }
         isHistoryUnavailable = unavailable
-        historyPersistenceWarning = isHistoryUnavailable
-            ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
-            : nil
+        historyPersistenceWarning = warning
     }
 
     private func loadPipelineHistory() -> [PipelineHistoryItem] {
@@ -6153,12 +6197,114 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @discardableResult
     private func requireAvailableHistoryForMutation() -> Bool {
+        guard !isHistoryArchiveTransitioning else {
+            errorMessage = localizedCatalogString("Archiving recording history is still in progress.")
+            return false
+        }
         synchronizeHistoryPersistenceState()
         guard !isHistoryUnavailable else {
             errorMessage = historyUnavailableMessage
             return false
         }
         return true
+    }
+
+    @MainActor
+    @discardableResult
+    func archiveOldHistoryAndStartFresh() -> Bool {
+        synchronizeHistoryPersistenceState()
+        guard isHistoryUnavailable,
+              historyArchiveSafety == .normal,
+              !isHistoryArchiveTransitioning else {
+            return false
+        }
+        guard !isRecording,
+              !isTranscribing,
+              retryingItemIDs.isEmpty,
+              activeTranscriptionJobs.isEmpty,
+              pendingAudioImportJobIDs.isEmpty,
+              !cloudTranscriptionHistoryCoordinator.hasActiveWork,
+              meetingSummaryGeneratingNoteIDs.isEmpty,
+              activeRecordingID == nil,
+              activeSegmentedJournalController == nil,
+              pendingRecordingJournalFinalizationCount == 0,
+              pendingRecordingStartCount == 0,
+              pendingAudioOnlyStopIDs.isEmpty else {
+            errorMessage = localizedCatalogString(
+                "Finish the current recording or transcription before archiving history."
+            )
+            return false
+        }
+
+        do {
+            try pipelineHistoryStore.detachForHistoryArchive()
+        } catch {
+            errorMessage = historyUnavailableMessage
+            return false
+        }
+
+        let storageRoot = Self.appStorageRootDirectory()
+        let makeStore = Self.pipelineHistoryStoreAtURLFactory
+        let appStateReference = WeakAppStateReference(self)
+        isHistoryArchiveTransitioning = true
+        historyArchiveSafety = .transitioning
+        Task.detached(priority: .userInitiated) {
+            do {
+                let result = try HistoryArchiveTransition(
+                    makeStore: makeStore
+                ).archiveAndCreateFreshHistory(at: storageRoot)
+                await MainActor.run {
+                    appStateReference.value?.completeHistoryArchiveTransition(
+                        result,
+                        storageRoot: storageRoot
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    appStateReference.value?.completeHistoryArchiveTransitionFailure(
+                        at: storageRoot
+                    )
+                }
+            }
+        }
+        return true
+    }
+
+    @MainActor
+    private func completeHistoryArchiveTransition(
+        _ result: HistoryArchiveTransitionResult,
+        storageRoot: URL
+    ) {
+        let activeStore = Self.pipelineHistoryStoreAtURLFactory(
+            storageRoot.appendingPathComponent("PipelineHistory.sqlite")
+        )
+        guard activeStore.availability == .ready,
+              activeStore.durability == .durable,
+              activeStore.verifyHistoryReadable() else {
+            completeHistoryArchiveTransitionFailure(at: storageRoot)
+            return
+        }
+        pipelineHistoryStore = activeStore
+        recordingJournalStore = Self.makeRecordingJournalStore()
+        cloudTranscriptionJobStore = Self.makeCloudTranscriptionJobStore()
+        pipelineHistory = []
+        retryingItemIDs = []
+        pendingAudioImportJobIDs = []
+        cloudTranscriptionProgressByHistoryID = [:]
+        meetingSummaryGeneratingNoteIDs = []
+        meetingSummaryPendingRevealNoteIDs = []
+        forgetAllWarningBannerState()
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        isHistoryArchiveTransitioning = false
+        synchronizeHistoryPersistenceState()
+    }
+
+    @MainActor
+    private func completeHistoryArchiveTransitionFailure(at storageRoot: URL) {
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        isHistoryArchiveTransitioning = false
+        synchronizeHistoryPersistenceState()
+        errorMessage = historyUnavailableMessage
     }
 
     @MainActor
@@ -6469,9 +6615,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let noteID = UUID()
         let startedAt = Date()
         let importContextSummary = AudioImportOptions.importContextSummary(for: fileURL.lastPathComponent)
+        pendingAudioImportJobIDs.insert(jobID)
 
         Task { [weak self] in
             guard let savedAudioFile = await Self.saveSecurityScopedAudioFileOffMain(from: fileURL) else {
+                self?.pendingAudioImportJobIDs.remove(jobID)
                 self?.errorMessage = localizedCatalogString("Unable to save the audio file. Check disk space or file permissions and try again.")
                 return
             }
@@ -6517,6 +6665,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     cleanupDeletedPipelineHistoryAssets(removedAssets)
                 }
             } catch {
+                self.pendingAudioImportJobIDs.remove(jobID)
                 Self.deleteAudioFile(savedAudioFile.fileName)
                 let issue = self.userIssue(for: error)
                 self.errorMessage = issue.record.presentation().compactMessage
@@ -6533,6 +6682,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 recordingEndedAt: nil,
                 isImportedAudio: true
             )
+            self.pendingAudioImportJobIDs.remove(jobID)
             self.updateTranscriptionJob(jobID) {
                 $0.liveNoteID = noteID
                 $0.audioFileName = savedAudioFile.fileName
@@ -8119,8 +8269,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let scheduledManualCommandInvocation = pendingManualCommandInvocation
         cancelPendingShortcutStart()
 
+        pendingRecordingStartCount += 1
         Task { [weak self] in
             guard let self else { return }
+            defer { self.pendingRecordingStartCount -= 1 }
             let manualCommandRequested = scheduledSelectionSnapshot != nil
                 ? scheduledManualCommandInvocation
                 : hotkeyManager.currentPressedModifiers.contains(commandModeManualModifier.shortcutModifier)
@@ -8134,10 +8286,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 activeRecordingCalendarSnapshot = nil
                 return
             }
+            guard requireAvailableHistoryForMutation() else {
+                activeRecordingCalendarSnapshot = nil
+                return
+            }
             guard let audioSelection = await accessibleCurrentRecordingAudioSelection() else {
                 if !isAwaitingMicrophonePermission {
                     activeRecordingCalendarSnapshot = nil
                 }
+                return
+            }
+            guard requireAvailableHistoryForMutation() else {
+                activeRecordingCalendarSnapshot = nil
                 return
             }
             os_log(.info, log: recordingLog, "audio input access check passed: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
@@ -8426,18 +8586,30 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     strongSelf.isAwaitingMicrophonePermission = false
                     strongSelf.restartHotkeyMonitoring()
 
-                    guard let pendingContext else { return }
+                    guard let pendingContext else {
+                        strongSelf.pendingRecordingStartCount -= 1
+                        return
+                    }
                     if granted {
                         strongSelf.errorMessage = nil
                         if pendingContext.triggerMode == .toggle {
                             Task { @MainActor [weak strongSelf] in
                                 guard let strongSelf else { return }
+                                defer { strongSelf.pendingRecordingStartCount -= 1 }
                                 guard await strongSelf.prepareRecordingStart(
                                     triggerMode: .toggle,
                                     selectionSnapshot: pendingContext.selectionSnapshot,
                                     manualCommandRequested: pendingContext.manualCommandRequested
                                 ) else { return }
+                                guard strongSelf.requireAvailableHistoryForMutation() else {
+                                    strongSelf.activeRecordingCalendarSnapshot = nil
+                                    return
+                                }
                                 guard let audioSelection = await strongSelf.accessibleCurrentRecordingAudioSelection() else { return }
+                                guard strongSelf.requireAvailableHistoryForMutation() else {
+                                    strongSelf.activeRecordingCalendarSnapshot = nil
+                                    return
+                                }
                                 strongSelf.shortcutSessionController.beginManual(mode: .toggle)
                                 if AudioInputDevice.isMicrophoneOnly(audioSelection.inputID) {
                                     strongSelf.applyAudioInterruptionIfNeeded()
@@ -8448,6 +8620,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                                 )
                             }
                         } else {
+                            strongSelf.pendingRecordingStartCount -= 1
                             strongSelf.currentSessionIntent = .dictation
                             strongSelf.statusText = localizedCatalogString("Microphone access granted. Press and hold again to record.")
                             strongSelf.scheduleReadyStatusReset(
@@ -8456,6 +8629,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             )
                         }
                     } else {
+                        strongSelf.pendingRecordingStartCount -= 1
                         strongSelf.activeRecordingCalendarSnapshot = nil
                         strongSelf.errorMessage = localizedCatalogString("Microphone permission denied. Grant access in System Settings > Privacy & Security > Microphone.")
                         strongSelf.statusText = localizedCatalogString("No Microphone")
@@ -8484,6 +8658,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         selectionSnapshot: AppSelectionSnapshot?,
         manualCommandRequested: Bool?
     ) {
+        pendingRecordingStartCount += 1
         isAwaitingMicrophonePermission = true
         pendingMicrophonePermissionContext = PendingRecordingPermissionContext(
             triggerMode: triggerMode,
