@@ -11,7 +11,16 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             contentsOfFile: "Sources/AppleSpeechLiveTranscriber.swift",
             encoding: .utf8
         )
+        let finalizationWorkSource = try String(
+            contentsOfFile: "Sources/RecordingJournalFinalizationWork.swift",
+            encoding: .utf8
+        )
 
+        precondition(finalizationWorkSource.contains(
+            "final class RecordingJournalFinalizationWork: @unchecked Sendable"
+        ))
+        precondition(finalizationWorkSource.contains("private let controller: SegmentedRecordingJournalController"))
+        precondition(finalizationWorkSource.contains("private let store: RecordingJournalStore"))
         precondition(source.contains("private var recordingJournalStore: RecordingJournalStore"))
         precondition(source.contains("private var activeSegmentedJournalController: SegmentedRecordingJournalController?"))
         precondition(source.contains("private var activeRecordingID: UUID?"))
@@ -156,16 +165,14 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             named: "finishRecordingAfterJournalPersistenceFailure",
             in: source
         )
-        precondition(finishFailureBody.contains("recoverRecordingAfterJournalPersistenceFailure("))
+        precondition(finishFailureBody.contains("RecordingJournalFinalizationWork("))
+        precondition(finishFailureBody.contains("recoverAfterPersistenceFailure()"))
         precondition(finishFailureBody.contains("controller.closeAfterPersistenceFailure()") == false)
         precondition(finishFailureBody.contains("SegmentedRecordingArtifactFinalizer(") == false)
         precondition(finishFailureBody.contains("completeRecordingStorageFailureRecovery("))
-        let coreFailureRecoveryBody = try functionBody(
-            named: "recoverRecordingAfterJournalPersistenceFailure",
-            in: source
-        )
-        precondition(coreFailureRecoveryBody.contains("controller.closeAfterPersistenceFailure()"))
-        precondition(coreFailureRecoveryBody.contains("SegmentedRecordingArtifactFinalizer("))
+        precondition(finalizationWorkSource.contains("func recoverAfterPersistenceFailure()"))
+        precondition(finalizationWorkSource.contains("controller.closeAfterPersistenceFailure()"))
+        precondition(finalizationWorkSource.contains("SegmentedRecordingArtifactFinalizer("))
 
         let completeFailureBody = try functionBody(
             named: "completeRecordingStorageFailureRecovery",
@@ -260,12 +267,13 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             in: source
         )
         precondition(finishBody.contains("recordingJournalFinalizationQueue.async"))
-        precondition(finishBody.contains("controller.stopAndClose()"))
-        precondition(finishBody.contains("SegmentedRecordingArtifactFinalizer("))
+        precondition(finishBody.contains("RecordingJournalFinalizationWork("))
+        precondition(finishBody.contains("finalizeStoppedRecording()"))
         precondition(finishBody.contains("case .complete:"))
         precondition(finishBody.contains("case .partial:"))
-        precondition(finishBody.contains("controller.terminalPersistenceFailure"))
-        precondition(finishBody.contains("recoverRecordingAfterJournalPersistenceFailure("))
+        precondition(finishBody.contains("hasTerminalPersistenceFailure"))
+        precondition(finishBody.contains("recoverAfterPersistenceFailure()"))
+        precondition(finalizationWorkSource.contains("func finalizeStoppedRecording()"))
         precondition(finishBody.contains(".recoveredWithoutTranscription"))
         precondition(!finishBody.contains("temporaryCombinedFallback"))
 

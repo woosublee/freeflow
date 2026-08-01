@@ -5519,13 +5519,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
         for url in temporaryURLs {
             try? FileManager.default.removeItem(at: url)
         }
-        let journalStore = recordingJournalStore
+        activeSegmentedJournalController = nil
+        activeRecordingID = nil
+        let finalizationWork = RecordingJournalFinalizationWork(
+            controller: controller,
+            store: recordingJournalStore
+        )
         pendingRecordingJournalFinalizationCount += 1
         recordingJournalFinalizationQueue.async {
-            let result = self.recoverRecordingAfterJournalPersistenceFailure(
-                controller: controller,
-                store: journalStore
-            )
+            let result = finalizationWork.recoverAfterPersistenceFailure()
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.pendingRecordingJournalFinalizationCount -= 1
@@ -5534,31 +5536,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     sourceFailure: sourceFailure
                 )
             }
-        }
-    }
-
-    private func recoverRecordingAfterJournalPersistenceFailure(
-        controller: SegmentedRecordingJournalController,
-        store: RecordingJournalStore
-    ) -> Result<RecoveredRecordingArtifact, Error> {
-        do {
-            _ = try controller.closeAfterPersistenceFailure()
-            let artifact = try SegmentedRecordingArtifactFinalizer(
-                store: store,
-                mixdownService: AudioMixdownService()
-            ).finalizeAndPromote(recordingID: controller.recordingID)
-            let manifest = try store.loadManifest(
-                recordingID: controller.recordingID
-            )
-            return .success(RecoveredRecordingArtifact(
-                recordingID: artifact.recordingID,
-                audioURL: artifact.destinationURL,
-                promotion: artifact.promotion,
-                manifest: manifest,
-                mode: artifact.mode
-            ))
-        } catch {
-            return .failure(error)
         }
     }
 
@@ -5715,52 +5692,47 @@ final class AppState: ObservableObject, @unchecked Sendable {
         activeRecordingID = nil
         activeInputSwitchToken = nil
         isActiveInputSwitchPhysicalStopInProgress = false
-        let journalStore = recordingJournalStore
+        let finalizationWork = RecordingJournalFinalizationWork(
+            controller: controller,
+            store: recordingJournalStore
+        )
         pendingRecordingJournalFinalizationCount += 1
         recordingJournalFinalizationQueue.async {
             do {
-                try controller.stopAndClose()
-                let artifact = try SegmentedRecordingArtifactFinalizer(
-                    store: journalStore,
-                    mixdownService: AudioMixdownService()
-                ).finalizeAndPromote(recordingID: controller.recordingID)
-                let promotedManifest = try journalStore.loadManifest(
-                    recordingID: artifact.recordingID
-                )
-                DispatchQueue.main.async {
+                let finalized = try finalizationWork.finalizeStoppedRecording()
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
                     self.pendingRecordingJournalFinalizationCount -= 1
-                    for url in temporaryURLs where url.path != artifact.destinationURL.path {
+                    for url in temporaryURLs where url.path != finalized.artifact.destinationURL.path {
                         try? FileManager.default.removeItem(at: url)
                     }
-                    switch artifact.mode {
+                    switch finalized.artifact.mode {
                     case .complete:
                         completion(.transcribable(
-                            fileURL: artifact.destinationURL,
+                            fileURL: finalized.artifact.destinationURL,
                             recoverableJournalID: nil
                         ))
                     case .partial:
                         let recovered = RecoveredRecordingArtifact(
-                            recordingID: artifact.recordingID,
-                            audioURL: artifact.destinationURL,
-                            promotion: artifact.promotion,
-                            manifest: promotedManifest,
+                            recordingID: finalized.artifact.recordingID,
+                            audioURL: finalized.artifact.destinationURL,
+                            promotion: finalized.artifact.promotion,
+                            manifest: finalized.manifest,
                             mode: .partial
                         )
                         completion(.recoveredWithoutTranscription(recovered))
                     case .microphoneOnly, .systemAudioOnly:
                         completion(.preservedForRecovery(
-                            recordingID: controller.recordingID,
+                            recordingID: finalizationWork.recordingID,
                             message: "Unexpected segmented recovery mode"
                         ))
                     }
                 }
             } catch {
-                if controller.terminalPersistenceFailure != nil {
-                    let result = self.recoverRecordingAfterJournalPersistenceFailure(
-                        controller: controller,
-                        store: journalStore
-                    )
-                    DispatchQueue.main.async {
+                if finalizationWork.hasTerminalPersistenceFailure {
+                    let result = finalizationWork.recoverAfterPersistenceFailure()
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
                         self.pendingRecordingJournalFinalizationCount -= 1
                         for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
                         switch result {
@@ -5768,7 +5740,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             completion(.recoveredWithoutTranscription(recovered))
                         case .failure(let recoveryError):
                             completion(.preservedForRecovery(
-                                recordingID: controller.recordingID,
+                                recordingID: finalizationWork.recordingID,
                                 message: recoveryError.localizedDescription
                             ))
                         }
@@ -5781,12 +5753,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     "segmented journal finalization failed: %{public}@",
                     error.localizedDescription
                 )
-                try? controller.preserveForRecovery()
-                DispatchQueue.main.async {
+                try? finalizationWork.preserveForRecovery()
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
                     self.pendingRecordingJournalFinalizationCount -= 1
                     for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
                     completion(.preservedForRecovery(
-                        recordingID: controller.recordingID,
+                        recordingID: finalizationWork.recordingID,
                         message: error.localizedDescription
                     ))
                 }
