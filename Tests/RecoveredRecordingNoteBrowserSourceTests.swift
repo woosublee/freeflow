@@ -47,6 +47,7 @@ struct RecoveredRecordingNoteBrowserSourceTests {
         try testAudioOnlyNoteUsesDedicatedNormalState()
         try testInputPickerSwitchesActiveRecordingInput(source)
         try testInputMenuCatcherDisablesAndLocalizesSources(source)
+        try testRecoveryImportPreservesSelectedListPosition(source)
 
         print("RecoveredRecordingNoteBrowserSourceTests passed")
     }
@@ -179,6 +180,35 @@ struct RecoveredRecordingNoteBrowserSourceTests {
         precondition(!audioOnlyStatus.contains(".fill(Color.blue)"))
     }
 
+    private static func testRecoveryImportPreservesSelectedListPosition(
+        _ source: String
+    ) throws {
+        try expect(
+            source.contains("private struct RecoveryScrollRestoreRequest")
+                && source.contains("appState.isHistoryRecoveryOperationInProgress")
+                && source.contains("ScrollViewReader")
+                && source.contains(".id(item.id)")
+                && source.contains("proxy.scrollTo(request.itemID, anchor: .center)"),
+            "Recovery imports preserve the selected note as the list scroll anchor"
+        )
+        try expect(
+            source.contains("if isRecoveryImport {")
+                && source.contains("scheduleRecoveryScrollRestore(for: current)"),
+            "Recovery imports keep an existing selected note instead of selecting the newest imported note"
+        )
+        try expect(
+            source.contains("filteredHistory.contains(where: { $0.id == request.itemID })"),
+            "scroll restoration leaves an active search filter unchanged when it hides the selected note"
+        )
+    }
+
+    private static func expect(
+        _ condition: @autoclosure () -> Bool,
+        _ message: String
+    ) throws {
+        guard condition() else { throw NoteBrowserSourceTestFailure(message) }
+    }
+
     private static func block(
         _ source: String,
         from startMarker: String,
@@ -192,5 +222,13 @@ struct RecoveredRecordingNoteBrowserSourceTests {
             preconditionFailure("Expected source block from \(startMarker) to \(endMarker)")
         }
         return String(source[start.lowerBound..<end.lowerBound])
+    }
+}
+
+private struct NoteBrowserSourceTestFailure: Error, CustomStringConvertible {
+    let description: String
+
+    init(_ description: String) {
+        self.description = description
     }
 }

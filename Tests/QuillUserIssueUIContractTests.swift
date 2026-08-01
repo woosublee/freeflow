@@ -238,62 +238,74 @@ struct QuillUserIssueUIContractTests {
             "AppState publishes an explicit history-unavailable state"
         )
         try expect(
-            appState.contains("func archiveOldHistoryAndStartFresh() -> Bool")
-                && appState.contains("func openHistoryRecoveryFolder()"),
-            "AppState exposes explicit archive and recovery-folder actions"
-        )
-        try expect(
-            appState.contains(".historyArchived"),
-            "AppState publishes a persistent archived-history notice"
+            appState.contains("func archiveOldHistoryAndStartFresh(")
+                && appState.contains("func openHistoryRecoverySettings()")
+                && appState.contains("@Published private(set) var historyRecoverySnapshots"),
+            "AppState exposes archive post-actions and recovery settings state"
         )
         for source in [noteBrowser, settings, menuBar] {
             try expect(
                 source.contains("appState.isHistoryUnavailable"),
-                "every history surface renders the protected state"
+                "every history surface retains the protected state"
             )
             try expect(
                 source.contains("HistoryUnavailableRecoveryActions"),
-                "every protected history surface uses shared archive actions"
-            )
-            try expect(
-                source.contains("HistoryArchiveNoticeView"),
-                "every history surface renders the persistent archive notice"
+                "every protected history surface uses shared recovery actions"
             )
         }
         try expect(
-            menuBar.contains(".disabled(appState.isTranscribing || appState.isHistoryUnavailable"),
-            "Menu Bar disables recording while history is unavailable"
+            !noteBrowser.contains("HistoryArchiveNoticeView")
+                && !settings.contains("HistoryArchiveNoticeView"),
+            "Note Browser and Run Log leave archive management to Settings Recovery"
         )
-        for source in [noteBrowser, settings] {
-            try expect(
-                source.contains("if appState.historyArchiveSafety == .unresolvedArchive {\n                        HistoryArchiveNoticeView()"),
-                "archive notice padding renders only when an archive notice is visible"
-            )
-        }
+        try expect(
+            settings.contains("HistoryRecoverySettingsView()")
+                && settings.contains("tab != .recovery || !appState.historyRecoverySnapshots.isEmpty"),
+            "Settings exposes Recovery only when a snapshot exists"
+        )
+        try expect(
+            menuBar.contains("Button(\"Recovery…\")")
+                && menuBar.contains("appState.openHistoryRecoverySettings()"),
+            "Menu Bar routes published snapshots to Settings Recovery"
+        )
+        try expect(
+            menuBar.contains("appState.isHistoryRecoveryOperationInProgress")
+                && !menuBar.contains("historyRecoveryInspectionSnapshotID"),
+            "Menu Bar blocks recording only while recovery changes active history"
+        )
         try expect(
             noteBrowser.contains("if appState.isHistoryUnavailable"),
-            "Note Browser checks protected state before normal empty history"
+            "Note Browser checks protected state before normal history"
         )
         for marker in [
-            "Archive Old History and Start Fresh…",
+            "Recover Earlier History…",
+            "Start Fresh…",
+            "Archive and Open Recovery",
             "Archive and Start Fresh",
             "Open Data Folder",
-            "Open Recovery Folder",
             ".confirmationDialog(",
             "role: .destructive",
-            "appState.archiveOldHistoryAndStartFresh()"
+            "postAction: .openRecovery",
+            "postAction: .startFresh",
+            "struct HistoryRecoverySettingsView",
+            "ensureHistoryRecoveryInspection()",
+            "Unable to Inspect",
+            "Retry Inspection",
+            "Import %lld records…",
+            "Cancel Scheduled Deletion",
+            "Delete Recovery Snapshot…"
         ] {
-            try expect(historyRecovery.contains(marker), "shared recovery UI contains \(marker)")
+            try expect(historyRecovery.contains(marker), "recovery UI contains \(marker)")
         }
         try expect(
-            !historyRecovery.contains("Button(\"Restore")
-                && !historyRecovery.contains("Button(\"Import")
-                && !historyRecovery.contains("Button(\"Merge"),
-            "#242 recovery UI does not expose #243 restore, import, or merge actions"
+            !historyRecovery.contains("Check Recovery Contents"),
+            "Recovery automatically inspects snapshots instead of requiring a manual preflight button"
         )
         try expect(
-            !historyRecovery.contains("backupName") && !historyRecovery.contains("History Recovery"),
-            "recovery UI does not expose internal backup names or legacy paths"
+            !historyRecovery.contains("HistoryArchiveNoticeView")
+                && !historyRecovery.contains("backupName")
+                && !historyRecovery.contains("History Recovery"),
+            "recovery UI omits archive notices and internal paths"
         )
     }
 

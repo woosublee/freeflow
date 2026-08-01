@@ -359,7 +359,10 @@ struct SettingsView: View {
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
-                ForEach(SettingsTab.orderedCases.filter { ($0 != .debug && $0 != .runLog) || AppBuild.isDevBundle }) { tab in
+                ForEach(SettingsTab.orderedCases.filter { tab in
+                    ((tab != .debug && tab != .runLog) || AppBuild.isDevBundle)
+                        && (tab != .recovery || !appState.historyRecoverySnapshots.isEmpty)
+                }) { tab in
                     Button {
                         appState.selectedSettingsTab = tab
                     } label: {
@@ -399,6 +402,8 @@ struct SettingsView: View {
                     InputSettingsView()
                 case .calendar:
                     CalendarSettingsView()
+                case .recovery:
+                    HistoryRecoverySettingsView()
                 case .about:
                     AboutSettingsView()
                 case .runLog where AppBuild.isDevBundle:
@@ -4230,11 +4235,6 @@ struct RunLogView: View {
                 .frame(maxWidth: .infinity)
             } else {
                 VStack(spacing: 0) {
-                    if appState.historyArchiveSafety == .unresolvedArchive {
-                        HistoryArchiveNoticeView()
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 12)
-                    }
                     if appState.pipelineHistory.isEmpty {
                         VStack {
                             Spacer()

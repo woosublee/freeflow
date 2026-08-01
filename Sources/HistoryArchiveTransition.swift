@@ -90,7 +90,10 @@ final class HistoryArchiveTransition {
     func archiveAndCreateFreshHistory(
         at storageRoot: URL
     ) throws -> HistoryArchiveTransitionResult {
-        guard inspectRecovery(at: storageRoot) == .normal else {
+        switch inspectRecovery(at: storageRoot) {
+        case .normal, .unresolvedArchive:
+            break
+        case .unresolvedInterruptedTransaction, .transitioning:
             throw HistoryArchiveTransitionError.recoveryAlreadyRequiresAttention
         }
 
@@ -230,8 +233,10 @@ final class HistoryArchiveTransition {
             )
             var hasPublishedSnapshot = false
             for entry in entries {
-                let values = try entry.resourceValues(forKeys: [.isDirectoryKey])
-                guard values.isDirectory == true else { continue }
+                let values = try entry.resourceValues(
+                    forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+                )
+                guard values.isDirectory == true || values.isSymbolicLink == true else { continue }
                 if entry.lastPathComponent.hasPrefix(Self.snapshotPrefix) {
                     guard isPublishedSnapshot(entry) else {
                         return .unresolvedInterruptedTransaction
@@ -473,10 +478,57 @@ final class HistoryArchiveTransition {
         guard fileManager.fileExists(atPath: manifestURL.path),
               fileManager.fileExists(atPath: payloadURL.path),
               let data = try? Data(contentsOf: manifestURL),
-              let manifest = try? JSONDecoder().decode(HistoryArchiveSnapshot.self, from: data) else {
+              let manifest = try? JSONDecoder().decode(HistoryArchiveSnapshot.self, from: data),
+              manifest.schemaVersion == HistoryArchiveSnapshot.currentSchemaVersion,
+              directory.lastPathComponent.hasSuffix("-\(manifest.id.uuidString.lowercased())"),
+              !manifest.components.isEmpty,
+              !containsSymbolicLink(at: directory),
+              !containsSymbolicLink(at: payloadURL) else {
             return false
         }
-        return manifest.schemaVersion == HistoryArchiveSnapshot.currentSchemaVersion
+
+        var identifiers = Set<HistoryArchiveSnapshotComponent.Identifier>()
+        var relativePaths = Set<String>()
+        var includesSQLite = false
+        for component in manifest.components {
+            guard identifiers.insert(component.identifier).inserted,
+                  relativePaths.insert(component.relativePath).inserted,
+                  component.relativePath == Self.relativePath(for: component.identifier) else {
+                return false
+            }
+            let componentURL = payloadURL.appendingPathComponent(component.relativePath)
+            let isDirectory = (try? componentURL.resourceValues(forKeys: [.isDirectoryKey]))?
+                .isDirectory ?? false
+            guard fileManager.fileExists(atPath: componentURL.path),
+                  isDirectory == component.isDirectory,
+                  !containsSymbolicLink(at: componentURL),
+                  Self.byteCount(at: componentURL, fileManager: fileManager) == component.byteCount else {
+                return false
+            }
+            includesSQLite = includesSQLite || component.identifier == .sqlite
+        }
+        return includesSQLite
+    }
+
+    private func containsSymbolicLink(at url: URL) -> Bool {
+        if (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+            return true
+        }
+        let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        guard isDirectory,
+              let enumerator = fileManager.enumerator(
+                at: url,
+                includingPropertiesForKeys: [.isSymbolicLinkKey],
+                options: []
+              ) else {
+            return false
+        }
+        for case let entry as URL in enumerator {
+            if (try? entry.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+                return true
+            }
+        }
+        return false
     }
 
     private static func byteCount(at url: URL, fileManager: FileManager) -> UInt64 {

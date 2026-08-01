@@ -344,8 +344,8 @@ struct LocalizationResourceTests {
         process.arguments = [
             "xcstringstool", "extract", "--SwiftUI", "--modern-localizable-strings",
             "--output-format", "xcstrings", "-o", temporaryDirectory.path,
-            "Sources/SetupView.swift", "Sources/MenuBarView.swift", "Sources/App.swift",
-            "Sources/AppDelegate.swift", "Sources/SetupFlow.swift"
+            "Sources/SetupView.swift", "Sources/MenuBarView.swift", "Sources/HistoryRecoveryView.swift",
+            "Sources/App.swift", "Sources/AppDelegate.swift", "Sources/SetupFlow.swift"
         ]
         try process.run()
         process.waitUntilExit()
@@ -695,6 +695,7 @@ struct LocalizationResourceTests {
             "Sources/SetupView.swift", "Sources/MenuBarView.swift", "Sources/ShortcutComponents.swift",
             "Sources/App.swift",
             "Sources/AppDelegate.swift", "Sources/SetupFlow.swift", "Sources/SettingsView.swift",
+            "Sources/HistoryRecoveryView.swift", "Sources/CalendarIntegrationModels.swift",
             "Sources/ModelDropdownView.swift", "Sources/AppState.swift", "Sources/AudioImportOptions.swift",
             "Sources/LocalAIModel.swift", "Sources/LocalAIModelRowView.swift",
             "Sources/CalendarRecordingReminderScheduler.swift", "Sources/LocalizedUserMessage.swift",

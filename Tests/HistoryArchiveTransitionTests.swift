@@ -6,6 +6,10 @@ struct HistoryArchiveTransitionTests {
     static func main() throws {
         try testArchiveMovesAnEntireGenerationAndCreatesAnEmptyDurableStore()
         try testArchiveAcceptsMissingSQLiteCompanions()
+        try testArchiveAllowsAnotherGenerationWhenSnapshotIsPublished()
+        try testInvalidPublishedSnapshotBlocksAnotherArchive()
+        try testSymbolicLinkPublishedSnapshotBlocksAnotherArchive()
+        try testHiddenSymbolicLinkInPublishedPayloadBlocksAnotherArchive()
         try testFreshStoreProbeFailureRollsBackTheOriginalGeneration()
         try testFirstMoveFailurePreservesTheOriginalSQLite()
         try testMoveFailureRollsBackEveryMovedComponent()
@@ -160,6 +164,143 @@ struct HistoryArchiveTransitionTests {
             !FileManager.default.fileExists(atPath: payloadURL
                 .appendingPathComponent("PipelineHistory.sqlite-shm").path),
             "archive does not fabricate a missing SHM payload"
+        )
+    }
+
+    private static func testArchiveAllowsAnotherGenerationWhenSnapshotIsPublished() throws {
+        let fixture = try HistoryArchiveFixture()
+        defer { fixture.remove() }
+        let firstID = UUID(uuidString: "53A097CE-5A71-4A64-9B9E-A5B9B93DF9DE")!
+        let secondID = UUID(uuidString: "730D385C-4EF4-4541-868B-18CA6D7B6F87")!
+        var identifiers = [firstID, secondID]
+        let transition = HistoryArchiveTransition(
+            makeID: { identifiers.removeFirst() }
+        )
+
+        _ = try transition.archiveAndCreateFreshHistory(at: fixture.rootURL)
+        let second = try transition.archiveAndCreateFreshHistory(at: fixture.rootURL)
+        let recoveryURL = fixture.rootURL.appendingPathComponent("Recovery", isDirectory: true)
+        let snapshots = try FileManager.default.contentsOfDirectory(
+            at: recoveryURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ).filter { $0.lastPathComponent.hasPrefix("history-") }
+
+        try expect(second.snapshot.id == secondID, "second archive reports its own snapshot")
+        try expect(snapshots.count == 2, "a published archive does not block a later generation archive")
+    }
+
+    private static func testInvalidPublishedSnapshotBlocksAnotherArchive() throws {
+        let fixture = try HistoryArchiveFixture()
+        defer { fixture.remove() }
+        let result = try HistoryArchiveTransition().archiveAndCreateFreshHistory(at: fixture.rootURL)
+        let recoveryURL = fixture.rootURL.appendingPathComponent("Recovery", isDirectory: true)
+        guard let snapshotURL = try FileManager.default.contentsOfDirectory(
+            at: recoveryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).first(where: { $0.lastPathComponent.hasSuffix(result.snapshot.id.uuidString.lowercased()) }) else {
+            throw HistoryArchiveTestFailure("missing published snapshot")
+        }
+        let manifestURL = snapshotURL.appendingPathComponent("manifest.json")
+        let manifest = try JSONDecoder().decode(
+            HistoryArchiveSnapshot.self,
+            from: Data(contentsOf: manifestURL)
+        )
+        let invalidManifest = HistoryArchiveSnapshot(
+            schemaVersion: manifest.schemaVersion,
+            id: manifest.id,
+            archivedAt: manifest.archivedAt,
+            components: manifest.components.enumerated().map { index, component in
+                HistoryArchiveSnapshotComponent(
+                    identifier: component.identifier,
+                    relativePath: component.relativePath,
+                    byteCount: component.byteCount + (index == 0 ? 1 : 0),
+                    isDirectory: component.isDirectory
+                )
+            }
+        )
+        try JSONEncoder().encode(invalidManifest).write(to: manifestURL)
+
+        try expect(
+            HistoryArchiveTransition.inspect(at: fixture.rootURL) == .unresolvedInterruptedTransaction,
+            "a byte-mismatched published snapshot remains protected instead of allowing another archive"
+        )
+    }
+
+    private static func testSymbolicLinkPublishedSnapshotBlocksAnotherArchive() throws {
+        let fixture = try HistoryArchiveFixture()
+        defer { fixture.remove() }
+        let result = try HistoryArchiveTransition().archiveAndCreateFreshHistory(at: fixture.rootURL)
+        let recoveryURL = fixture.rootURL.appendingPathComponent("Recovery", isDirectory: true)
+        guard let snapshotURL = try FileManager.default.contentsOfDirectory(
+            at: recoveryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).first(where: { $0.lastPathComponent.hasSuffix(result.snapshot.id.uuidString.lowercased()) }) else {
+            throw HistoryArchiveTestFailure("missing published snapshot")
+        }
+        let externalSnapshotURL = fixture.rootURL.appendingPathComponent("external-snapshot")
+        try FileManager.default.moveItem(at: snapshotURL, to: externalSnapshotURL)
+        try FileManager.default.createSymbolicLink(
+            at: snapshotURL,
+            withDestinationURL: externalSnapshotURL
+        )
+
+        try expect(
+            HistoryArchiveTransition.inspect(at: fixture.rootURL) == .unresolvedInterruptedTransaction,
+            "a symbolic-link published snapshot remains protected instead of allowing another archive"
+        )
+    }
+
+    private static func testHiddenSymbolicLinkInPublishedPayloadBlocksAnotherArchive() throws {
+        let fixture = try HistoryArchiveFixture()
+        defer { fixture.remove() }
+        let result = try HistoryArchiveTransition().archiveAndCreateFreshHistory(at: fixture.rootURL)
+        let recoveryURL = fixture.rootURL.appendingPathComponent("Recovery", isDirectory: true)
+        guard let snapshotURL = try FileManager.default.contentsOfDirectory(
+            at: recoveryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).first(where: { $0.lastPathComponent.hasSuffix(result.snapshot.id.uuidString.lowercased()) }) else {
+            throw HistoryArchiveTestFailure("missing published snapshot")
+        }
+        let manifestURL = snapshotURL.appendingPathComponent("manifest.json")
+        let payloadURL = snapshotURL.appendingPathComponent("payload", isDirectory: true)
+        let audioURL = payloadURL.appendingPathComponent("audio", isDirectory: true)
+        let outsideURL = fixture.rootURL.appendingPathComponent("outside.wav")
+        try Data("outside audio".utf8).write(to: outsideURL)
+        try FileManager.default.createSymbolicLink(
+            at: audioURL.appendingPathComponent(".archived-link.wav"),
+            withDestinationURL: outsideURL
+        )
+        let manifest = try JSONDecoder().decode(
+            HistoryArchiveSnapshot.self,
+            from: Data(contentsOf: manifestURL)
+        )
+        let invalidManifest = HistoryArchiveSnapshot(
+            schemaVersion: manifest.schemaVersion,
+            id: manifest.id,
+            archivedAt: manifest.archivedAt,
+            components: try manifest.components.map { component in
+                let byteCount = if component.identifier == .audio {
+                    try recursiveByteCount(at: audioURL)
+                } else {
+                    component.byteCount
+                }
+                return HistoryArchiveSnapshotComponent(
+                    identifier: component.identifier,
+                    relativePath: component.relativePath,
+                    byteCount: byteCount,
+                    isDirectory: component.isDirectory
+                )
+            }
+        )
+        try JSONEncoder().encode(invalidManifest).write(to: manifestURL)
+
+        try expect(
+            HistoryArchiveTransition.inspect(at: fixture.rootURL) == .unresolvedInterruptedTransaction,
+            "a hidden symbolic link in a published payload remains protected instead of allowing another archive"
         )
     }
 
@@ -477,6 +618,26 @@ struct HistoryArchiveTransitionTests {
             !recoveryEntries.contains(where: { $0.hasPrefix("history-") }),
             "probe failure never publishes a partial archive"
         )
+    }
+
+    private static func recursiveByteCount(at url: URL) throws -> UInt64 {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+        guard values.isDirectory == true else {
+            return UInt64(max(0, values.fileSize ?? 0))
+        }
+        guard let enumerator = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey]
+        ) else {
+            return 0
+        }
+        var total: UInt64 = 0
+        for case let childURL as URL in enumerator {
+            let childValues = try childURL.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+            guard childValues.isDirectory != true else { continue }
+            total += UInt64(max(0, childValues.fileSize ?? 0))
+        }
+        return total
     }
 
     private static func expect(

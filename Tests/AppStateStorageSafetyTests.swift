@@ -7,6 +7,8 @@ struct AppStateStorageSafetyTests {
         try await verifiesHistoryRowsLostAfterSnapshotDoesNotSweep()
         try await verifiesUnavailableHistoryBlocksMutatingActions()
         try await verifiesExplicitArchiveCreatesFreshSeparatedHistory()
+        try await verifiesArchivedNoteImportsIntoFreshHistory()
+        try await verifiesRecoverySettingsAutomaticallyInspectsSnapshots()
         try await verifiesInterruptedArchiveKeepsHistoryProtected()
         try await verifiesMissingSnapshotWithUnreferencedAudioDoesNotSweep()
         try await verifiesMatchingHistorySnapshotSweepsOrphansAtStartup()
@@ -170,7 +172,7 @@ struct AppStateStorageSafetyTests {
 
             let appState = await MainActor.run { AppState() }
             let archiveSucceeded = await MainActor.run {
-                appState.archiveOldHistoryAndStartFresh()
+                appState.archiveOldHistoryAndStartFresh(postAction: .openRecovery)
             }
 
             try expect(archiveSucceeded, "explicit archive is accepted from protection mode")
@@ -181,8 +183,12 @@ struct AppStateStorageSafetyTests {
                 "published archive keeps automatic cleanup in its safe state"
             )
             try expect(
-                appState.historyPersistenceWarning?.code == .historyArchived,
-                "published archive keeps a persistent recovery-folder notice"
+                appState.selectedSettingsTab == .recovery,
+                "recovery post-action opens the recovery Settings section after a verified archive"
+            )
+            try expect(
+                appState.historyPersistenceWarning == nil,
+                "published archive does not keep a duplicate normal-history warning"
             )
             try expect(appState.pipelineHistory.isEmpty, "fresh history starts with no old notes")
 
@@ -252,6 +258,190 @@ struct AppStateStorageSafetyTests {
             try expect(
                 relaunchedAppState.pipelineHistory.map(\.id) == [freshItem.id],
                 "published archive still loads the new active generation on restart"
+            )
+        }
+    }
+
+    private static func verifiesArchivedNoteImportsIntoFreshHistory() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
+            let storeURL = rootDirectory.appendingPathComponent("PipelineHistory.sqlite")
+            let audioURL = AppState.audioStorageDirectory().appendingPathComponent("source.wav")
+            let transcriptURL = AppState.transcriptStorageDirectory().appendingPathComponent("source.txt")
+            try Data("source audio".utf8).write(to: audioURL)
+            try Data("source transcript".utf8).write(to: transcriptURL)
+            let sourceItem = PipelineHistoryItem(
+                id: UUID(uuidString: "A3E4BA14-2F2E-4724-BFCF-1F8F1667E577")!,
+                timestamp: Date(timeIntervalSince1970: 1_754_010_203),
+                rawTranscript: "source transcript",
+                postProcessedTranscript: "source transcript",
+                postProcessingPrompt: nil,
+                contextSummary: "",
+                contextScreenshotDataURL: nil,
+                contextScreenshotStatus: "No screenshot",
+                postProcessingStatus: "succeeded",
+                debugStatus: "",
+                customVocabulary: "",
+                audioFileName: audioURL.lastPathComponent,
+                transcriptFileName: transcriptURL.lastPathComponent
+            )
+            let sourceStore = PipelineHistoryStore(storeURL: storeURL)
+            _ = try sourceStore.upsert(
+                sourceItem,
+                maxCount: Int.max,
+                requiresDurableStore: true
+            )
+            try sourceStore.detachForArchiveVerification()
+            let unavailableStore = PipelineHistoryStore(
+                storeURL: storeURL,
+                persistentStoreLoader: { _ in
+                    TestFailure("Injected unavailable history for import recovery")
+                }
+            )
+            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
+            AppState.pipelineHistoryStoreFactory = { unavailableStore }
+            defer {
+                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+            }
+
+            let appState = await MainActor.run { AppState() }
+            let archiveAccepted = await MainActor.run {
+                appState.archiveOldHistoryAndStartFresh()
+            }
+            try expect(archiveAccepted, "valid old history can enter the recovery archive flow")
+            try await waitForArchiveCompletion(appState)
+            let snapshotID = try await MainActor.run {
+                guard let snapshotID = appState.historyRecoverySnapshots.first?.id else {
+                    throw TestFailure("archive did not publish a recovery snapshot catalog entry")
+                }
+                return snapshotID
+            }
+            let importAccepted = await MainActor.run {
+                appState.importHistoryRecoverySnapshot(id: snapshotID)
+            }
+            try expect(importAccepted, "recovery import is accepted after the fresh history is ready")
+            try await waitForHistoryRecoveryCompletion(appState)
+
+            let importedItem = try await MainActor.run {
+                guard let item = appState.pipelineHistory.first(where: { $0.id == sourceItem.id }) else {
+                    throw TestFailure("recovery import did not restore the archived note")
+                }
+                return item
+            }
+            try expect(
+                importedItem.audioFileName != sourceItem.audioFileName
+                    && importedItem.transcriptFileName != sourceItem.transcriptFileName,
+                "AppState recovery import remaps active asset ownership"
+            )
+            let copiedAudioURL = AppState.audioStorageDirectory().appendingPathComponent(
+                try required(importedItem.audioFileName)
+            )
+            let copiedTranscriptURL = AppState.transcriptStorageDirectory().appendingPathComponent(
+                try required(importedItem.transcriptFileName)
+            )
+            let copiedAudio = try Data(contentsOf: copiedAudioURL)
+            let copiedTranscript = try Data(contentsOf: copiedTranscriptURL)
+            try expect(
+                copiedAudio == Data("source audio".utf8)
+                    && copiedTranscript == Data("source transcript".utf8),
+                "AppState recovery import copies archive assets to the fresh generation"
+            )
+            let recoveryCompleted = await MainActor.run {
+                appState.historyRecoverySnapshots.first?.state?.status == .completed
+            }
+            try expect(
+                recoveryCompleted,
+                "successful AppState import marks the archive complete for retention"
+            )
+            let cancellationAccepted = await MainActor.run {
+                appState.cancelHistoryRecoveryScheduledDeletion(id: snapshotID)
+            }
+            try expect(cancellationAccepted, "completed snapshot can cancel automatic deletion")
+            try await waitForHistoryRecoveryCompletion(appState)
+            let deletionCancelled = await MainActor.run {
+                appState.historyRecoverySnapshots.first?.scheduledDeletionAt == nil
+            }
+            try expect(deletionCancelled, "cancelled deletion remains visible in AppState")
+            let deletionAccepted = await MainActor.run {
+                appState.deleteHistoryRecoverySnapshot(id: snapshotID)
+            }
+            try expect(deletionAccepted, "explicit recovery snapshot deletion is accepted")
+            try await waitForHistoryRecoveryCompletion(appState)
+            let recoveryRemoved = await MainActor.run {
+                appState.historyRecoverySnapshots.isEmpty
+                    && appState.pipelineHistory.contains(where: { $0.id == sourceItem.id })
+            }
+            try expect(
+                recoveryRemoved,
+                "deleting a snapshot leaves the active imported history intact"
+            )
+        }
+    }
+
+    private static func verifiesRecoverySettingsAutomaticallyInspectsSnapshots() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
+            let storeURL = rootDirectory.appendingPathComponent("PipelineHistory.sqlite")
+            let sourceItem = PipelineHistoryItem(
+                id: UUID(uuidString: "4B5A73C8-59D4-4FDF-ABF7-2CD61094E3A8")!,
+                timestamp: Date(timeIntervalSince1970: 1_754_010_203),
+                rawTranscript: "automatic inspection source",
+                postProcessedTranscript: "automatic inspection source",
+                postProcessingPrompt: nil,
+                contextSummary: "",
+                contextScreenshotDataURL: nil,
+                contextScreenshotStatus: "No screenshot",
+                postProcessingStatus: "succeeded",
+                debugStatus: "",
+                customVocabulary: ""
+            )
+            let sourceStore = PipelineHistoryStore(storeURL: storeURL)
+            _ = try sourceStore.upsert(
+                sourceItem,
+                maxCount: Int.max,
+                requiresDurableStore: true
+            )
+            try sourceStore.detachForArchiveVerification()
+            let unavailableStore = PipelineHistoryStore(
+                storeURL: storeURL,
+                persistentStoreLoader: { _ in
+                    TestFailure("Injected unavailable history for automatic inspection")
+                }
+            )
+            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
+            AppState.pipelineHistoryStoreFactory = { unavailableStore }
+            defer {
+                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+            }
+
+            let appState = await MainActor.run { AppState() }
+            let archiveAccepted = await MainActor.run {
+                appState.archiveOldHistoryAndStartFresh(postAction: .openRecovery)
+            }
+            try expect(archiveAccepted, "automatic inspection fixture enters the archive recovery route")
+            try await waitForArchiveCompletion(appState)
+            let snapshotID = try await MainActor.run {
+                guard let snapshotID = appState.historyRecoverySnapshots.first?.id else {
+                    throw TestFailure("automatic inspection archive snapshot is missing")
+                }
+                return snapshotID
+            }
+            try await waitForHistoryRecoveryInspection(appState, snapshotID: snapshotID)
+
+            let inspection = try await MainActor.run {
+                guard let inspection = appState.historyRecoveryInspections[snapshotID] else {
+                    throw TestFailure("Recovery settings did not inspect the archive automatically")
+                }
+                return inspection
+            }
+            try expect(
+                inspection.readableRecordCount == 1 && inspection.importableRecordCount == 1,
+                "Recovery settings automatically show the archived record count"
+            )
+            let recoveryWriteIsIdle = await MainActor.run {
+                !appState.isHistoryRecoveryOperationInProgress
+            }
+            try expect(
+                recoveryWriteIsIdle,
+                "read-only automatic inspection never enters the active-history write gate"
             )
         }
     }
@@ -453,6 +643,36 @@ struct AppStateStorageSafetyTests {
         )
     }
 
+    private static func waitForHistoryRecoveryCompletion(_ appState: AppState) async throws {
+        let deadline = Date(timeIntervalSinceNow: 6)
+        while await MainActor.run(body: { appState.isHistoryRecoveryOperationInProgress }), Date() < deadline {
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        let isStillRecovering = await MainActor.run {
+            appState.isHistoryRecoveryOperationInProgress
+        }
+        try expect(
+            !isStillRecovering,
+            "history recovery operation completes within the test timeout"
+        )
+    }
+
+    private static func waitForHistoryRecoveryInspection(
+        _ appState: AppState,
+        snapshotID: UUID
+    ) async throws {
+        let deadline = Date(timeIntervalSinceNow: 6)
+        while Date() < deadline {
+            let isComplete = await MainActor.run {
+                appState.historyRecoveryInspectionSnapshotID == nil
+                    && appState.historyRecoveryInspections[snapshotID] != nil
+            }
+            if isComplete { return }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        throw TestFailure("automatic recovery inspection did not complete within the test timeout")
+    }
+
     private static func waitForFileRemoval(at fileURL: URL) async throws {
         let deadline = Date(timeIntervalSinceNow: 6)
         while FileManager.default.fileExists(atPath: fileURL.path), Date() < deadline {
@@ -472,6 +692,11 @@ struct AppStateStorageSafetyTests {
         guard result == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
+    }
+
+    private static func required<T>(_ value: T?) throws -> T {
+        guard let value else { throw TestFailure("missing required value") }
+        return value
     }
 
     private static func expect(

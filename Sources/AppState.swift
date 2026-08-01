@@ -11,6 +11,11 @@ import os.log
 private let recordingLog = OSLog(subsystem: "com.woosublee.quill", category: "Recording")
 private let calendarLog = OSLog(subsystem: "com.woosublee.quill", category: "Calendar")
 
+enum HistoryArchivePostAction: Sendable {
+    case startFresh
+    case openRecovery
+}
+
 extension AIProcessingFeature {
     var modelFeature: AIModelFeature {
         switch self {
@@ -2117,6 +2122,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published private(set) var historyPersistenceWarning: QuillUserIssueRecord?
     @Published private(set) var historyArchiveSafety: HistoryArchiveSafety = .normal
     @Published private(set) var isHistoryArchiveTransitioning = false
+    @Published private(set) var historyRecoverySnapshots: [HistoryRecoverySnapshotDescriptor] = []
+    @Published private(set) var historyRecoveryInspections: [UUID: HistoryRecoveryInspection] = [:]
+    @Published private(set) var historyRecoveryInspectionSnapshotID: UUID?
+    private var historyRecoveryInspectionQueue: [UUID] = []
+    private var historyRecoveryInspectionAttemptedIDs = Set<UUID>()
+    private var historyRecoveryInspectionRevision = 0
+    @Published private(set) var isHistoryRecoveryOperationInProgress = false
+    @Published private(set) var historyRecoveryOperationMessage: String?
     var historyUnavailableMessage: String {
         QuillUserIssueRecord(code: .historyPersistenceUnavailable)
             .presentation().compactMessage
@@ -2499,8 +2512,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let postTranscriptionUpdateReminderDuration: TimeInterval = 7
 
     init() {
-        let initialHistoryArchiveSafety = HistoryArchiveTransition
-            .rollbackInterruptedTransactions(at: Self.appStorageRootDirectory())
+        let storageRoot = Self.appStorageRootDirectory()
+        let recoveredArchiveSafety = HistoryArchiveTransition
+            .rollbackInterruptedTransactions(at: storageRoot)
+        if recoveredArchiveSafety != .unresolvedInterruptedTransaction {
+            _ = try? HistoryRecoveryService(storageRoot: storageRoot)
+                .removeExpiredCompletedSnapshots()
+        }
+        let initialHistoryArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
         pipelineHistoryStore = Self.pipelineHistoryStoreFactory()
         let audioDirectory = Self.audioStorageDirectory()
         recordingJournalStore = Self.makeRecordingJournalStore()
@@ -3044,11 +3063,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.pipelineHistory = savedHistory
         self.isHistoryUnavailable = initialHistoryUnavailable
         self.historyArchiveSafety = initialHistoryArchiveSafety
+        self.historyRecoverySnapshots = HistoryRecoveryService(storageRoot: storageRoot).listSnapshots()
         self.historyPersistenceWarning = initialHistoryUnavailable
             ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
-            : initialHistoryArchiveSafety == .unresolvedArchive
-                ? QuillUserIssueRecord(code: .historyArchived)
-                : nil
+            : nil
         self.hasAccessibility = initialAccessibility
         self.hasScreenRecordingPermission = initialScreenCapturePermission
         self.launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -4832,6 +4850,277 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
+    @MainActor
+    func openHistoryRecoverySettings() {
+        refreshHistoryRecoverySnapshots()
+        guard !historyRecoverySnapshots.isEmpty else { return }
+        selectedSettingsTab = .recovery
+        beginHistoryRecoveryInspection()
+        NotificationCenter.default.post(name: .showSettings, object: nil)
+    }
+
+    @MainActor
+    func refreshHistoryRecoverySnapshots() {
+        historyRecoverySnapshots = HistoryRecoveryService(
+            storageRoot: Self.appStorageRootDirectory()
+        ).listSnapshots()
+        let currentIDs = Set(historyRecoverySnapshots.map(\.id))
+        historyRecoveryInspections = historyRecoveryInspections.filter {
+            currentIDs.contains($0.key)
+        }
+    }
+
+    @MainActor
+    func beginHistoryRecoveryInspection() {
+        guard !isHistoryRecoveryOperationInProgress,
+              historyRecoveryInspectionSnapshotID == nil else {
+            return
+        }
+        historyRecoveryInspectionAttemptedIDs = []
+        historyRecoveryInspectionQueue = historyRecoverySnapshots.compactMap { snapshot in
+            snapshot.integrity == .ready ? snapshot.id : nil
+        }
+        startNextHistoryRecoveryInspection()
+    }
+
+    @MainActor
+    func ensureHistoryRecoveryInspection() {
+        guard historyRecoveryInspectionSnapshotID == nil,
+              historyRecoveryInspectionQueue.isEmpty,
+              historyRecoveryInspectionAttemptedIDs.isEmpty,
+              historyRecoveryInspections.isEmpty else {
+            return
+        }
+        beginHistoryRecoveryInspection()
+    }
+
+    @MainActor
+    @discardableResult
+    func retryHistoryRecoveryInspection(id: UUID) -> Bool {
+        guard !isHistoryRecoveryOperationInProgress,
+              historyRecoverySnapshots.contains(where: {
+                  $0.id == id && $0.integrity == .ready
+              }) else {
+            return false
+        }
+        historyRecoveryInspectionAttemptedIDs.remove(id)
+        historyRecoveryInspectionQueue.removeAll { $0 == id }
+        historyRecoveryInspectionQueue.insert(id, at: 0)
+        startNextHistoryRecoveryInspection()
+        return true
+    }
+
+    @MainActor
+    private func startNextHistoryRecoveryInspection() {
+        guard !isHistoryRecoveryOperationInProgress,
+              historyRecoveryInspectionSnapshotID == nil else {
+            return
+        }
+        while !historyRecoveryInspectionQueue.isEmpty {
+            let snapshotID = historyRecoveryInspectionQueue.removeFirst()
+            guard !historyRecoveryInspectionAttemptedIDs.contains(snapshotID),
+                  historyRecoverySnapshots.contains(where: {
+                      $0.id == snapshotID && $0.integrity == .ready
+                  }) else {
+                continue
+            }
+            historyRecoveryInspectionAttemptedIDs.insert(snapshotID)
+            historyRecoveryInspectionSnapshotID = snapshotID
+            let inspectionRevision = historyRecoveryInspectionRevision
+            let storageRoot = Self.appStorageRootDirectory()
+            let activeHistory = pipelineHistory
+            let appStateReference = WeakAppStateReference(self)
+            Task.detached(priority: .userInitiated) {
+                do {
+                    let inspection = try HistoryRecoveryService(storageRoot: storageRoot)
+                        .inspectSnapshot(id: snapshotID, against: activeHistory)
+                    await MainActor.run {
+                        appStateReference.value?.completeHistoryRecoveryInspection(
+                            inspection,
+                            snapshotID: snapshotID,
+                            inspectionRevision: inspectionRevision,
+                            storageRoot: storageRoot
+                        )
+                    }
+                } catch {
+                    await MainActor.run {
+                        appStateReference.value?.completeHistoryRecoveryInspectionFailure(
+                            snapshotID: snapshotID,
+                            inspectionRevision: inspectionRevision,
+                            storageRoot: storageRoot
+                        )
+                    }
+                }
+            }
+            return
+        }
+    }
+
+    @MainActor
+    func invalidateHistoryRecoveryInspectionResults() {
+        historyRecoveryInspectionRevision &+= 1
+        historyRecoveryInspections = [:]
+        guard selectedSettingsTab == .recovery,
+              !isHistoryRecoveryOperationInProgress else {
+            return
+        }
+        historyRecoveryInspectionQueue = historyRecoverySnapshots.compactMap { snapshot in
+            guard snapshot.integrity == .ready,
+                  snapshot.status != .inspectionFailed else {
+                return nil
+            }
+            return snapshot.id
+        }
+        historyRecoveryInspectionAttemptedIDs = Set(
+            historyRecoverySnapshots.compactMap { snapshot in
+                snapshot.status == .inspectionFailed ? snapshot.id : nil
+            }
+        )
+        startNextHistoryRecoveryInspection()
+    }
+
+    @MainActor
+    @discardableResult
+    func importHistoryRecoverySnapshot(id: UUID) -> Bool {
+        guard requireAvailableHistoryForMutation(),
+              !isHistoryRecoveryOperationInProgress,
+              !isRecording,
+              !isTranscribing,
+              retryingItemIDs.isEmpty,
+              activeTranscriptionJobs.isEmpty,
+              pendingAudioImportJobIDs.isEmpty,
+              !cloudTranscriptionHistoryCoordinator.hasActiveWork,
+              meetingSummaryGeneratingNoteIDs.isEmpty,
+              activeRecordingID == nil,
+              activeSegmentedJournalController == nil,
+              pendingRecordingJournalFinalizationCount == 0,
+              pendingRecordingStartCount == 0,
+              pendingAudioOnlyStopIDs.isEmpty,
+              historyRecoverySnapshots.contains(where: {
+                  $0.id == id && $0.integrity == .ready
+              }) else {
+            return false
+        }
+        do {
+            try pipelineHistoryStore.detachForArchiveVerification()
+        } catch {
+            errorMessage = historyUnavailableMessage
+            return false
+        }
+
+        let storageRoot = Self.appStorageRootDirectory()
+        let makeStore = Self.pipelineHistoryStoreAtURLFactory
+        let appStateReference = WeakAppStateReference(self)
+        isHistoryRecoveryOperationInProgress = true
+        historyRecoveryOperationMessage = localizedCatalogString("Recovering history…")
+        Task.detached(priority: .userInitiated) {
+            let storeURL = storageRoot.appendingPathComponent("PipelineHistory.sqlite")
+            let activeStore = makeStore(storeURL)
+            do {
+                guard activeStore.availability == .ready,
+                      activeStore.durability == .durable,
+                      activeStore.verifyHistoryReadable() else {
+                    throw HistoryRecoveryServiceError.snapshotNotReady
+                }
+                let result = try HistoryRecoveryService(storageRoot: storageRoot).importSnapshot(
+                    id: id,
+                    into: activeStore,
+                    audioDirectory: storageRoot.appendingPathComponent("audio", isDirectory: true),
+                    transcriptDirectory: storageRoot.appendingPathComponent(
+                        "transcripts",
+                        isDirectory: true
+                    )
+                )
+                try activeStore.detachForArchiveVerification()
+                await MainActor.run {
+                    appStateReference.value?.completeHistoryRecoveryImport(
+                        result,
+                        storageRoot: storageRoot
+                    )
+                }
+            } catch {
+                try? activeStore.detachForArchiveVerification()
+                await MainActor.run {
+                    appStateReference.value?.completeHistoryRecoveryOperationFailure(
+                        at: storageRoot
+                    )
+                }
+            }
+        }
+        return true
+    }
+
+    @MainActor
+    @discardableResult
+    func cancelHistoryRecoveryScheduledDeletion(id: UUID) -> Bool {
+        guard !isHistoryRecoveryOperationInProgress,
+              historyRecoveryInspectionSnapshotID == nil,
+              historyRecoverySnapshots.contains(where: {
+                  $0.id == id && $0.integrity == .ready && $0.status == .completed
+              }) else {
+            return false
+        }
+        runHistoryRecoverySnapshotOperation(
+            message: localizedCatalogString("Cancelling scheduled deletion…")
+        ) { service in
+            try service.cancelScheduledDeletion(for: id)
+        }
+        return true
+    }
+
+    @MainActor
+    @discardableResult
+    func deleteHistoryRecoverySnapshot(id: UUID) -> Bool {
+        guard !isHistoryRecoveryOperationInProgress,
+              historyRecoveryInspectionSnapshotID == nil,
+              historyRecoverySnapshots.contains(where: { $0.id == id }) else {
+            return false
+        }
+        runHistoryRecoverySnapshotOperation(
+            message: localizedCatalogString("Deleting recovery snapshot…")
+        ) { service in
+            try service.deleteSnapshot(id: id)
+        }
+        return true
+    }
+
+    @MainActor
+    private func runHistoryRecoverySnapshotOperation(
+        message: String,
+        operation: @escaping @Sendable (HistoryRecoveryService) throws -> Void
+    ) {
+        let storageRoot = Self.appStorageRootDirectory()
+        let appStateReference = WeakAppStateReference(self)
+        isHistoryRecoveryOperationInProgress = true
+        historyRecoveryOperationMessage = message
+        Task.detached(priority: .userInitiated) {
+            do {
+                try operation(HistoryRecoveryService(storageRoot: storageRoot))
+                await MainActor.run {
+                    appStateReference.value?.completeHistoryRecoverySnapshotOperation(
+                        at: storageRoot
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    appStateReference.value?.completeHistoryRecoveryOperationFailure(
+                        at: storageRoot
+                    )
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func completeHistoryRecoverySnapshotOperation(at storageRoot: URL) {
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        isHistoryRecoveryOperationInProgress = false
+        historyRecoveryOperationMessage = nil
+        synchronizeHistoryPersistenceState()
+        startNextHistoryRecoveryInspection()
+    }
+
     static func appStorageRootDirectory() -> URL {
         let rootDirectory = storageRootProvider()
         if !FileManager.default.fileExists(atPath: rootDirectory.path) {
@@ -6179,8 +6468,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let warning: QuillUserIssueRecord?
         if unavailable {
             warning = QuillUserIssueRecord(code: .historyPersistenceUnavailable)
-        } else if historyArchiveSafety == .unresolvedArchive {
-            warning = QuillUserIssueRecord(code: .historyArchived)
         } else {
             warning = nil
         }
@@ -6201,6 +6488,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
             errorMessage = localizedCatalogString("Archiving recording history is still in progress.")
             return false
         }
+        guard !isHistoryRecoveryOperationInProgress else {
+            errorMessage = localizedCatalogString("History recovery is still in progress.")
+            return false
+        }
         synchronizeHistoryPersistenceState()
         guard !isHistoryUnavailable else {
             errorMessage = historyUnavailableMessage
@@ -6211,11 +6502,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     @discardableResult
-    func archiveOldHistoryAndStartFresh() -> Bool {
+    func archiveOldHistoryAndStartFresh(
+        postAction: HistoryArchivePostAction = .startFresh
+    ) -> Bool {
         synchronizeHistoryPersistenceState()
         guard isHistoryUnavailable,
-              historyArchiveSafety == .normal,
-              !isHistoryArchiveTransitioning else {
+              (historyArchiveSafety == .normal || historyArchiveSafety == .unresolvedArchive),
+              !isHistoryArchiveTransitioning,
+              !isHistoryRecoveryOperationInProgress else {
             return false
         }
         guard !isRecording,
@@ -6256,7 +6550,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 await MainActor.run {
                     appStateReference.value?.completeHistoryArchiveTransition(
                         result,
-                        storageRoot: storageRoot
+                        storageRoot: storageRoot,
+                        postAction: postAction
                     )
                 }
             } catch {
@@ -6273,7 +6568,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @MainActor
     private func completeHistoryArchiveTransition(
         _ result: HistoryArchiveTransitionResult,
-        storageRoot: URL
+        storageRoot: URL,
+        postAction: HistoryArchivePostAction
     ) {
         let activeStore = Self.pipelineHistoryStoreAtURLFactory(
             storageRoot.appendingPathComponent("PipelineHistory.sqlite")
@@ -6295,8 +6591,95 @@ final class AppState: ObservableObject, @unchecked Sendable {
         meetingSummaryPendingRevealNoteIDs = []
         forgetAllWarningBannerState()
         historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
         isHistoryArchiveTransitioning = false
         synchronizeHistoryPersistenceState()
+        if postAction == .openRecovery {
+            openHistoryRecoverySettings()
+        }
+    }
+
+    @MainActor
+    private func completeHistoryRecoveryInspection(
+        _ inspection: HistoryRecoveryInspection,
+        snapshotID: UUID,
+        inspectionRevision: Int,
+        storageRoot: URL
+    ) {
+        guard historyRecoveryInspectionSnapshotID == snapshotID else { return }
+        historyRecoveryInspectionSnapshotID = nil
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        if inspectionRevision == historyRecoveryInspectionRevision,
+           historyRecoverySnapshots.contains(where: { $0.id == inspection.snapshotID }) {
+            historyRecoveryInspections[inspection.snapshotID] = inspection
+        }
+        synchronizeHistoryPersistenceState()
+        startNextHistoryRecoveryInspection()
+    }
+
+    @MainActor
+    private func completeHistoryRecoveryInspectionFailure(
+        snapshotID: UUID,
+        inspectionRevision: Int,
+        storageRoot: URL
+    ) {
+        guard historyRecoveryInspectionSnapshotID == snapshotID else { return }
+        historyRecoveryInspectionSnapshotID = nil
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        if inspectionRevision == historyRecoveryInspectionRevision {
+            historyRecoveryInspections.removeValue(forKey: snapshotID)
+        }
+        synchronizeHistoryPersistenceState()
+        startNextHistoryRecoveryInspection()
+    }
+
+    @MainActor
+    private func completeHistoryRecoveryImport(
+        _ result: HistoryRecoveryImportResult,
+        storageRoot: URL
+    ) {
+        let activeStore = Self.pipelineHistoryStoreAtURLFactory(
+            storageRoot.appendingPathComponent("PipelineHistory.sqlite")
+        )
+        guard activeStore.availability == .ready,
+              activeStore.durability == .durable,
+              activeStore.verifyHistoryReadable() else {
+            completeHistoryRecoveryOperationFailure(at: storageRoot)
+            return
+        }
+        pipelineHistoryStore = activeStore
+        pipelineHistory = loadPipelineHistory()
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        isHistoryRecoveryOperationInProgress = false
+        historyRecoveryOperationMessage = result.failedRecordCount == 0
+            && result.conflictRecordCount == 0
+            ? nil
+            : localizedCatalogString("Some history could not be recovered.")
+        synchronizeHistoryPersistenceState()
+        invalidateHistoryRecoveryInspectionResults()
+    }
+
+    @MainActor
+    private func completeHistoryRecoveryOperationFailure(at storageRoot: URL) {
+        let activeStore = Self.pipelineHistoryStoreAtURLFactory(
+            storageRoot.appendingPathComponent("PipelineHistory.sqlite")
+        )
+        if activeStore.availability == .ready,
+           activeStore.durability == .durable,
+           activeStore.verifyHistoryReadable() {
+            pipelineHistoryStore = activeStore
+            pipelineHistory = loadPipelineHistory()
+        }
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        isHistoryRecoveryOperationInProgress = false
+        historyRecoveryOperationMessage = nil
+        synchronizeHistoryPersistenceState()
+        invalidateHistoryRecoveryInspectionResults()
+        errorMessage = localizedCatalogString("History recovery could not be completed.")
     }
 
     @MainActor
@@ -11031,6 +11414,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         calendarMatch: CalendarEventMatch? = nil,
         aiProcessingOutcome: AIProcessingOutcome = .succeeded
     ) -> Bool {
+        guard !isHistoryRecoveryOperationInProgress else { return false }
         let existingID = activeTranscriptionJobs[jobID]?.liveNoteID
         let existingEntry = existingID.flatMap { id in
             pipelineHistory.first(where: { $0.id == id })

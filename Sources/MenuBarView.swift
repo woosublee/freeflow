@@ -125,7 +125,11 @@ struct MenuBarView: View {
             Button(recordingButtonTitle) {
                 appState.toggleRecording()
             }
-            .disabled(appState.isTranscribing || appState.isHistoryUnavailable)
+            .disabled(
+                appState.isTranscribing
+                    || appState.isHistoryUnavailable
+                    || appState.isHistoryRecoveryOperationInProgress
+            )
 
             if let hotkeyError = appState.hotkeyMonitoringErrorMessage {
                 Divider()
@@ -156,11 +160,11 @@ struct MenuBarView: View {
                 .foregroundStyle(.orange)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 4)
-            } else if appState.historyArchiveSafety == .unresolvedArchive {
+            } else if !appState.historyRecoverySnapshots.isEmpty {
                 Divider()
-                HistoryArchiveNoticeView()
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 4)
+                Button("Recovery…") {
+                    appState.openHistoryRecoverySettings()
+                }
             } else if let warning = appState.historyPersistenceWarning {
                 Divider()
                 Label(

@@ -1,9 +1,11 @@
 import AppKit
+import Combine
 import SwiftUI
 
 struct HistoryUnavailableRecoveryActions: View {
     @EnvironmentObject private var appState: AppState
-    @State private var showsArchiveConfirmation = false
+    @State private var showsRecoveryArchiveConfirmation = false
+    @State private var showsFreshArchiveConfirmation = false
 
     var body: some View {
         Group {
@@ -15,9 +17,13 @@ struct HistoryUnavailableRecoveryActions: View {
                     Button("Open Data Folder") {
                         appState.openHistoryDataFolder()
                     }
-                    if appState.historyArchiveSafety == .normal {
-                        Button("Archive Old History and Start Fresh…") {
-                            showsArchiveConfirmation = true
+                    if appState.historyArchiveSafety != .unresolvedInterruptedTransaction {
+                        Button("Recover Earlier History…") {
+                            showsRecoveryArchiveConfirmation = true
+                        }
+                        .disabled(!appState.isHistoryUnavailable)
+                        Button("Start Fresh…") {
+                            showsFreshArchiveConfirmation = true
                         }
                         .disabled(!appState.isHistoryUnavailable)
                     }
@@ -28,41 +34,269 @@ struct HistoryUnavailableRecoveryActions: View {
             }
         }
         .confirmationDialog(
-            "Archive old history?",
-            isPresented: $showsArchiveConfirmation,
+            "Archive old history and open Recovery?",
+            isPresented: $showsRecoveryArchiveConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Archive and Start Fresh", role: .destructive) {
-                _ = appState.archiveOldHistoryAndStartFresh()
+            Button("Archive and Open Recovery", role: .destructive) {
+                _ = appState.archiveOldHistoryAndStartFresh(postAction: .openRecovery)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
-                "Your earlier notes will not appear in the new history. The original database, audio, transcripts, and recovery metadata will be kept in a recovery snapshot. Restore, import, and merge are not available yet. Cancel to leave everything unchanged."
+                "Quill will preserve the original database, audio, transcripts, and recovery metadata in a recovery snapshot. It will then start a new history and open Recovery settings. Your earlier notes are not imported automatically."
+            )
+        }
+        .confirmationDialog(
+            "Archive old history and start fresh?",
+            isPresented: $showsFreshArchiveConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Archive and Start Fresh", role: .destructive) {
+                _ = appState.archiveOldHistoryAndStartFresh(postAction: .startFresh)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Quill will preserve the original database, audio, transcripts, and recovery metadata in a recovery snapshot. It will then start a separate new history. You can import earlier notes later from Recovery settings."
             )
         }
     }
 }
 
-struct HistoryArchiveNoticeView: View {
+struct HistoryRecoverySettingsView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var snapshotPendingDeletion: HistoryRecoverySnapshotDescriptor?
+
+    private static let byteCountFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
 
     var body: some View {
-        if appState.historyArchiveSafety == .unresolvedArchive {
-            let presentation = QuillUserIssueRecord(code: .historyArchived).presentation()
-            VStack(alignment: .leading, spacing: 6) {
-                Label(presentation.title, systemImage: "archivebox.fill")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Recovery")
+                        .font(.title2.weight(.semibold))
+                    Text("Review archived histories before importing them into the current history.")
+                        .foregroundStyle(.secondary)
+                }
+
+                if appState.historyRecoverySnapshots.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "archivebox")
+                            .font(.system(size: 30, weight: .light))
+                            .foregroundStyle(.secondary)
+                        Text("No Recovery Snapshots")
+                            .font(.headline)
+                        Text("Recovery snapshots appear here after you start a fresh history from protected mode.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 240)
+                } else {
+                    ForEach(appState.historyRecoverySnapshots) { snapshot in
+                        snapshotCard(snapshot)
+                    }
+                }
+            }
+            .padding(24)
+        }
+        .overlay {
+            if appState.isHistoryRecoveryOperationInProgress {
+                ProgressView(appState.historyRecoveryOperationMessage ?? "Recovering history…")
+                    .padding(16)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            }
+        }
+        .onAppear {
+            appState.refreshHistoryRecoverySnapshots()
+            appState.ensureHistoryRecoveryInspection()
+        }
+        .onReceive(appState.$pipelineHistory.dropFirst()) { _ in
+            appState.invalidateHistoryRecoveryInspectionResults()
+        }
+        .confirmationDialog(
+            "Delete recovery snapshot?",
+            isPresented: Binding(
+                get: { snapshotPendingDeletion != nil },
+                set: { if !$0 { snapshotPendingDeletion = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete Recovery Snapshot", role: .destructive) {
+                if let snapshotPendingDeletion {
+                    _ = appState.deleteHistoryRecoverySnapshot(id: snapshotPendingDeletion.id)
+                }
+                snapshotPendingDeletion = nil
+            }
+            Button("Cancel", role: .cancel) {
+                snapshotPendingDeletion = nil
+            }
+        } message: {
+            Text("This permanently deletes the archived history and its recovery progress. This cannot be undone.")
+        }
+    }
+
+    @ViewBuilder
+    private func snapshotCard(_ snapshot: HistoryRecoverySnapshotDescriptor) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(snapshot.snapshot.archivedAt, style: .date)
+                        .font(.headline)
+                    Text(Self.byteCountFormatter.string(fromByteCount: Int64(snapshot.payloadByteCount)))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(statusTitle(for: snapshot))
                     .font(.caption.weight(.semibold))
-                Text(presentation.body)
+                    .foregroundStyle(statusColor(for: snapshot))
+            }
+
+            if snapshot.integrity == .invalid {
+                Text("This recovery snapshot could not be verified. It is preserved and can only be deleted manually.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            } else if snapshot.status == .inspectionFailed {
+                Text("This recovery snapshot could not be read. The original files are preserved.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let inspection = appState.historyRecoveryInspections[snapshot.id] {
+                inspectionSummary(inspection)
+            } else if appState.historyRecoveryInspectionSnapshotID == snapshot.id {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Checking recovery contents…")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            } else {
+                Text("Checking recovery contents…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let deletionDate = snapshot.scheduledDeletionAt {
+                Text(
+                    localizedCatalogFormat(
+                        "Scheduled for deletion on %@.",
+                        deletionDate.formatted(date: .abbreviated, time: .shortened)
+                    )
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                if snapshot.integrity == .ready,
+                   snapshot.status == .inspectionFailed {
+                    Button("Retry Inspection") {
+                        _ = appState.retryHistoryRecoveryInspection(id: snapshot.id)
+                    }
+                    .disabled(
+                        appState.isHistoryRecoveryOperationInProgress
+                            || appState.historyRecoveryInspectionSnapshotID != nil
+                    )
+                }
+
+                if let inspection = appState.historyRecoveryInspections[snapshot.id],
+                   snapshot.status != .completed {
+                    Button(localizedCatalogFormat("Import %lld records…", inspection.importableRecordCount)) {
+                        _ = appState.importHistoryRecoverySnapshot(id: snapshot.id)
+                    }
+                    .disabled(appState.isHistoryRecoveryOperationInProgress)
+                }
+
                 Button("Open Recovery Folder") {
                     appState.openHistoryRecoveryFolder()
                 }
-                .controlSize(.small)
+                .disabled(appState.isHistoryRecoveryOperationInProgress)
+
+                Spacer()
+
+                if snapshot.integrity == .ready, snapshot.scheduledDeletionAt != nil {
+                    Button("Cancel Scheduled Deletion") {
+                        _ = appState.cancelHistoryRecoveryScheduledDeletion(id: snapshot.id)
+                    }
+                    .disabled(
+                        appState.isHistoryRecoveryOperationInProgress
+                            || appState.historyRecoveryInspectionSnapshotID != nil
+                    )
+                    Button("Delete Now", role: .destructive) {
+                        snapshotPendingDeletion = snapshot
+                    }
+                    .disabled(
+                        appState.isHistoryRecoveryOperationInProgress
+                            || appState.historyRecoveryInspectionSnapshotID != nil
+                    )
+                } else {
+                    Button("Delete Recovery Snapshot…", role: .destructive) {
+                        snapshotPendingDeletion = snapshot
+                    }
+                    .disabled(
+                        appState.isHistoryRecoveryOperationInProgress
+                            || appState.historyRecoveryInspectionSnapshotID != nil
+                    )
+                }
             }
-            .foregroundStyle(.orange)
+            .controlSize(.small)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private func inspectionSummary(_ inspection: HistoryRecoveryInspection) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(localizedCatalogFormat("%lld records found.", inspection.readableRecordCount))
+            Text(localizedCatalogFormat("%lld records are ready to import.", inspection.importableRecordCount))
+            if inspection.alreadyPresentRecordCount > 0 {
+                Text(localizedCatalogFormat("%lld records are already in the current history.", inspection.alreadyPresentRecordCount))
+            }
+            if inspection.conflictRecordCount > 0 {
+                Text(localizedCatalogFormat("%lld records conflict with the current history.", inspection.conflictRecordCount))
+                    .foregroundStyle(.orange)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    private func statusTitle(for snapshot: HistoryRecoverySnapshotDescriptor) -> LocalizedStringKey {
+        guard snapshot.integrity == .ready else { return "Needs Attention" }
+        switch snapshot.status {
+        case .available:
+            return "Available"
+        case .partial:
+            return "Partially Recovered"
+        case .completed:
+            return "Recovery Complete"
+        case .inspectionFailed:
+            return "Unable to Inspect"
+        }
+    }
+
+    private func statusColor(for snapshot: HistoryRecoverySnapshotDescriptor) -> Color {
+        guard snapshot.integrity == .ready else { return .orange }
+        switch snapshot.status {
+        case .available:
+            return .secondary
+        case .partial, .inspectionFailed:
+            return .orange
+        case .completed:
+            return .green
         }
     }
 }

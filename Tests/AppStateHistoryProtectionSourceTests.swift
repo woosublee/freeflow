@@ -53,6 +53,23 @@ struct AppStateHistoryProtectionSourceTests {
                 && source.contains("synchronizeHistoryPersistenceState()"),
             "runtime history reads synchronize the published protection state"
         )
+        try expect(
+            source.contains("@Published private(set) var historyRecoverySnapshots")
+                && source.contains("@Published private(set) var isHistoryRecoveryOperationInProgress")
+                && source.contains("guard !isHistoryRecoveryOperationInProgress else")
+                && source.contains("func importHistoryRecoverySnapshot(id: UUID) -> Bool"),
+            "recovery import publishes state and blocks concurrent history mutations"
+        )
+        try expect(
+            source.contains("@Published private(set) var historyRecoveryInspectionSnapshotID")
+                && source.contains("func beginHistoryRecoveryInspection()")
+                && source.contains("func retryHistoryRecoveryInspection(id: UUID) -> Bool")
+                && source.contains("historyRecoveryInspectionRevision")
+                && !source.contains(
+                    "isHistoryRecoveryOperationInProgress = true\n        historyRecoveryOperationMessage = localizedCatalogString(\"Checking recovery contents…\")"
+                ),
+            "read-only recovery inspection has a separate lifecycle from active-history recovery writes"
+        )
         let archivedStartupRange = try source.range(
             from: "} else if initialHistoryArchiveSafety == .unresolvedArchive,",
             to: "        } else {\n            print(\"Skipping history startup work because persistent history is unavailable.\")"
@@ -69,7 +86,8 @@ struct AppStateHistoryProtectionSourceTests {
             "published archives recover only the active generation while preserving old-data cleanup safeguards"
         )
         try expect(
-            source.contains("func archiveOldHistoryAndStartFresh() -> Bool")
+            source.contains("func archiveOldHistoryAndStartFresh(")
+                && source.contains("postAction: HistoryArchivePostAction = .startFresh")
                 && source.contains("try pipelineHistoryStore.detachForHistoryArchive()")
                 && source.contains("HistoryArchiveTransition(")
                 && source.contains("Task.detached(priority: .userInitiated)")
@@ -79,7 +97,7 @@ struct AppStateHistoryProtectionSourceTests {
             "explicit archive transitions in the background and installs only a verified fresh history store"
         )
         let archiveRange = try source.range(
-            from: "func archiveOldHistoryAndStartFresh() -> Bool",
+            from: "func archiveOldHistoryAndStartFresh(",
             to: "@MainActor\n    func clearPipelineHistory()"
         )
         let archiveBody = String(source[archiveRange])
@@ -135,8 +153,9 @@ struct AppStateHistoryProtectionSourceTests {
         )
         let persistence = String(source[persistenceRange])
         try expect(
-            persistence.contains("if existingID == nil, !isJournalAudioFile {"),
-            "a failed update preserves assets already owned by an existing history entry"
+            persistence.contains("if existingID == nil, !isJournalAudioFile {")
+                && persistence.contains("guard !isHistoryRecoveryOperationInProgress else { return false }"),
+            "a failed update preserves assets and cannot write during recovery import"
         )
 
         let orphanSweepRange = try source.range(
