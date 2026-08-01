@@ -8,6 +8,17 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.34] - 2026-08-02
+
+### Improved
+
+- Reduced typing lag in Vocabulary and Prompt editors by saving drafts on focus changes while flushing active drafts before recording snapshots them.
+- Updated curated Cloud model choices, including currently supported Groq models and clearer image-input guidance for Context.
+
+### Fixed
+
+- Preserved custom prompt modification dates when draft flushes or prompt tests do not change the trimmed prompt.
+
 ## [0.1.33] - 2026-08-02
 
 ### Added
