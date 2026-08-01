@@ -1,5 +1,35 @@
 import Foundation
 
+enum NoteFileExportNaming {
+    static func suggestedBaseName(
+        preferredTitle: String?,
+        timestamp: Date,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> String {
+        if let preferredTitle {
+            let trimmed = preferredTitle.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            if !trimmed.isEmpty { return trimmed }
+        }
+
+        let formatted = Date.FormatStyle(
+            date: .long,
+            time: .shortened,
+            locale: locale,
+            timeZone: timeZone
+        ).format(timestamp)
+        return normalizedSpaces(in: formatted)
+    }
+
+    private static func normalizedSpaces(in value: String) -> String {
+        value.replacingOccurrences(of: "\u{202F}", with: " ")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\u{2009}", with: " ")
+    }
+}
+
 enum NoteFileExportItem: String, CaseIterable, Hashable, Sendable {
     case transcript
     case audio
@@ -66,7 +96,7 @@ struct NoteFileExportResult: Equatable, Sendable {
 
 enum NoteFileExporter {
     static func sanitizedBaseName(_ candidate: String, fallback: String) -> String {
-        let invalid = CharacterSet(charactersIn: "/\\:*?\"<>|")
+        let invalid = CharacterSet(charactersIn: "/\\*?\"<>|")
             .union(.controlCharacters)
         let trimmedCharacters = CharacterSet(charactersIn: " .")
 

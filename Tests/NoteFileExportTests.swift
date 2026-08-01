@@ -4,6 +4,9 @@ import Foundation
 struct NoteFileExportTests {
     static func main() throws {
         try testSanitizedBaseNameAndFallback()
+        try testSuggestedBaseNamePrefersTitle()
+        try testSuggestedBaseNameUsesLocalizedTimestamp()
+        try testLocalizedTimestampNameExportsWithColon()
         try testDestinationNamesPreserveAudioExtension()
         try testExportsTranscriptAndAudio()
         try testConflictDoesNotOverwriteWithoutConsent()
@@ -18,13 +21,83 @@ struct NoteFileExportTests {
             NoteFileExporter.sanitizedBaseName(
                 "  meeting/a:b?  ",
                 fallback: "fallback"
-            ) == "meeting-a-b-"
+            ) == "meeting-a:b-"
         )
         precondition(
             NoteFileExporter.sanitizedBaseName(
-                " /:*?\"<>| ",
-                fallback: "2026-07-21 10-30"
-            ) == "2026-07-21 10-30"
+                " /\\*?\"<>| ",
+                fallback: "2026년 7월 24일 오전 1:45"
+            ) == "2026년 7월 24일 오전 1:45"
+        )
+    }
+
+    private static let localizedNameTimestamp = Date(
+        timeIntervalSince1970: 1_784_825_100
+    )
+    private static let seoulTimeZone = TimeZone(identifier: "Asia/Seoul")!
+
+    private static func testSuggestedBaseNamePrefersTitle() throws {
+        let name = NoteFileExportNaming.suggestedBaseName(
+            preferredTitle: "  Product review  ",
+            timestamp: localizedNameTimestamp,
+            locale: Locale(identifier: "ko_KR"),
+            timeZone: seoulTimeZone
+        )
+        precondition(name == "Product review")
+    }
+
+    private static func testSuggestedBaseNameUsesLocalizedTimestamp() throws {
+        let korean = NoteFileExportNaming.suggestedBaseName(
+            preferredTitle: " \n ",
+            timestamp: localizedNameTimestamp,
+            locale: Locale(identifier: "ko_KR"),
+            timeZone: seoulTimeZone
+        )
+        let english = NoteFileExportNaming.suggestedBaseName(
+            preferredTitle: nil,
+            timestamp: localizedNameTimestamp,
+            locale: Locale(identifier: "en_US"),
+            timeZone: seoulTimeZone
+        )
+
+        precondition(korean == "2026년 7월 24일 오전 1:45")
+        precondition(english == "July 24, 2026 at 1:45 AM")
+    }
+
+    private static func testLocalizedTimestampNameExportsWithColon() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourceDirectory = root.appendingPathComponent("source", isDirectory: true)
+        let destination = root.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let audio = sourceDirectory.appendingPathComponent("recording.wav")
+        try Data([4, 5, 6]).write(to: audio)
+        let request = NoteFileExportRequest(
+            source: NoteFileExportSource(transcript: "# Transcript", audioURL: audio),
+            selectedItems: [.transcript, .audio],
+            textFormat: .plainText,
+            baseName: "2026년 7월 24일 오전 1:45",
+            destinationDirectory: destination
+        )
+
+        let result = NoteFileExporter.export(request, replaceExisting: false)
+
+        precondition(Set(result.savedItems) == [.transcript, .audio])
+        precondition(result.failures.isEmpty)
+        precondition(
+            FileManager.default.fileExists(
+                atPath: destination
+                    .appendingPathComponent("2026년 7월 24일 오전 1:45.txt")
+                    .path
+            )
+        )
+        precondition(
+            FileManager.default.fileExists(
+                atPath: destination
+                    .appendingPathComponent("2026년 7월 24일 오전 1:45.wav")
+                    .path
+            )
         )
     }
 

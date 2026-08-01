@@ -1489,7 +1489,6 @@ private struct NoteDetailView: View {
                 suggestedBaseName: NoteFileExportNaming.suggestedBaseName(
                     preferredTitle: item.customTitle
                         ?? item.calendarMatch?.appliedTitle,
-                    transcript: displayContent,
                     timestamp: item.timestamp
                 ),
                 onDismiss: { showFileExportSheet = false },
