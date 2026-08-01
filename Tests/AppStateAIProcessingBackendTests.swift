@@ -1749,9 +1749,6 @@ struct AppStateAIProcessingBackendTests {
         let seams = LocalAISeamSnapshot()
         AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
         AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIModelDelete = { model in
-            deletionHarness.record(modelID: model.id, managerWasStopped: true)
-        }
         AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
         defer { seams.restore() }
 
@@ -1764,6 +1761,9 @@ struct AppStateAIProcessingBackendTests {
             approximateResidentRAMBytes: canonical.approximateResidentRAMBytes
         )
         let appState = await makeRefreshedAppState()
+        AppState.localAIModelDelete = { model in
+            deletionHarness.record(modelID: model.id, managerWasStopped: true)
+        }
         await MainActor.run {
             precondition(
                 !appState.isAIProcessingChoiceAvailable(

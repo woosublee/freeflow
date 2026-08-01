@@ -12,7 +12,7 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             encoding: .utf8
         )
 
-        precondition(source.contains("private let recordingJournalStore: RecordingJournalStore"))
+        precondition(source.contains("private var recordingJournalStore: RecordingJournalStore"))
         precondition(source.contains("private var activeSegmentedJournalController: SegmentedRecordingJournalController?"))
         precondition(source.contains("private var activeRecordingID: UUID?"))
         precondition(source.contains("private var activeInputSwitchToken: UUID?"))
@@ -388,7 +388,12 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         let catchBody = String(persist[catchRange.upperBound...])
 
         assert(catchBody.contains("journalRecordingID == nil"))
-        assert(catchBody.contains("!pipelineHistoryStore.loadAllHistory().contains(where: { $0.id == recordingID })"))
+        assert(catchBody.contains("pipelineHistoryStore.availability == .ready"))
+        assert(catchBody.contains("pipelineHistoryStore.durability == .durable"))
+        assert(catchBody.contains("pipelineHistoryStore.verifyHistoryReadable()"))
+        assert(catchBody.contains("let history = pipelineHistoryStore.loadAllHistory()"))
+        assert(catchBody.contains("!history.contains(where: { $0.id == recordingID })"))
+        assert(!catchBody.contains("!pipelineHistoryStore.loadAllHistory().contains(where: { $0.id == recordingID })"))
         assert(catchBody.contains("Self.deleteStoredFiles("))
         assert(catchBody.contains("audioFileName: audioFileName"))
         assert(catchBody.contains("transcriptFileName: nil"))
@@ -457,10 +462,34 @@ struct AppStateRecordingJournalIntegrationSourceTests {
 
         assert(begin.contains("""
                 guard let triggerMode = activeRecordingTriggerMode else {
+                    activeRecordingID = nil
                     activeRecordingTranscriptionEnabled = nil
                     return
                 }
 """))
+        assert(begin.contains("""
+                    guard let pendingContext else {
+                        self.activeRecordingID = nil
+                        return
+                    }
+"""))
+        assert(begin.contains("""
+                    } else {
+                        self.restoreAudioInterruptionIfNeeded()
+                        self.activeRecordingCalendarSnapshot = nil
+                        self.activeRecordingID = nil
+"""))
+        assert(begin.contains("""
+            default:
+                isRecording = false
+                activeRecordingCalendarSnapshot = nil
+                activeRecordingID = nil
+"""))
+        let promptPreparation = try functionBody(
+            named: "prepareForSpeechRecognitionPermissionPrompt",
+            in: source
+        )
+        assert(promptPreparation.contains("activeRecordingID = nil"))
     }
 
     private static func testRecordOnlyStillStartsSelectedAudioRecorder() throws {

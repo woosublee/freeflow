@@ -11,6 +11,11 @@ import os.log
 private let recordingLog = OSLog(subsystem: "com.woosublee.quill", category: "Recording")
 private let calendarLog = OSLog(subsystem: "com.woosublee.quill", category: "Calendar")
 
+enum HistoryArchivePostAction: Sendable {
+    case startFresh
+    case openRecovery
+}
+
 extension AIProcessingFeature {
     var modelFeature: AIModelFeature {
         switch self {
@@ -368,8 +373,39 @@ final class AppState: ObservableObject, @unchecked Sendable {
         (AppState) -> any MeetingSummaryGenerating = { appState in
             appState.makeMeetingSummaryService()
         }
+    static var storageRootProvider: () -> URL = {
+        AppName.applicationSupportDirectory
+    }
     static var pipelineHistoryStoreFactory: () -> PipelineHistoryStore = {
-        PipelineHistoryStore()
+        makeDefaultPipelineHistoryStore()
+    }
+    static var pipelineHistoryStoreAtURLFactory: (URL) -> PipelineHistoryStore = {
+        PipelineHistoryStore(storeURL: $0)
+    }
+
+    static func makeDefaultPipelineHistoryStore() -> PipelineHistoryStore {
+        pipelineHistoryStoreAtURLFactory(
+            appStorageRootDirectory().appendingPathComponent("PipelineHistory.sqlite")
+        )
+    }
+
+    private static func makeRecordingJournalStore() -> RecordingJournalStore {
+        RecordingJournalStore(audioDirectory: audioStorageDirectory())
+    }
+
+    private static func makeCloudTranscriptionJobStore() -> CloudTranscriptionJobStore {
+        let audioDirectory = audioStorageDirectory()
+        return CloudTranscriptionJobStore(
+            jobsDirectory: audioDirectory
+                .deletingLastPathComponent()
+                .appendingPathComponent("cloud-transcription/jobs", isDirectory: true),
+            temporaryRoot: FileManager.default.temporaryDirectory
+                .appendingPathComponent(
+                    Bundle.main.bundleIdentifier ?? "com.woosublee.quill",
+                    isDirectory: true
+                )
+                .appendingPathComponent("cloud-transcription", isDirectory: true)
+        )
     }
     static var retryCloudTranscriptionDependenciesFactory:
         () -> CloudTranscriptionDependencies = {
@@ -2090,6 +2126,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var lastTranscript: String = ""
     @Published var errorMessage: String?
     @Published private(set) var historyPersistenceWarning: QuillUserIssueRecord?
+    @Published private(set) var isHistoryUnavailable = false
+    @Published private(set) var historyArchiveSafety: HistoryArchiveSafety = .normal
+    @Published private(set) var isHistoryArchiveTransitioning = false
+    @Published private(set) var historyRecoverySnapshots: [HistoryRecoverySnapshotDescriptor] = []
+    @Published private(set) var historyRecoveryInspections: [UUID: HistoryRecoveryInspection] = [:]
+    @Published private(set) var historyRecoveryInspectionSnapshotID: UUID?
+    private var historyRecoveryInspectionQueue: [UUID] = []
+    private var historyRecoveryInspectionAttemptedIDs = Set<UUID>()
+    private var historyRecoveryInspectionRevision = 0
+    @Published private(set) var isHistoryRecoveryOperationInProgress = false
+    @Published private(set) var historyRecoveryOperationMessage: String?
+    @Published private(set) var historyRecoveryImportResult: HistoryRecoveryImportResult?
+    var historyUnavailableMessage: String {
+        QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+            .presentation().compactMessage
+    }
     @Published var statusText: String = localizedCatalogString("Ready")
 
     // MCP interface
@@ -2320,6 +2372,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var overlayTranscriptionID: UUID = UUID()
     private var foregroundTranscriptionJobID: UUID?
     private var activeTranscriptionJobs: [UUID: TranscriptionJob] = [:]
+    private var pendingAudioImportJobIDs: Set<UUID> = []
     let localAIServerManager: LocalAIServerManager
     @Published private(set) var localAIInstallStates: [String: LocalAIModelInstallViewState] = [:]
     @Published private(set) var contextModelCapabilityWarning: String?
@@ -2432,9 +2485,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var defaultInputDeviceListener: AudioObjectPropertyListenerBlock?
     private var defaultInputDeviceListenerAddress: AudioObjectPropertyAddress?
     private var needsMicrophoneRefreshAfterRecording = false
-    private let pipelineHistoryStore: PipelineHistoryStore
-    private let recordingJournalStore: RecordingJournalStore
-    private let cloudTranscriptionJobStore: CloudTranscriptionJobStore
+    private var pipelineHistoryStore: PipelineHistoryStore
+    private var recordingJournalStore: RecordingJournalStore
+    private var cloudTranscriptionJobStore: CloudTranscriptionJobStore
     @MainActor private let cloudTranscriptionHistoryCoordinator =
         CloudTranscriptionHistoryCoordinator()
     private var activeSegmentedJournalController: SegmentedRecordingJournalController?
@@ -2443,6 +2496,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         label: "com.woosublee.quill.recording-journal.finalization",
         qos: .userInitiated
     )
+    private var pendingRecordingJournalFinalizationCount = 0
+    private var pendingRecordingStartCount = 0
     private var activeRecordingID: UUID?
     private let shortcutSessionController = DictationShortcutSessionController()
     private var activeRecordingTriggerMode: RecordingTriggerMode?
@@ -2467,28 +2522,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let postTranscriptionUpdateReminderDuration: TimeInterval = 7
 
     init() {
+        let storageRoot = Self.appStorageRootDirectory()
+        let recoveredArchiveSafety = HistoryArchiveTransition
+            .rollbackInterruptedTransactions(at: storageRoot)
+        if recoveredArchiveSafety != .unresolvedInterruptedTransaction {
+            _ = try? HistoryRecoveryService(storageRoot: storageRoot)
+                .removeExpiredCompletedSnapshots()
+        }
+        let initialHistoryArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
         pipelineHistoryStore = Self.pipelineHistoryStoreFactory()
+        let initialHistoryUnavailable = pipelineHistoryStore.availability == .unavailable
+            || initialHistoryArchiveSafety == .unresolvedInterruptedTransaction
         let audioDirectory = Self.audioStorageDirectory()
-        recordingJournalStore = RecordingJournalStore(
-            audioDirectory: audioDirectory
-        )
-        cloudTranscriptionJobStore = CloudTranscriptionJobStore(
-            jobsDirectory: audioDirectory
-                .deletingLastPathComponent()
-                .appendingPathComponent(
-                    "cloud-transcription/jobs",
-                    isDirectory: true
-                ),
-            temporaryRoot: FileManager.default.temporaryDirectory
-                .appendingPathComponent(
-                    Bundle.main.bundleIdentifier ?? "com.woosublee.quill",
-                    isDirectory: true
-                )
-                .appendingPathComponent(
-                    "cloud-transcription",
-                    isDirectory: true
-                )
-        )
+        recordingJournalStore = Self.makeRecordingJournalStore()
+        cloudTranscriptionJobStore = Self.makeCloudTranscriptionJobStore()
         UserDefaults.standard.removeObject(forKey: "force_http2_transcription")
         Self.migrateModelStorageKeys()
         let hasCompletedSetup = UserDefaults.standard.bool(forKey: "hasCompletedSetup")
@@ -2772,56 +2819,163 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         let initialAccessibility = AXIsProcessTrusted()
         let initialScreenCapturePermission = CGPreflightScreenCaptureAccess()
-        Self.recoverRecordingJournalsBeforeHistoryLoad(
-            recordingJournalStore: recordingJournalStore,
-            historyStore: pipelineHistoryStore
-        )
-        var removedStoredFiles: [DeletedPipelineHistoryAssets] = []
-        do {
-            removedStoredFiles = try pipelineHistoryStore.trim(to: maxPipelineHistoryCount)
-        } catch {
-            print("Failed to trim pipeline history during init: \(error)")
-        }
-        for removedAssets in removedStoredFiles {
-            cloudTranscriptionJobStore.invalidateSession(
-                historyID: removedAssets.historyID
-            )
-            Self.deleteStoredFiles(removedAssets)
-            try? cloudTranscriptionJobStore.delete(
-                historyID: removedAssets.historyID,
-                session: nil
-            )
-        }
-        var savedHistory = Self.markInterruptedRecoveryPlaceholders(
-            in: pipelineHistoryStore.loadAllHistory(),
-            store: pipelineHistoryStore
-        )
-        try? cloudTranscriptionJobStore.removeStaleTemporaryArtifacts()
-        let cloudReconciliation = cloudTranscriptionJobStore.reconcile(
-            history: savedHistory,
-            audioRoot: audioDirectory
-        )
-        let historyStore = pipelineHistoryStore
-        do {
-            savedHistory = try LegacyNoteTitleMigration.migrate(history: savedHistory) { item in
-                try historyStore.update(item)
-            }
-        } catch {
-            print("Failed to migrate legacy note titles: \(error)")
-        }
-        let referencedAudioFileNames = Set(savedHistory.compactMap(\.audioFileName))
-        let referencedTranscriptFileNames = Set(savedHistory.compactMap(\.transcriptFileName))
-        let protectedInflightAudioFileNames = Self.protectedInflightAudioFileNames(
-            store: recordingJournalStore
-        )
-        Task.detached(priority: .background) {
-            Self.sweepOrphanStoredFiles(
-                referencedAudioFileNames: referencedAudioFileNames,
-                referencedTranscriptFileNames: referencedTranscriptFileNames,
-                protectedInflightAudioFileNames: protectedInflightAudioFileNames
-            )
-        }
+        var savedHistory: [PipelineHistoryItem] = []
+        var cloudReconciliation: CloudTranscriptionReconciliation?
 
+        if pipelineHistoryStore.availability == .ready {
+            pipelineHistoryStore.verifyHistoryReadable()
+        }
+        if initialHistoryArchiveSafety == .normal,
+           pipelineHistoryStore.availability == .ready {
+            Self.recoverRecordingJournalsBeforeHistoryLoad(
+                recordingJournalStore: recordingJournalStore,
+                historyStore: pipelineHistoryStore
+            )
+            let transcriptDirectory = Self.transcriptStorageDirectory()
+            savedHistory = pipelineHistoryStore.loadAllHistory()
+            if pipelineHistoryStore.availability == .ready {
+                var referenceTrust = pipelineHistoryStore.referenceTrust
+                var shouldBootstrapAssetReferenceSnapshot = false
+                let loadedAudioFileNames = Set(savedHistory.compactMap(\.audioFileName))
+                let loadedTranscriptFileNames = Set(savedHistory.compactMap(\.transcriptFileName))
+                if !pipelineHistoryStore.hadPersistentStoreAtLoad,
+                   Self.hasStoredAssets(
+                       audioDirectory: audioDirectory,
+                       transcriptDirectory: transcriptDirectory
+                   ) {
+                    Self.markAssetReferencesIncomplete(
+                        storageRoot: audioDirectory.deletingLastPathComponent()
+                    )
+                    referenceTrust = .recovered
+                } else {
+                    switch pipelineHistoryStore.assetReferenceSnapshotState(
+                        audioFileNames: loadedAudioFileNames,
+                        transcriptFileNames: loadedTranscriptFileNames
+                    ) {
+                    case .matches:
+                        break
+                    case .missing:
+                        if Self.hasUnreferencedStoredAssets(
+                            audioDirectory: audioDirectory,
+                            transcriptDirectory: transcriptDirectory,
+                            referencedAudioFileNames: loadedAudioFileNames,
+                            referencedTranscriptFileNames: loadedTranscriptFileNames
+                        ) {
+                            Self.markAssetReferencesIncomplete(
+                                storageRoot: audioDirectory.deletingLastPathComponent()
+                            )
+                            referenceTrust = .recovered
+                        } else {
+                            shouldBootstrapAssetReferenceSnapshot = true
+                            referenceTrust = .unavailable
+                        }
+                    case .mismatch, .unavailable:
+                        Self.markAssetReferencesIncomplete(
+                            storageRoot: audioDirectory.deletingLastPathComponent()
+                        )
+                        referenceTrust = .recovered
+                    }
+                }
+                if referenceTrust.permitsStartupReferenceCleanup {
+                    var removedStoredFiles: [DeletedPipelineHistoryAssets] = []
+                    do {
+                        removedStoredFiles = try pipelineHistoryStore.trim(to: maxPipelineHistoryCount)
+                    } catch {
+                        print("Failed to trim pipeline history during init: \(error)")
+                    }
+                    for removedAssets in removedStoredFiles {
+                        cloudTranscriptionJobStore.invalidateSession(
+                            historyID: removedAssets.historyID
+                        )
+                        Self.deleteStoredFiles(removedAssets)
+                        try? cloudTranscriptionJobStore.delete(
+                            historyID: removedAssets.historyID,
+                            session: nil
+                        )
+                    }
+                    if !removedStoredFiles.isEmpty {
+                        savedHistory = pipelineHistoryStore.loadAllHistory()
+                        referenceTrust = pipelineHistoryStore.referenceTrust
+                    }
+                } else {
+                    print("Skipping startup history cleanup because asset references are unavailable.")
+                }
+                savedHistory = Self.markInterruptedRecoveryPlaceholders(
+                    in: savedHistory,
+                    store: pipelineHistoryStore
+                )
+                try? cloudTranscriptionJobStore.removeStaleTemporaryArtifacts()
+                cloudReconciliation = cloudTranscriptionJobStore.reconcile(
+                    history: savedHistory,
+                    audioRoot: audioDirectory
+                )
+                let historyStore = pipelineHistoryStore
+                do {
+                    savedHistory = try LegacyNoteTitleMigration.migrate(history: savedHistory) { item in
+                        try historyStore.update(item)
+                    }
+                } catch {
+                    print("Failed to migrate legacy note titles: \(error)")
+                }
+                let referencedAudioFileNames = Set(savedHistory.compactMap(\.audioFileName))
+                let referencedTranscriptFileNames = Set(savedHistory.compactMap(\.transcriptFileName))
+                if shouldBootstrapAssetReferenceSnapshot {
+                    _ = pipelineHistoryStore.bootstrapAssetReferenceSnapshot(
+                        audioFileNames: referencedAudioFileNames,
+                        transcriptFileNames: referencedTranscriptFileNames
+                    )
+                }
+                let protectedInflightAudioFileNames = Self.protectedInflightAudioFileNames(
+                    store: recordingJournalStore
+                )
+                if referenceTrust.permitsStartupReferenceCleanup {
+                    let sweepReferenceTrust = referenceTrust
+                    let sweepNow = Date()
+                    Task.detached(priority: .background) {
+                        Self.sweepOrphanStoredFiles(
+                            audioDirectory: audioDirectory,
+                            transcriptDirectory: transcriptDirectory,
+                            referencedAudioFileNames: referencedAudioFileNames,
+                            referencedTranscriptFileNames: referencedTranscriptFileNames,
+                            protectedInflightAudioFileNames: protectedInflightAudioFileNames,
+                            referenceTrust: sweepReferenceTrust,
+                            now: sweepNow
+                        )
+                    }
+                }
+            } else {
+                print("Skipping history startup work because persistent history is unavailable.")
+            }
+        } else if initialHistoryArchiveSafety == .unresolvedArchive,
+                  pipelineHistoryStore.availability == .ready {
+            Self.recoverRecordingJournalsBeforeHistoryLoad(
+                recordingJournalStore: recordingJournalStore,
+                historyStore: pipelineHistoryStore
+            )
+            savedHistory = pipelineHistoryStore.loadAllHistory()
+            if pipelineHistoryStore.availability == .ready {
+                savedHistory = Self.markInterruptedRecoveryPlaceholders(
+                    in: savedHistory,
+                    store: pipelineHistoryStore
+                )
+                try? cloudTranscriptionJobStore.removeStaleTemporaryArtifacts()
+                cloudReconciliation = cloudTranscriptionJobStore.reconcile(
+                    history: savedHistory,
+                    audioRoot: audioDirectory
+                )
+                let historyStore = pipelineHistoryStore
+                do {
+                    savedHistory = try LegacyNoteTitleMigration.migrate(history: savedHistory) { item in
+                        try historyStore.update(item)
+                    }
+                } catch {
+                    print("Failed to migrate legacy note titles: \(error)")
+                }
+            }
+            print("Skipping automatic archive snapshot cleanup because an archived history remains unresolved.")
+        } else {
+            print("Skipping history startup work because persistent history is unavailable.")
+        }
         let storedInputID = AudioInputDevice.normalized(
             UserDefaults.standard.string(forKey: selectedMicrophoneStorageKey) ?? ""
         )
@@ -2915,17 +3069,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.soundVolume = soundVolume
         self.voiceMacros = initialMacros
         self.pipelineHistory = savedHistory
-        switch pipelineHistoryStore.durability {
-        case .durable:
-            self.historyPersistenceWarning = nil
-        case .inMemory, .inMemoryFallback:
+        self.isHistoryUnavailable = initialHistoryUnavailable
+        self.historyArchiveSafety = initialHistoryArchiveSafety
+        self.historyRecoverySnapshots = HistoryRecoveryService(storageRoot: storageRoot).listSnapshots()
+        if initialHistoryUnavailable {
             self.historyPersistenceWarning = QuillUserIssueRecord(
                 code: .historyPersistenceUnavailable
             )
-        case .recovered:
-            self.historyPersistenceWarning = QuillUserIssueRecord(
-                code: .historyRecovered
-            )
+        } else {
+            switch pipelineHistoryStore.durability {
+            case .durable:
+                self.historyPersistenceWarning = nil
+            case .inMemory:
+                self.historyPersistenceWarning = QuillUserIssueRecord(
+                    code: .historyPersistenceUnavailable
+                )
+            }
         }
         self.hasAccessibility = initialAccessibility
         self.hasScreenRecordingPermission = initialScreenCapturePermission
@@ -2938,8 +3097,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
         scheduleNoteBrowserTranscriptionModeNormalizationForSelectedInput()
         self.precomputeMacros()
-        Task { @MainActor [weak self] in
-            self?.scheduleCloudTranscriptionAutoResume(cloudReconciliation)
+        if let cloudReconciliation {
+            Task { @MainActor [weak self] in
+                self?.scheduleCloudTranscriptionAutoResume(cloudReconciliation)
+            }
         }
 
         speechRecognitionAuthorizationStatus = Self.currentSpeechRecognitionAuthorizationStatus()
@@ -4697,10 +4858,315 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case savingAudioOnly
     }
 
+    func openHistoryDataFolder() {
+        NSWorkspace.shared.open(Self.appStorageRootDirectory())
+    }
+
+    func openHistoryRecoveryFolder() {
+        NSWorkspace.shared.open(
+            Self.appStorageRootDirectory().appendingPathComponent("Recovery", isDirectory: true)
+        )
+    }
+
+    @MainActor
+    func openHistoryRecoverySettings() {
+        refreshHistoryRecoverySnapshots()
+        guard !historyRecoverySnapshots.isEmpty else { return }
+        selectedSettingsTab = .recovery
+        beginHistoryRecoveryInspection()
+        NotificationCenter.default.post(name: .showSettings, object: nil)
+    }
+
+    @MainActor
+    func refreshHistoryRecoverySnapshots() {
+        historyRecoverySnapshots = HistoryRecoveryService(
+            storageRoot: Self.appStorageRootDirectory()
+        ).listSnapshots()
+        let currentIDs = Set(historyRecoverySnapshots.map(\.id))
+        historyRecoveryInspections = historyRecoveryInspections.filter {
+            currentIDs.contains($0.key)
+        }
+    }
+
+    @MainActor
+    func beginHistoryRecoveryInspection() {
+        guard !isHistoryRecoveryOperationInProgress,
+              historyRecoveryInspectionSnapshotID == nil else {
+            return
+        }
+        historyRecoveryInspectionAttemptedIDs = []
+        historyRecoveryInspectionQueue = historyRecoverySnapshots.compactMap { snapshot in
+            snapshot.integrity == .ready ? snapshot.id : nil
+        }
+        startNextHistoryRecoveryInspection()
+    }
+
+    @MainActor
+    func ensureHistoryRecoveryInspection() {
+        guard historyRecoveryInspectionSnapshotID == nil,
+              historyRecoveryInspectionQueue.isEmpty,
+              historyRecoveryInspectionAttemptedIDs.isEmpty,
+              historyRecoveryInspections.isEmpty else {
+            return
+        }
+        beginHistoryRecoveryInspection()
+    }
+
+    @MainActor
+    @discardableResult
+    func retryHistoryRecoveryInspection(id: UUID) -> Bool {
+        guard !isHistoryRecoveryOperationInProgress,
+              historyRecoverySnapshots.contains(where: {
+                  $0.id == id && $0.integrity == .ready
+              }) else {
+            return false
+        }
+        historyRecoveryInspectionAttemptedIDs.remove(id)
+        historyRecoveryInspectionQueue.removeAll { $0 == id }
+        historyRecoveryInspectionQueue.insert(id, at: 0)
+        startNextHistoryRecoveryInspection()
+        return true
+    }
+
+    @MainActor
+    private func startNextHistoryRecoveryInspection() {
+        guard !isHistoryRecoveryOperationInProgress,
+              historyRecoveryInspectionSnapshotID == nil else {
+            return
+        }
+        while !historyRecoveryInspectionQueue.isEmpty {
+            let snapshotID = historyRecoveryInspectionQueue.removeFirst()
+            guard !historyRecoveryInspectionAttemptedIDs.contains(snapshotID),
+                  historyRecoverySnapshots.contains(where: {
+                      $0.id == snapshotID && $0.integrity == .ready
+                  }) else {
+                continue
+            }
+            historyRecoveryInspectionAttemptedIDs.insert(snapshotID)
+            historyRecoveryInspectionSnapshotID = snapshotID
+            let inspectionRevision = historyRecoveryInspectionRevision
+            let storageRoot = Self.appStorageRootDirectory()
+            let activeHistory = pipelineHistory
+            let appStateReference = WeakAppStateReference(self)
+            Task.detached(priority: .userInitiated) {
+                do {
+                    let inspection = try HistoryRecoveryService(storageRoot: storageRoot)
+                        .inspectSnapshot(id: snapshotID, against: activeHistory)
+                    await MainActor.run {
+                        appStateReference.value?.completeHistoryRecoveryInspection(
+                            inspection,
+                            snapshotID: snapshotID,
+                            inspectionRevision: inspectionRevision,
+                            storageRoot: storageRoot
+                        )
+                    }
+                } catch {
+                    await MainActor.run {
+                        appStateReference.value?.completeHistoryRecoveryInspectionFailure(
+                            snapshotID: snapshotID,
+                            inspectionRevision: inspectionRevision,
+                            storageRoot: storageRoot
+                        )
+                    }
+                }
+            }
+            return
+        }
+    }
+
+    @MainActor
+    func invalidateHistoryRecoveryInspectionResults() {
+        historyRecoveryInspectionRevision &+= 1
+        historyRecoveryInspections = [:]
+        historyRecoveryInspectionQueue = []
+        historyRecoveryInspectionAttemptedIDs = []
+        guard selectedSettingsTab == .recovery,
+              !isHistoryRecoveryOperationInProgress else {
+            return
+        }
+        historyRecoveryInspectionQueue = historyRecoverySnapshots.compactMap { snapshot in
+            guard snapshot.integrity == .ready,
+                  snapshot.status != .inspectionFailed else {
+                return nil
+            }
+            return snapshot.id
+        }
+        historyRecoveryInspectionAttemptedIDs = Set(
+            historyRecoverySnapshots.compactMap { snapshot in
+                snapshot.status == .inspectionFailed ? snapshot.id : nil
+            }
+        )
+        startNextHistoryRecoveryInspection()
+    }
+
+    @MainActor
+    @discardableResult
+    func importHistoryRecoverySnapshot(id: UUID) -> Bool {
+        guard requireAvailableHistoryForMutation(),
+              !isHistoryRecoveryOperationInProgress,
+              !isRecording,
+              !isTranscribing,
+              retryingItemIDs.isEmpty,
+              activeTranscriptionJobs.isEmpty,
+              pendingAudioImportJobIDs.isEmpty,
+              !cloudTranscriptionHistoryCoordinator.hasActiveWork,
+              meetingSummaryGeneratingNoteIDs.isEmpty,
+              activeRecordingID == nil,
+              activeSegmentedJournalController == nil,
+              pendingRecordingJournalFinalizationCount == 0,
+              pendingRecordingStartCount == 0,
+              pendingAudioOnlyStopIDs.isEmpty,
+              historyRecoverySnapshots.contains(where: {
+                  $0.id == id && $0.integrity == .ready
+              }) else {
+            return false
+        }
+        historyRecoveryImportResult = nil
+        do {
+            try pipelineHistoryStore.detachForArchiveVerification()
+        } catch {
+            errorMessage = historyUnavailableMessage
+            return false
+        }
+
+        let storageRoot = Self.appStorageRootDirectory()
+        let makeStore = Self.pipelineHistoryStoreAtURLFactory
+        let appStateReference = WeakAppStateReference(self)
+        isHistoryRecoveryOperationInProgress = true
+        historyRecoveryOperationMessage = localizedCatalogString("Recovering history…")
+        Task.detached(priority: .userInitiated) {
+            let storeURL = storageRoot.appendingPathComponent("PipelineHistory.sqlite")
+            let activeStore = makeStore(storeURL)
+            do {
+                guard activeStore.availability == .ready,
+                      activeStore.durability == .durable,
+                      activeStore.verifyHistoryReadable() else {
+                    throw HistoryRecoveryServiceError.snapshotNotReady
+                }
+                let result = try HistoryRecoveryService(storageRoot: storageRoot).importSnapshot(
+                    id: id,
+                    into: activeStore,
+                    audioDirectory: storageRoot.appendingPathComponent("audio", isDirectory: true),
+                    transcriptDirectory: storageRoot.appendingPathComponent(
+                        "transcripts",
+                        isDirectory: true
+                    )
+                )
+                try activeStore.detachForArchiveVerification()
+                await MainActor.run {
+                    appStateReference.value?.completeHistoryRecoveryImport(
+                        result,
+                        storageRoot: storageRoot
+                    )
+                }
+            } catch {
+                try? activeStore.detachForArchiveVerification()
+                await MainActor.run {
+                    appStateReference.value?.completeHistoryRecoveryOperationFailure(
+                        at: storageRoot
+                    )
+                }
+            }
+        }
+        return true
+    }
+
+    @MainActor
+    @discardableResult
+    func cancelHistoryRecoveryScheduledDeletion(id: UUID) -> Bool {
+        guard !isHistoryRecoveryOperationInProgress,
+              historyRecoveryInspectionSnapshotID == nil,
+              historyRecoverySnapshots.contains(where: {
+                  $0.id == id && $0.integrity == .ready && $0.status == .completed
+              }) else {
+            return false
+        }
+        runHistoryRecoverySnapshotOperation(
+            message: localizedCatalogString("Cancelling scheduled deletion…")
+        ) { service in
+            try service.cancelScheduledDeletion(for: id)
+        }
+        return true
+    }
+
+    @MainActor
+    @discardableResult
+    func deleteHistoryRecoverySnapshot(id: UUID) -> Bool {
+        guard !isHistoryRecoveryOperationInProgress,
+              historyRecoveryInspectionSnapshotID == nil,
+              historyRecoverySnapshots.contains(where: { $0.id == id }) else {
+            return false
+        }
+        runHistoryRecoverySnapshotOperation(
+            message: localizedCatalogString("Deleting recovery snapshot…")
+        ) { service in
+            try service.deleteSnapshot(id: id)
+        }
+        return true
+    }
+
+    @MainActor
+    private func runHistoryRecoverySnapshotOperation(
+        message: String,
+        operation: @escaping @Sendable (HistoryRecoveryService) throws -> Void
+    ) {
+        let storageRoot = Self.appStorageRootDirectory()
+        let appStateReference = WeakAppStateReference(self)
+        historyRecoveryImportResult = nil
+        isHistoryRecoveryOperationInProgress = true
+        historyRecoveryOperationMessage = message
+        Task.detached(priority: .userInitiated) {
+            do {
+                try operation(HistoryRecoveryService(storageRoot: storageRoot))
+                await MainActor.run {
+                    appStateReference.value?.completeHistoryRecoverySnapshotOperation(
+                        at: storageRoot
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    appStateReference.value?.completeHistoryRecoverySnapshotOperationFailure(
+                        at: storageRoot
+                    )
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func completeHistoryRecoverySnapshotOperation(at storageRoot: URL) {
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        isHistoryRecoveryOperationInProgress = false
+        historyRecoveryOperationMessage = nil
+        synchronizeHistoryPersistenceState()
+        startNextHistoryRecoveryInspection()
+    }
+
+    @MainActor
+    private func completeHistoryRecoverySnapshotOperationFailure(at storageRoot: URL) {
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        isHistoryRecoveryOperationInProgress = false
+        historyRecoveryOperationMessage = nil
+        synchronizeHistoryPersistenceState()
+        invalidateHistoryRecoveryInspectionResults()
+        errorMessage = localizedCatalogString("Recovery snapshot operation could not be completed.")
+    }
+
+    static func appStorageRootDirectory() -> URL {
+        let rootDirectory = storageRootProvider()
+        if !FileManager.default.fileExists(atPath: rootDirectory.path) {
+            try? FileManager.default.createDirectory(
+                at: rootDirectory,
+                withIntermediateDirectories: true
+            )
+        }
+        return rootDirectory
+    }
+
     static func audioStorageDirectory() -> URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Quill"
-        let audioDir = appSupport.appendingPathComponent("\(appName)/audio", isDirectory: true)
+        let audioDir = appStorageRootDirectory().appendingPathComponent("audio", isDirectory: true)
         if !FileManager.default.fileExists(atPath: audioDir.path) {
             try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true)
         }
@@ -4708,9 +5174,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     static func transcriptStorageDirectory() -> URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Quill"
-        let dir = appSupport.appendingPathComponent("\(appName)/transcripts", isDirectory: true)
+        let dir = appStorageRootDirectory().appendingPathComponent("transcripts", isDirectory: true)
         if !FileManager.default.fileExists(atPath: dir.path) {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
@@ -4736,8 +5200,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         artifact,
                         maxCount: Int.max
                     )
-                    for assets in removedAssets {
-                        Self.deleteStoredFiles(assets)
+                    if historyStore.referenceTrust.permitsStartupReferenceCleanup {
+                        for assets in removedAssets {
+                            Self.deleteStoredFiles(assets)
+                        }
                     }
                 } catch {
                     print("Failed to persist recovered recording \(artifact.recordingID): \(error)")
@@ -4763,15 +5229,82 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
-    private static func sweepOrphanStoredFiles(
+    private static func hasStoredAssets(
+        audioDirectory: URL,
+        transcriptDirectory: URL
+    ) -> Bool {
+        let fileManager = FileManager.default
+        for directory in [audioDirectory, transcriptDirectory] {
+            guard fileManager.fileExists(atPath: directory.path) else { continue }
+            guard let fileNames = try? fileManager.contentsOfDirectory(
+                atPath: directory.path
+            ) else {
+                return true
+            }
+            if fileNames.contains(where: { $0 != "inflight" }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func hasUnreferencedStoredAssets(
+        audioDirectory: URL,
+        transcriptDirectory: URL,
+        referencedAudioFileNames: Set<String>,
+        referencedTranscriptFileNames: Set<String>
+    ) -> Bool {
+        let fileManager = FileManager.default
+        let directories = [
+            (audioDirectory, referencedAudioFileNames),
+            (transcriptDirectory, referencedTranscriptFileNames)
+        ]
+        for (directory, referencedFileNames) in directories {
+            guard fileManager.fileExists(atPath: directory.path) else { continue }
+            guard let fileNames = try? fileManager.contentsOfDirectory(
+                atPath: directory.path
+            ) else {
+                return true
+            }
+            if fileNames.contains(where: {
+                $0 != "inflight" && !referencedFileNames.contains($0)
+            }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func markAssetReferencesIncomplete(storageRoot: URL) {
+        let markerURL = storageRoot
+            .appendingPathComponent("History Recovery", isDirectory: true)
+            .appendingPathComponent(
+                "asset-references-incomplete",
+                isDirectory: true
+            )
+        do {
+            try FileManager.default.createDirectory(
+                at: markerURL,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            print("Failed to preserve incomplete history-reference evidence: \(error)")
+        }
+    }
+
+    static func sweepOrphanStoredFiles(
+        audioDirectory: URL,
+        transcriptDirectory: URL,
         referencedAudioFileNames: Set<String>,
         referencedTranscriptFileNames: Set<String>,
-        protectedInflightAudioFileNames: Set<String> = []
+        protectedInflightAudioFileNames: Set<String> = [],
+        referenceTrust: PipelineHistoryReferenceTrust,
+        now: Date = Date()
     ) {
+        guard referenceTrust.permitsStartupReferenceCleanup else { return }
+
         let fileManager = FileManager.default
-        let now = Date()
         let gracePeriod: TimeInterval = 300
-        let audioDirectory = audioStorageDirectory()
         if let audioFiles = try? fileManager.contentsOfDirectory(atPath: audioDirectory.path) {
             for fileName in audioFiles where !referencedAudioFileNames.contains(fileName) {
                 guard fileName != "inflight" else { continue }
@@ -4783,7 +5316,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 try? fileManager.removeItem(at: fileURL)
             }
         }
-        let transcriptDirectory = transcriptStorageDirectory()
         if let transcriptFiles = try? fileManager.contentsOfDirectory(atPath: transcriptDirectory.path) {
             for fileName in transcriptFiles where !referencedTranscriptFileNames.contains(fileName) {
                 let fileURL = transcriptDirectory.appendingPathComponent(fileName)
@@ -5966,8 +6498,240 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
+    private func synchronizeHistoryPersistenceState() {
+        let unavailable = pipelineHistoryStore.availability == .unavailable
+            || historyArchiveSafety == .unresolvedInterruptedTransaction
+        let warning: QuillUserIssueRecord?
+        if unavailable {
+            warning = QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+        } else {
+            warning = nil
+        }
+        guard isHistoryUnavailable != unavailable || historyPersistenceWarning != warning else { return }
+        isHistoryUnavailable = unavailable
+        historyPersistenceWarning = warning
+    }
+
+    private func loadPipelineHistory() -> [PipelineHistoryItem] {
+        let history = pipelineHistoryStore.loadAllHistory()
+        synchronizeHistoryPersistenceState()
+        return history
+    }
+
+    @discardableResult
+    private func requireAvailableHistoryForMutation() -> Bool {
+        guard !isHistoryArchiveTransitioning else {
+            errorMessage = localizedCatalogString("Archiving recording history is still in progress.")
+            return false
+        }
+        guard !isHistoryRecoveryOperationInProgress else {
+            errorMessage = localizedCatalogString("History recovery is still in progress.")
+            return false
+        }
+        synchronizeHistoryPersistenceState()
+        guard !isHistoryUnavailable else {
+            errorMessage = historyUnavailableMessage
+            return false
+        }
+        return true
+    }
+
+    @MainActor
+    @discardableResult
+    func archiveOldHistoryAndStartFresh(
+        postAction: HistoryArchivePostAction = .startFresh
+    ) -> Bool {
+        synchronizeHistoryPersistenceState()
+        guard isHistoryUnavailable,
+              (historyArchiveSafety == .normal || historyArchiveSafety == .unresolvedArchive),
+              !isHistoryArchiveTransitioning,
+              !isHistoryRecoveryOperationInProgress else {
+            return false
+        }
+        guard !isRecording,
+              !isTranscribing,
+              retryingItemIDs.isEmpty,
+              activeTranscriptionJobs.isEmpty,
+              pendingAudioImportJobIDs.isEmpty,
+              !cloudTranscriptionHistoryCoordinator.hasActiveWork,
+              meetingSummaryGeneratingNoteIDs.isEmpty,
+              activeRecordingID == nil,
+              activeSegmentedJournalController == nil,
+              pendingRecordingJournalFinalizationCount == 0,
+              pendingRecordingStartCount == 0,
+              pendingAudioOnlyStopIDs.isEmpty else {
+            errorMessage = localizedCatalogString(
+                "Finish the current recording or transcription before archiving history."
+            )
+            return false
+        }
+
+        do {
+            try pipelineHistoryStore.detachForHistoryArchive()
+        } catch {
+            errorMessage = historyUnavailableMessage
+            return false
+        }
+
+        let storageRoot = Self.appStorageRootDirectory()
+        let makeStore = Self.pipelineHistoryStoreAtURLFactory
+        let appStateReference = WeakAppStateReference(self)
+        isHistoryArchiveTransitioning = true
+        historyArchiveSafety = .transitioning
+        Task.detached(priority: .userInitiated) {
+            do {
+                let result = try HistoryArchiveTransition(
+                    makeStore: makeStore
+                ).archiveAndCreateFreshHistory(at: storageRoot)
+                await MainActor.run {
+                    appStateReference.value?.completeHistoryArchiveTransition(
+                        result,
+                        storageRoot: storageRoot,
+                        postAction: postAction
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    appStateReference.value?.completeHistoryArchiveTransitionFailure(
+                        at: storageRoot
+                    )
+                }
+            }
+        }
+        return true
+    }
+
+    @MainActor
+    private func completeHistoryArchiveTransition(
+        _ result: HistoryArchiveTransitionResult,
+        storageRoot: URL,
+        postAction: HistoryArchivePostAction
+    ) {
+        let activeStore = Self.pipelineHistoryStoreAtURLFactory(
+            storageRoot.appendingPathComponent("PipelineHistory.sqlite")
+        )
+        guard activeStore.availability == .ready,
+              activeStore.durability == .durable,
+              activeStore.verifyHistoryReadable() else {
+            completeHistoryArchiveTransitionFailure(at: storageRoot)
+            return
+        }
+        pipelineHistoryStore = activeStore
+        recordingJournalStore = Self.makeRecordingJournalStore()
+        cloudTranscriptionJobStore = Self.makeCloudTranscriptionJobStore()
+        pipelineHistory = []
+        retryingItemIDs = []
+        pendingAudioImportJobIDs = []
+        cloudTranscriptionProgressByHistoryID = [:]
+        meetingSummaryGeneratingNoteIDs = []
+        meetingSummaryPendingRevealNoteIDs = []
+        forgetAllWarningBannerState()
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        isHistoryArchiveTransitioning = false
+        synchronizeHistoryPersistenceState()
+        if postAction == .openRecovery {
+            openHistoryRecoverySettings()
+        }
+    }
+
+    @MainActor
+    private func completeHistoryRecoveryInspection(
+        _ inspection: HistoryRecoveryInspection,
+        snapshotID: UUID,
+        inspectionRevision: Int,
+        storageRoot: URL
+    ) {
+        guard historyRecoveryInspectionSnapshotID == snapshotID else { return }
+        historyRecoveryInspectionSnapshotID = nil
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        if inspectionRevision == historyRecoveryInspectionRevision,
+           historyRecoverySnapshots.contains(where: { $0.id == inspection.snapshotID }) {
+            historyRecoveryInspections[inspection.snapshotID] = inspection
+        }
+        synchronizeHistoryPersistenceState()
+        startNextHistoryRecoveryInspection()
+    }
+
+    @MainActor
+    private func completeHistoryRecoveryInspectionFailure(
+        snapshotID: UUID,
+        inspectionRevision: Int,
+        storageRoot: URL
+    ) {
+        guard historyRecoveryInspectionSnapshotID == snapshotID else { return }
+        historyRecoveryInspectionSnapshotID = nil
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        if inspectionRevision == historyRecoveryInspectionRevision {
+            historyRecoveryInspections.removeValue(forKey: snapshotID)
+        }
+        synchronizeHistoryPersistenceState()
+        startNextHistoryRecoveryInspection()
+    }
+
+    @MainActor
+    private func completeHistoryRecoveryImport(
+        _ result: HistoryRecoveryImportResult,
+        storageRoot: URL
+    ) {
+        let activeStore = Self.pipelineHistoryStoreAtURLFactory(
+            storageRoot.appendingPathComponent("PipelineHistory.sqlite")
+        )
+        guard activeStore.availability == .ready,
+              activeStore.durability == .durable,
+              activeStore.verifyHistoryReadable() else {
+            completeHistoryRecoveryOperationFailure(at: storageRoot)
+            return
+        }
+        pipelineHistoryStore = activeStore
+        pipelineHistory = loadPipelineHistory()
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        isHistoryRecoveryOperationInProgress = false
+        historyRecoveryOperationMessage = nil
+        if result.failedRecordCount > 0 || result.conflictRecordCount > 0 {
+            historyRecoveryImportResult = result
+        } else {
+            historyRecoveryImportResult = nil
+        }
+        synchronizeHistoryPersistenceState()
+        invalidateHistoryRecoveryInspectionResults()
+    }
+
+    @MainActor
+    private func completeHistoryRecoveryOperationFailure(at storageRoot: URL) {
+        let activeStore = Self.pipelineHistoryStoreAtURLFactory(
+            storageRoot.appendingPathComponent("PipelineHistory.sqlite")
+        )
+        if activeStore.availability == .ready,
+           activeStore.durability == .durable,
+           activeStore.verifyHistoryReadable() {
+            pipelineHistoryStore = activeStore
+            pipelineHistory = loadPipelineHistory()
+        }
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        isHistoryRecoveryOperationInProgress = false
+        historyRecoveryOperationMessage = nil
+        historyRecoveryImportResult = nil
+        synchronizeHistoryPersistenceState()
+        invalidateHistoryRecoveryInspectionResults()
+        errorMessage = localizedCatalogString("History recovery could not be completed.")
+    }
+
+    @MainActor
+    private func completeHistoryArchiveTransitionFailure(at storageRoot: URL) {
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        isHistoryArchiveTransitioning = false
+        synchronizeHistoryPersistenceState()
+        errorMessage = historyUnavailableMessage
+    }
+
     @MainActor
     func clearPipelineHistory() {
+        guard requireAvailableHistoryForMutation() else { return }
         let historyIDs = pipelineHistory.map(\.id)
         for historyID in historyIDs {
             cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(
@@ -6000,7 +6764,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func deleteHistoryEntry(id: UUID) {
-        guard let index = pipelineHistory.firstIndex(where: { $0.id == id }) else { return }
+        guard requireAvailableHistoryForMutation(),
+              let index = pipelineHistory.firstIndex(where: { $0.id == id }) else { return }
         cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(
             historyID: id,
             store: cloudTranscriptionJobStore
@@ -6028,7 +6793,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func updateHistoryItemTitle(id: UUID, title: String) {
-        guard let index = pipelineHistory.firstIndex(where: { $0.id == id }) else { return }
+        guard requireAvailableHistoryForMutation(),
+              let index = pipelineHistory.firstIndex(where: { $0.id == id }) else { return }
         let item = pipelineHistory[index]
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedTitle = trimmed.isEmpty ? nil : trimmed
@@ -6246,9 +7012,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             throw MeetingSummaryError.invalidInput
         }
         switch pipelineHistoryStore.durability {
-        case .durable, .recovered:
+        case .durable:
             break
-        case .inMemory, .inMemoryFallback:
+        case .inMemory:
             throw QuillUserIssueError.historyPersistenceUnavailable()
         }
 
@@ -6409,7 +7175,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         actionID: UUID,
         isCompleted: Bool
     ) throws {
-        guard let noteIndex = pipelineHistory.firstIndex(
+        guard requireAvailableHistoryForMutation(),
+              let noteIndex = pipelineHistory.firstIndex(
             where: { $0.id == noteID }
         ), var envelope = pipelineHistory[noteIndex].meetingSummary,
         let actionIndex = envelope.content.actionItems.firstIndex(
@@ -6426,7 +7193,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func deleteMeetingSummary(noteID: UUID) throws {
-        guard let noteIndex = pipelineHistory.firstIndex(
+        guard requireAvailableHistoryForMutation(),
+              let noteIndex = pipelineHistory.firstIndex(
             where: { $0.id == noteID }
         ) else {
             throw MeetingSummaryError.invalidInput
@@ -6458,7 +7226,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func updateTranscript(id: UUID, text: String) {
-        guard let item = pipelineHistory.first(where: { $0.id == id }) else { return }
+        guard requireAvailableHistoryForMutation(),
+              let item = pipelineHistory.first(where: { $0.id == id }) else { return }
         // 파일에도 동기화해서 앱 재시작 후 폴백 로딩 시에도 일관성 유지
         if let fileName = item.transcriptFileName {
             let fileURL = Self.transcriptStorageDirectory().appendingPathComponent(fileName)
@@ -6525,11 +7294,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func importAudioFile(_ fileURL: URL, mode: NoteBrowserTranscriptionMode) {
+        guard requireAvailableHistoryForMutation() else { return }
         importAudioFile(fileURL, choice: preferredAudioImportChoice(for: mode))
     }
 
     @MainActor
     func importAudioFile(_ fileURL: URL, choice: TranscriptionBackendChoice) {
+        guard requireAvailableHistoryForMutation() else { return }
         guard !choice.usesCloudAPI || hasTranscriptionAPIKey else {
             openProviderSettings()
             return
@@ -6557,9 +7328,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let noteID = UUID()
         let startedAt = Date()
         let importContextSummary = AudioImportOptions.importContextSummary(for: fileURL.lastPathComponent)
+        pendingAudioImportJobIDs.insert(jobID)
 
         Task { [weak self] in
             guard let savedAudioFile = await Self.saveSecurityScopedAudioFileOffMain(from: fileURL) else {
+                self?.pendingAudioImportJobIDs.remove(jobID)
                 self?.errorMessage = localizedCatalogString("Unable to save the audio file. Check disk space or file permissions and try again.")
                 return
             }
@@ -6605,6 +7378,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     cleanupDeletedPipelineHistoryAssets(removedAssets)
                 }
             } catch {
+                self.pendingAudioImportJobIDs.remove(jobID)
                 Self.deleteAudioFile(savedAudioFile.fileName)
                 let issue = self.userIssue(for: error)
                 self.errorMessage = issue.record.presentation().compactMessage
@@ -6621,6 +7395,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 recordingEndedAt: nil,
                 isImportedAudio: true
             )
+            self.pendingAudioImportJobIDs.remove(jobID)
             self.updateTranscriptionJob(jobID) {
                 $0.liveNoteID = noteID
                 $0.audioFileName = savedAudioFile.fileName
@@ -6822,6 +7597,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func retryTranscription(item: PipelineHistoryItem) {
+        guard requireAvailableHistoryForMutation() else { return }
         guard !retryingItemIDs.contains(item.id) else { return }
         guard noteBrowserRetryAvailability(for: item) == .ready else { return }
 
@@ -7795,13 +8571,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     // MCP public interface
     @MainActor
-    func startRecordingFromMCP() {
+    @discardableResult
+    func startRecordingFromMCP() -> Bool {
+        guard requireAvailableHistoryForMutation() else { return false }
         if transcriptionEnabled {
             lastTranscript = ""
         }
         mcpLastRecordingFailed = false
         shortcutSessionController.beginManual(mode: .toggle)
         startRecording(triggerMode: .toggle)
+        return true
     }
 
     @MainActor
@@ -8193,6 +8972,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func startRecording(triggerMode: RecordingTriggerMode, onStarted: (@MainActor () -> Void)? = nil) {
+        guard requireAvailableHistoryForMutation() else { return }
         let t0 = CFAbsoluteTimeGetCurrent()
         os_log(.info, log: recordingLog, "startRecording() entered")
         guard !isRecording else { return }
@@ -8208,8 +8988,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let scheduledManualCommandInvocation = pendingManualCommandInvocation
         cancelPendingShortcutStart()
 
+        pendingRecordingStartCount += 1
         Task { [weak self] in
             guard let self else { return }
+            defer { self.pendingRecordingStartCount -= 1 }
             let manualCommandRequested = scheduledSelectionSnapshot != nil
                 ? scheduledManualCommandInvocation
                 : hotkeyManager.currentPressedModifiers.contains(commandModeManualModifier.shortcutModifier)
@@ -8223,10 +9005,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 activeRecordingCalendarSnapshot = nil
                 return
             }
+            guard requireAvailableHistoryForMutation() else {
+                activeRecordingCalendarSnapshot = nil
+                return
+            }
             guard let audioSelection = await accessibleCurrentRecordingAudioSelection() else {
                 if !isAwaitingMicrophonePermission {
                     activeRecordingCalendarSnapshot = nil
                 }
+                return
+            }
+            guard requireAvailableHistoryForMutation() else {
+                activeRecordingCalendarSnapshot = nil
                 return
             }
             os_log(.info, log: recordingLog, "audio input access check passed: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
@@ -8397,6 +9187,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         hotkeyManager.stop()
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
+        activeRecordingID = nil
         activeRecordingTranscriptionEnabled = nil
         cancelRecordingInitializationTimer()
         clearAudioRecorderCallbacks()
@@ -8515,18 +9306,30 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     strongSelf.isAwaitingMicrophonePermission = false
                     strongSelf.restartHotkeyMonitoring()
 
-                    guard let pendingContext else { return }
+                    guard let pendingContext else {
+                        strongSelf.pendingRecordingStartCount -= 1
+                        return
+                    }
                     if granted {
                         strongSelf.errorMessage = nil
                         if pendingContext.triggerMode == .toggle {
                             Task { @MainActor [weak strongSelf] in
                                 guard let strongSelf else { return }
+                                defer { strongSelf.pendingRecordingStartCount -= 1 }
                                 guard await strongSelf.prepareRecordingStart(
                                     triggerMode: .toggle,
                                     selectionSnapshot: pendingContext.selectionSnapshot,
                                     manualCommandRequested: pendingContext.manualCommandRequested
                                 ) else { return }
+                                guard strongSelf.requireAvailableHistoryForMutation() else {
+                                    strongSelf.activeRecordingCalendarSnapshot = nil
+                                    return
+                                }
                                 guard let audioSelection = await strongSelf.accessibleCurrentRecordingAudioSelection() else { return }
+                                guard strongSelf.requireAvailableHistoryForMutation() else {
+                                    strongSelf.activeRecordingCalendarSnapshot = nil
+                                    return
+                                }
                                 strongSelf.shortcutSessionController.beginManual(mode: .toggle)
                                 if AudioInputDevice.isMicrophoneOnly(audioSelection.inputID) {
                                     strongSelf.applyAudioInterruptionIfNeeded()
@@ -8537,6 +9340,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                                 )
                             }
                         } else {
+                            strongSelf.pendingRecordingStartCount -= 1
                             strongSelf.currentSessionIntent = .dictation
                             strongSelf.statusText = localizedCatalogString("Microphone access granted. Press and hold again to record.")
                             strongSelf.scheduleReadyStatusReset(
@@ -8545,6 +9349,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             )
                         }
                     } else {
+                        strongSelf.pendingRecordingStartCount -= 1
                         strongSelf.activeRecordingCalendarSnapshot = nil
                         strongSelf.errorMessage = localizedCatalogString("Microphone permission denied. Grant access in System Settings > Privacy & Security > Microphone.")
                         strongSelf.statusText = localizedCatalogString("No Microphone")
@@ -8573,6 +9378,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         selectionSnapshot: AppSelectionSnapshot?,
         manualCommandRequested: Bool?
     ) {
+        pendingRecordingStartCount += 1
         isAwaitingMicrophonePermission = true
         pendingMicrophonePermissionContext = PendingRecordingPermissionContext(
             triggerMode: triggerMode,
@@ -8649,6 +9455,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 break
             case .notDetermined:
                 guard let triggerMode = activeRecordingTriggerMode else {
+                    activeRecordingID = nil
                     activeRecordingTranscriptionEnabled = nil
                     return
                 }
@@ -8664,7 +9471,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     self.isAwaitingSpeechRecognitionPermission = false
                     self.restartHotkeyMonitoring()
 
-                    guard let pendingContext else { return }
+                    guard let pendingContext else {
+                        self.activeRecordingID = nil
+                        return
+                    }
                     if granted {
                         self.errorMessage = nil
                         if pendingContext.triggerMode == .toggle {
@@ -8698,6 +9508,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     } else {
                         self.restoreAudioInterruptionIfNeeded()
                         self.activeRecordingCalendarSnapshot = nil
+                        self.activeRecordingID = nil
                         self.errorMessage = localizedCatalogString("Speech Recognition permission is required for Apple Live transcription. Enable it in System Settings > Privacy & Security > Speech Recognition.")
                         self.statusText = localizedCatalogString("No Speech Recognition")
                         self.activeRecordingTriggerMode = nil
@@ -8710,6 +9521,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             default:
                 isRecording = false
                 activeRecordingCalendarSnapshot = nil
+                activeRecordingID = nil
                 activeRecordingTranscriptionEnabled = nil
                 syncCriticalDictationActivity()
                 restoreAudioInterruptionIfNeeded()
@@ -10685,11 +11497,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         } catch {
             if journalRecordingID == nil,
-               !pipelineHistoryStore.loadAllHistory().contains(where: { $0.id == recordingID }) {
-                Self.deleteStoredFiles(
-                    audioFileName: audioFileName,
-                    transcriptFileName: nil
-                )
+               pipelineHistoryStore.availability == .ready,
+               pipelineHistoryStore.durability == .durable,
+               pipelineHistoryStore.verifyHistoryReadable() {
+                let history = pipelineHistoryStore.loadAllHistory()
+                if pipelineHistoryStore.availability == .ready,
+                   pipelineHistoryStore.durability == .durable,
+                   !history.contains(where: { $0.id == recordingID }) {
+                    Self.deleteStoredFiles(
+                        audioFileName: audioFileName,
+                        transcriptFileName: nil
+                    )
+                }
             }
             let message = userIssue(for: error).record.presentation().compactMessage
             completeStoppedRecording(
@@ -10981,6 +11800,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         calendarMatch: CalendarEventMatch? = nil,
         aiProcessingOutcome: AIProcessingOutcome = .succeeded
     ) -> Bool {
+        guard !isHistoryRecoveryOperationInProgress else { return false }
         let existingID = activeTranscriptionJobs[jobID]?.liveNoteID
         let existingEntry = existingID.flatMap { id in
             pipelineHistory.first(where: { $0.id == id })
@@ -11062,7 +11882,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 )
             }
         } catch {
-            if !isJournalAudioFile {
+            if existingID == nil, !isJournalAudioFile {
                 Self.deleteStoredFiles(
                     audioFileName: audioFileName,
                     transcriptFileName: transcriptFileName

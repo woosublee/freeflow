@@ -9,6 +9,7 @@ struct QuillUserIssueUIContractTests {
         let settings = try source("Sources/SettingsView.swift")
         let menuBar = try source("Sources/MenuBarView.swift")
         let appState = try source("Sources/AppState.swift")
+        let historyRecovery = try source("Sources/HistoryRecoveryView.swift")
 
         try testSharedRenderer(issueView)
         try testNoteBrowserUsesStructuredErrorAndWarningUI(noteBrowser)
@@ -20,10 +21,15 @@ struct QuillUserIssueUIContractTests {
         try testDismissibleBannerScopedToWarningStyle(issueView, noteBrowser, appState)
         try testSummaryRetryUsesSummarySpecificCopy(issueView)
         try testSummaryInvalidationDoesNotBecomeTransientFailure(noteBrowser)
+        try testHistoryUnavailableProtectionAndArchiveNotice(
+            noteBrowser, settings, menuBar, appState, historyRecovery
+        )
         try testNonDurableHistoryWarningIsVisibleAndDoesNotExposeBackups(
             menuBar,
             appState
         )
+        try testRecoveryImportOutcomePersistsOutsideProgressOverlay(appState, historyRecovery)
+        try testRecoveryCountGrammarUsesSingularCatalogKeys(historyRecovery)
         print("QuillUserIssueUIContractTests passed")
     }
 
@@ -264,10 +270,6 @@ struct QuillUserIssueUIContractTests {
             "AppState uses the structured non-durable history warning"
         )
         try expect(
-            appState.contains(".historyRecovered"),
-            "AppState publishes a distinct warning after durable history recovery"
-        )
-        try expect(
             menuBar.contains("appState.historyPersistenceWarning"),
             "Menu Bar shows the non-durable history warning"
         )
@@ -278,6 +280,133 @@ struct QuillUserIssueUIContractTests {
         try expect(
             !menuBar.contains("History Recovery"),
             "Menu Bar never exposes a history recovery path"
+        )
+    }
+
+    private static func testRecoveryImportOutcomePersistsOutsideProgressOverlay(
+        _ appState: String,
+        _ historyRecovery: String
+    ) throws {
+        try expect(
+            appState.contains("@Published private(set) var historyRecoveryImportResult")
+                && appState.contains("historyRecoveryImportResult = result"),
+            "AppState publishes partial recovery import outcomes after the operation ends"
+        )
+        try expect(
+            historyRecovery.contains("appState.historyRecoveryImportResult")
+                && historyRecovery.contains("Some history could not be recovered."),
+            "Recovery renders a partial import outcome independently of its progress overlay"
+        )
+        let overlay = block(
+            historyRecovery,
+            from: ".overlay {",
+            to: ".onAppear {"
+        )
+        try expect(
+            !overlay.contains("historyRecoveryImportResult"),
+            "partial recovery feedback does not disappear with the progress overlay"
+        )
+    }
+
+    private static func testRecoveryCountGrammarUsesSingularCatalogKeys(
+        _ historyRecovery: String
+    ) throws {
+        try expect(
+            historyRecovery.contains("private func localizedRecoveryRecordCount(")
+                && historyRecovery.contains("%lld record found.")
+                && historyRecovery.contains("Import %lld record…")
+                && historyRecovery.contains("%lld record is ready to import.")
+                && historyRecovery.contains("%lld record is already in the current history.")
+                && historyRecovery.contains("%lld record conflicts with the current history."),
+            "Recovery record counts choose singular catalog keys before formatting"
+        )
+    }
+
+    private static func testHistoryUnavailableProtectionAndArchiveNotice(
+        _ noteBrowser: String,
+        _ settings: String,
+        _ menuBar: String,
+        _ appState: String,
+        _ historyRecovery: String
+    ) throws {
+        try expect(
+            appState.contains("@Published private(set) var isHistoryUnavailable = false"),
+            "AppState publishes an explicit history-unavailable state"
+        )
+        try expect(
+            appState.contains("func archiveOldHistoryAndStartFresh(")
+                && appState.contains("func openHistoryRecoverySettings()")
+                && appState.contains("@Published private(set) var historyRecoverySnapshots"),
+            "AppState exposes archive post-actions and recovery settings state"
+        )
+        for source in [noteBrowser, settings, menuBar] {
+            try expect(
+                source.contains("appState.isHistoryUnavailable"),
+                "every history surface retains the protected state"
+            )
+            try expect(
+                source.contains("HistoryUnavailableRecoveryActions"),
+                "every protected history surface uses shared recovery actions"
+            )
+        }
+        try expect(
+            !noteBrowser.contains("HistoryArchiveNoticeView")
+                && !settings.contains("HistoryArchiveNoticeView"),
+            "Note Browser and Run Log leave archive management to Settings Recovery"
+        )
+        try expect(
+            settings.contains("HistoryRecoverySettingsView()")
+                && settings.contains("tab != .recovery || !appState.historyRecoverySnapshots.isEmpty"),
+            "Settings exposes Recovery only when a snapshot exists"
+        )
+        try expect(
+            settings.contains("case .recovery where !appState.historyRecoverySnapshots.isEmpty:")
+                && settings.contains("case .recovery:\n                    GeneralSettingsView()"),
+            "Settings falls back to General when an asynchronous snapshot deletion hides Recovery"
+        )
+        try expect(
+            menuBar.contains("Button(\"Recovery…\")")
+                && menuBar.contains("appState.openHistoryRecoverySettings()"),
+            "Menu Bar routes published snapshots to Settings Recovery"
+        )
+        try expect(
+            menuBar.contains("appState.isHistoryRecoveryOperationInProgress")
+                && !menuBar.contains("historyRecoveryInspectionSnapshotID"),
+            "Menu Bar blocks recording only while recovery changes active history"
+        )
+        try expect(
+            noteBrowser.contains("if appState.isHistoryUnavailable"),
+            "Note Browser checks protected state before normal history"
+        )
+        for marker in [
+            "Recover Earlier History…",
+            "Start Fresh…",
+            "Archive and Open Recovery",
+            "Archive and Start Fresh",
+            "Open Data Folder",
+            ".confirmationDialog(",
+            "role: .destructive",
+            "postAction: .openRecovery",
+            "postAction: .startFresh",
+            "struct HistoryRecoverySettingsView",
+            "ensureHistoryRecoveryInspection()",
+            "Unable to Inspect",
+            "Retry Inspection",
+            "Import %lld records…",
+            "Cancel Scheduled Deletion",
+            "Delete Recovery Snapshot…"
+        ] {
+            try expect(historyRecovery.contains(marker), "recovery UI contains \(marker)")
+        }
+        try expect(
+            !historyRecovery.contains("Check Recovery Contents"),
+            "Recovery automatically inspects snapshots instead of requiring a manual preflight button"
+        )
+        try expect(
+            !historyRecovery.contains("HistoryArchiveNoticeView")
+                && !historyRecovery.contains("backupName")
+                && !historyRecovery.contains("History Recovery"),
+            "recovery UI omits archive notices and internal paths"
         )
     }
 

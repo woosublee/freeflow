@@ -45,6 +45,7 @@ struct RecoveredRecordingNoteBrowserSourceTests {
         try testAudioOnlyNoteUsesDedicatedNormalState()
         try testInputPickerSwitchesActiveRecordingInput(source)
         try testInputMenuCatcherDisablesAndLocalizesSources(source)
+        try testRecoveryImportPreservesSelectedListPosition(source)
 
         print("RecoveredRecordingNoteBrowserSourceTests passed")
     }
@@ -144,6 +145,54 @@ struct RecoveredRecordingNoteBrowserSourceTests {
         precondition(!audioOnlyStatus.contains(".fill(Color.blue)"))
     }
 
+    private static func testRecoveryImportPreservesSelectedListPosition(
+        _ source: String
+    ) throws {
+        let selectionUpdate = block(
+            source,
+            from: ".onReceive(appState.$pipelineHistory) { newHistory in",
+            to: "private var historyUnavailableView: some View"
+        )
+        try expect(
+            selectionUpdate.contains("let isRecoveryImport = appState.isHistoryRecoveryOperationInProgress")
+                && selectionUpdate.contains("if isRecoveryImport {")
+                && selectionUpdate.contains("scheduleRecoveryScrollRestore(for: current)"),
+            "Recovery imports schedule the existing selection as the list restore anchor"
+        )
+
+        let restore = block(
+            source,
+            from: "private func restoreRecoveryScrollPosition(",
+            to: "private func transcriptionChoiceMenuItem"
+        )
+        try expect(
+            restore.contains("filteredHistory.contains(where: { $0.id == request.itemID })")
+                && restore.contains("DispatchQueue.main.async")
+                && restore.contains("proxy.scrollTo(request.itemID, anchor: .center)"),
+            "scroll restoration keeps an active search filter unchanged and scrolls asynchronously"
+        )
+
+        let reader = block(
+            source,
+            from: "ScrollViewReader { proxy in",
+            to: ".frame(width: 280)"
+        )
+        try expect(
+            reader.contains(".id(item.id)")
+                && reader.contains(".onChange(of: recoveryScrollRestoreRequest?.id)")
+                && reader.contains("restoreRecoveryScrollPosition(")
+                && reader.contains("request: recoveryScrollRestoreRequest"),
+            "ScrollViewReader observes the scheduled recovery request and restores the matching row"
+        )
+    }
+
+    private static func expect(
+        _ condition: @autoclosure () -> Bool,
+        _ message: String
+    ) throws {
+        guard condition() else { throw NoteBrowserSourceTestFailure(message) }
+    }
+
     private static func block(
         _ source: String,
         from startMarker: String,
@@ -157,5 +206,13 @@ struct RecoveredRecordingNoteBrowserSourceTests {
             preconditionFailure("Expected source block from \(startMarker) to \(endMarker)")
         }
         return String(source[start.lowerBound..<end.lowerBound])
+    }
+}
+
+private struct NoteBrowserSourceTestFailure: Error, CustomStringConvertible {
+    let description: String
+
+    init(_ description: String) {
+        self.description = description
     }
 }

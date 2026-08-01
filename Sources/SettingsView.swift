@@ -359,7 +359,10 @@ struct SettingsView: View {
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
-                ForEach(SettingsTab.orderedCases.filter { ($0 != .debug && $0 != .runLog) || AppBuild.isDevBundle }) { tab in
+                ForEach(SettingsTab.orderedCases.filter { tab in
+                    ((tab != .debug && tab != .runLog) || AppBuild.isDevBundle)
+                        && (tab != .recovery || !appState.historyRecoverySnapshots.isEmpty)
+                }) { tab in
                     Button {
                         appState.selectedSettingsTab = tab
                     } label: {
@@ -399,6 +402,10 @@ struct SettingsView: View {
                     InputSettingsView()
                 case .calendar:
                     CalendarSettingsView()
+                case .recovery where !appState.historyRecoverySnapshots.isEmpty:
+                    HistoryRecoverySettingsView()
+                case .recovery:
+                    GeneralSettingsView()
                 case .about:
                     AboutSettingsView()
                 case .runLog where AppBuild.isDevBundle:
@@ -4202,7 +4209,7 @@ struct RunLogView: View {
                 Button("Clear History") {
                     appState.clearPipelineHistory()
                 }
-                .disabled(appState.pipelineHistory.isEmpty)
+                .disabled(appState.pipelineHistory.isEmpty || appState.isHistoryUnavailable)
             }
             .padding(.horizontal, 24)
             .padding(.top, 20)
@@ -4210,7 +4217,25 @@ struct RunLogView: View {
 
             Divider()
 
-            if appState.pipelineHistory.isEmpty {
+            if appState.isHistoryUnavailable {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "externaldrive.badge.exclamationmark")
+                        .font(.system(size: 30, weight: .light))
+                        .foregroundStyle(.orange)
+                    Text("Recording history couldn’t be opened")
+                        .font(.headline)
+                    Text("Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 420)
+                    HistoryUnavailableRecoveryActions()
+                    Spacer()
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity)
+            } else if appState.pipelineHistory.isEmpty {
                 VStack {
                     Spacer()
                     Text("No runs yet. Use dictation to populate history.")

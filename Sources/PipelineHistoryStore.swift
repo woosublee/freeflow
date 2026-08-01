@@ -13,11 +13,68 @@ enum PipelineHistoryStoreError: Error {
     case historyEntryNotFound
 }
 
+struct HistoryArchiveSnapshotComponent: Codable, Equatable, Sendable {
+    enum Identifier: String, Codable, CaseIterable, Sendable {
+        case sqlite
+        case sqliteWAL
+        case sqliteSHM
+        case assetReferenceSnapshot
+        case audio
+        case transcripts
+        case cloudTranscriptionJobs
+        case legacyRecoveryEvidence
+    }
+
+    let identifier: Identifier
+    let relativePath: String
+    let byteCount: UInt64
+    let isDirectory: Bool
+}
+
+struct HistoryArchiveSnapshot: Codable, Equatable, Sendable {
+    static let currentSchemaVersion = 1
+
+    let schemaVersion: Int
+    let id: UUID
+    let archivedAt: Date
+    let components: [HistoryArchiveSnapshotComponent]
+}
+
+enum PipelineHistoryStoreAvailability: Equatable, Sendable {
+    case ready
+    case unavailable
+}
+
 enum PipelineHistoryDurability: Equatable, Sendable {
     case durable
-    case recovered(backupName: String)
     case inMemory
-    case inMemoryFallback
+}
+
+enum PipelineHistoryReferenceTrust: Equatable, Sendable {
+    case complete
+    case recovered
+    case unavailable
+
+    var permitsStartupReferenceCleanup: Bool {
+        self == .complete
+    }
+}
+
+enum PipelineHistoryAssetReferenceSnapshotState: Equatable {
+    case matches
+    case missing
+    case mismatch
+    case unavailable
+}
+
+private struct PipelineHistoryAssetReferenceSnapshot: Codable, Equatable {
+    let audioFileNames: [String]
+    let transcriptFileNames: [String]
+
+    init(audioFileNames: Set<String>, transcriptFileNames: Set<String>) {
+        self.audioFileNames = audioFileNames.sorted()
+        self.transcriptFileNames = transcriptFileNames.sorted()
+    }
 }
 
 final class PipelineHistoryStore {
@@ -28,16 +85,18 @@ final class PipelineHistoryStore {
 
     private let container: NSPersistentContainer
     private let contextSaver: (NSManagedObjectContext) throws -> Void
+    private let historyFetcher: (NSManagedObjectContext, NSFetchRequest<PipelineHistoryEntry>) throws -> [PipelineHistoryEntry]
+    private let assetReferenceSnapshotURL: URL?
     private var isStoreLoaded: Bool
+    private var canSynchronizeAssetReferenceSnapshot = false
+    private(set) var hadPersistentStoreAtLoad: Bool
+    private(set) var availability: PipelineHistoryStoreAvailability
+    private(set) var loadError: Error?
     private(set) var durability: PipelineHistoryDurability
+    private(set) var referenceTrust: PipelineHistoryReferenceTrust
 
     private var isDurableStore: Bool {
-        switch durability {
-        case .durable, .recovered:
-            true
-        case .inMemory, .inMemoryFallback:
-            false
-        }
+        durability == .durable
     }
 
     convenience init() {
@@ -48,9 +107,7 @@ final class PipelineHistoryStore {
         self.init(
             storeURL: inMemory ? nil : Self.defaultStoreURL(),
             usesInMemoryStore: inMemory,
-            persistentStoreLoader: Self.loadPersistentStoresSynchronously,
-            moveItem: Self.moveFile,
-            contextSaver: Self.save
+            persistentStoreLoader: Self.loadPersistentStoresSynchronously
         )
     }
 
@@ -63,16 +120,40 @@ final class PipelineHistoryStore {
 
     convenience init(
         storeURL: URL,
+        persistentStoreLoader: @escaping (NSPersistentContainer) -> Error?
+    ) {
+        self.init(
+            storeURL: storeURL,
+            usesInMemoryStore: false,
+            persistentStoreLoader: persistentStoreLoader
+        )
+    }
+
+    convenience init(
+        storeURL: URL,
         persistentStoreLoader: @escaping (NSPersistentContainer) -> Error?,
-        moveItem: @escaping (URL, URL) throws -> Void = PipelineHistoryStore.moveFile,
-        contextSaver: @escaping (NSManagedObjectContext) throws -> Void = PipelineHistoryStore.save
+        contextSaver: @escaping (NSManagedObjectContext) throws -> Void
     ) {
         self.init(
             storeURL: storeURL,
             usesInMemoryStore: false,
             persistentStoreLoader: persistentStoreLoader,
-            moveItem: moveItem,
             contextSaver: contextSaver
+        )
+    }
+
+    convenience init(
+        storeURL: URL,
+        historyFetcher: @escaping (
+            NSManagedObjectContext,
+            NSFetchRequest<PipelineHistoryEntry>
+        ) throws -> [PipelineHistoryEntry]
+    ) {
+        self.init(
+            storeURL: storeURL,
+            usesInMemoryStore: false,
+            persistentStoreLoader: Self.loadPersistentStoresSynchronously,
+            historyFetcher: historyFetcher
         )
     }
 
@@ -80,90 +161,233 @@ final class PipelineHistoryStore {
         storeURL: URL?,
         usesInMemoryStore: Bool,
         persistentStoreLoader: @escaping (NSPersistentContainer) -> Error?,
-        moveItem: @escaping (URL, URL) throws -> Void,
-        contextSaver: @escaping (NSManagedObjectContext) throws -> Void
+        contextSaver: @escaping (NSManagedObjectContext) throws -> Void = { context in
+            try context.save()
+        },
+        historyFetcher: @escaping (
+            NSManagedObjectContext,
+            NSFetchRequest<PipelineHistoryEntry>
+        ) throws -> [PipelineHistoryEntry] = { context, request in
+            try context.fetch(request)
+        }
     ) {
         container = NSPersistentContainer(
             name: "PipelineHistory",
             managedObjectModel: Self.managedObjectModel
         )
         self.contextSaver = contextSaver
+        self.historyFetcher = historyFetcher
+        assetReferenceSnapshotURL = Self.assetReferenceSnapshotURL(for: storeURL)
         isStoreLoaded = false
+        hadPersistentStoreAtLoad = Self.hasPersistentStoreFiles(at: storeURL)
+        availability = .ready
+        loadError = nil
         durability = usesInMemoryStore ? .inMemory : .durable
-
-        var loaded = false
-        var recoveredBackupName: String?
+        referenceTrust = .unavailable
 
         if usesInMemoryStore {
             configureInMemoryStore()
-            loaded = persistentStoreLoader(container) == nil
-        } else {
-            configurePersistentStore(at: storeURL)
-            if persistentStoreLoader(container) == nil {
-                loaded = true
-            } else if let storeURL {
-                print("[PipelineHistoryStore] Failed to load persistent store. Attempting recovery.")
-                do {
-                    recoveredBackupName = try Self.moveSQLiteStoreFilesToRecovery(
-                        at: storeURL,
-                        moveItem: moveItem
-                    )
-                    removeLoadedPersistentStores()
-                    configurePersistentStore(at: storeURL)
-                    loaded = persistentStoreLoader(container) == nil
-                } catch {
-                    print("[PipelineHistoryStore] Failed to preserve persistent history. Falling back to in-memory history.")
-                    configureInMemoryStore()
-                    loaded = persistentStoreLoader(container) == nil
-                    durability = .inMemoryFallback
-                    isStoreLoaded = loaded
-                    return
-                }
+            loadError = persistentStoreLoader(container)
+            isStoreLoaded = loadError == nil
+            availability = isStoreLoaded ? .ready : .unavailable
+            referenceTrust = .unavailable
+            return
+        }
 
-                if !loaded {
-                    print("[PipelineHistoryStore] Failed to recover persistent store. Falling back to in-memory history.")
-                    configureInMemoryStore()
-                    loaded = persistentStoreLoader(container) == nil
-                    durability = .inMemoryFallback
-                    isStoreLoaded = loaded
-                    return
-                }
-            } else {
-                loaded = persistentStoreLoader(container) == nil
-                if !loaded {
-                    configureInMemoryStore()
-                    loaded = persistentStoreLoader(container) == nil
-                    durability = .inMemoryFallback
-                    isStoreLoaded = loaded
-                    return
-                }
+        configurePersistentStore(at: storeURL)
+        if let error = persistentStoreLoader(container) {
+            loadError = error
+            availability = .unavailable
+            durability = .inMemory
+            referenceTrust = .unavailable
+            removeLoadedPersistentStores()
+            configureInMemoryStore()
+            isStoreLoaded = Self.loadPersistentStoresSynchronously(container: container) == nil
+            print("[PipelineHistoryStore] Persistent history is unavailable; preserving the original store files.")
+            return
+        }
+
+        isStoreLoaded = true
+        availability = .ready
+        durability = .durable
+        referenceTrust = Self.makeReferenceTrust(
+            isStoreLoaded: true,
+            usesInMemoryStore: false,
+            storeURL: storeURL
+        )
+    }
+
+    @discardableResult
+    func verifyHistoryReadable() -> Bool {
+        guard availability == .ready, isStoreLoaded else {
+            referenceTrust = .unavailable
+            return false
+        }
+        var fetchError: Error?
+        container.viewContext.performAndWait {
+            do {
+                let request = pipelineHistoryRequest()
+                request.fetchLimit = 1
+                request.includesPropertyValues = false
+                _ = try historyFetcher(container.viewContext, request)
+            } catch {
+                fetchError = error
             }
         }
-
-        isStoreLoaded = loaded
-        if usesInMemoryStore {
-            durability = .inMemory
-        } else {
-            durability = recoveredBackupName.map(PipelineHistoryDurability.recovered) ?? .durable
+        if let fetchError {
+            markHistoryUnavailable(fetchError)
+            return false
         }
+        return true
     }
 
     func loadAllHistory() -> [PipelineHistoryItem] {
-        guard isStoreLoaded else { return [] }
+        guard availability == .ready, isStoreLoaded else {
+            referenceTrust = .unavailable
+            return []
+        }
         var result: [PipelineHistoryItem] = []
+        var fetchError: Error?
         container.viewContext.performAndWait {
-            let request = pipelineHistoryRequest()
-            request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: false)]
-            guard let entities = try? container.viewContext.fetch(request) else { return }
-            result = entities.compactMap(Self.makeHistoryItem(from:))
+            do {
+                let request = pipelineHistoryRequest()
+                request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: false)]
+                let entities = try historyFetcher(container.viewContext, request)
+                result = entities.compactMap(Self.makeHistoryItem(from:))
+            } catch {
+                fetchError = error
+            }
+        }
+        if let fetchError {
+            markHistoryUnavailable(fetchError)
         }
         return result
     }
 
+    private func markHistoryUnavailable(_ error: Error) {
+        availability = .unavailable
+        isStoreLoaded = false
+        loadError = error
+        referenceTrust = .unavailable
+        canSynchronizeAssetReferenceSnapshot = false
+    }
+
+    func detachForHistoryArchive() throws {
+        guard availability == .unavailable else {
+            throw PipelineHistoryStoreError.storeUnavailable
+        }
+        try detachPersistentStores()
+        isStoreLoaded = false
+        canSynchronizeAssetReferenceSnapshot = false
+    }
+
+    func detachForArchiveVerification() throws {
+        try detachPersistentStores()
+    }
+
+    private func detachPersistentStores() throws {
+        var thrownError: Error?
+        container.viewContext.performAndWait {
+            do {
+                container.viewContext.reset()
+                let coordinator = container.persistentStoreCoordinator
+                for store in coordinator.persistentStores {
+                    try coordinator.remove(store)
+                }
+            } catch {
+                thrownError = error
+            }
+        }
+        if let thrownError { throw thrownError }
+    }
+
+    func assetReferenceSnapshotState(
+        audioFileNames: Set<String>,
+        transcriptFileNames: Set<String>
+    ) -> PipelineHistoryAssetReferenceSnapshotState {
+        guard availability == .ready else {
+            canSynchronizeAssetReferenceSnapshot = false
+            return .unavailable
+        }
+        guard let assetReferenceSnapshotURL else {
+            canSynchronizeAssetReferenceSnapshot = false
+            return .unavailable
+        }
+        guard FileManager.default.fileExists(atPath: assetReferenceSnapshotURL.path) else {
+            canSynchronizeAssetReferenceSnapshot = false
+            return .missing
+        }
+        do {
+            let snapshot = try JSONDecoder().decode(
+                PipelineHistoryAssetReferenceSnapshot.self,
+                from: Data(contentsOf: assetReferenceSnapshotURL)
+            )
+            let currentSnapshot = PipelineHistoryAssetReferenceSnapshot(
+                audioFileNames: audioFileNames,
+                transcriptFileNames: transcriptFileNames
+            )
+            let state: PipelineHistoryAssetReferenceSnapshotState = snapshot == currentSnapshot
+                ? .matches
+                : .mismatch
+            canSynchronizeAssetReferenceSnapshot = state == .matches
+            return state
+        } catch {
+            canSynchronizeAssetReferenceSnapshot = false
+            return .unavailable
+        }
+    }
+
+    @discardableResult
+    func bootstrapAssetReferenceSnapshot(
+        audioFileNames: Set<String>,
+        transcriptFileNames: Set<String>
+    ) -> Bool {
+        guard availability == .ready,
+              assetReferenceSnapshotState(
+            audioFileNames: audioFileNames,
+            transcriptFileNames: transcriptFileNames
+        ) == .missing else {
+            return false
+        }
+        do {
+            try saveAssetReferenceSnapshot(
+                audioFileNames: audioFileNames,
+                transcriptFileNames: transcriptFileNames
+            )
+            canSynchronizeAssetReferenceSnapshot = true
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func saveAssetReferenceSnapshot(
+        audioFileNames: Set<String>,
+        transcriptFileNames: Set<String>
+    ) throws {
+        guard availability == .ready,
+              let assetReferenceSnapshotURL else {
+            throw PipelineHistoryStoreError.storeUnavailable
+        }
+        let snapshot = PipelineHistoryAssetReferenceSnapshot(
+            audioFileNames: audioFileNames,
+            transcriptFileNames: transcriptFileNames
+        )
+        let data = try JSONEncoder().encode(snapshot)
+        try data.write(to: assetReferenceSnapshotURL, options: .atomic)
+    }
+
     func append(_ item: PipelineHistoryItem, maxCount: Int) throws -> [DeletedPipelineHistoryAssets] {
-        guard isStoreLoaded else { return [] }
+        guard availability == .ready, isStoreLoaded else {
+            throw PipelineHistoryStoreError.storeUnavailable
+        }
         try insert(item)
-        return try trim(to: maxCount)
+        let deletedAssets = try trim(
+            to: maxCount,
+            shouldSynchronizeAssetReferenceSnapshot: false
+        )
+        synchronizeAssetReferenceSnapshot()
+        return deletedAssets
     }
 
     func upsert(
@@ -171,7 +395,7 @@ final class PipelineHistoryStore {
         maxCount: Int,
         requiresDurableStore: Bool = false
     ) throws -> [DeletedPipelineHistoryAssets] {
-        guard isStoreLoaded else {
+        guard availability == .ready, isStoreLoaded else {
             throw PipelineHistoryStoreError.storeUnavailable
         }
         if requiresDurableStore, !isDurableStore {
@@ -192,24 +416,27 @@ final class PipelineHistoryStore {
             }
         }
         if let thrownError { throw thrownError }
-        return try trim(to: maxCount)
+        let deletedAssets = try trim(
+            to: maxCount,
+            shouldSynchronizeAssetReferenceSnapshot: false
+        )
+        synchronizeAssetReferenceSnapshot()
+        return deletedAssets
     }
 
     func update(
         _ item: PipelineHistoryItem,
         requiresDurableStore: Bool = false
     ) throws {
-        guard isStoreLoaded else {
-            if requiresDurableStore {
-                throw PipelineHistoryStoreError.storeUnavailable
-            }
-            return
+        guard availability == .ready, isStoreLoaded else {
+            throw PipelineHistoryStoreError.storeUnavailable
         }
         if requiresDurableStore, !isDurableStore {
             throw PipelineHistoryStoreError.durableStoreUnavailable
         }
 
         var thrownError: Error?
+        var didChangeAssetReferences = false
         container.viewContext.performAndWait {
             do {
                 let request = pipelineHistoryRequest()
@@ -217,6 +444,8 @@ final class PipelineHistoryStore {
                 guard let entity = try container.viewContext.fetch(request).first else {
                     throw PipelineHistoryStoreError.historyEntryNotFound
                 }
+                didChangeAssetReferences = entity.audioFileName != item.audioFileName
+                    || entity.transcriptFileName != item.transcriptFileName
                 Self.apply(item, to: entity)
                 try saveContext()
             } catch {
@@ -224,6 +453,9 @@ final class PipelineHistoryStore {
             }
         }
         if let thrownError { throw thrownError }
+        if didChangeAssetReferences {
+            synchronizeAssetReferenceSnapshot()
+        }
     }
 
     func delete(
@@ -231,11 +463,8 @@ final class PipelineHistoryStore {
         requiresDurableStore: Bool = false,
         beforeDeleting: (DeletedPipelineHistoryAssets) -> Void = { _ in }
     ) throws -> DeletedPipelineHistoryAssets? {
-        guard isStoreLoaded else {
-            if requiresDurableStore {
-                throw PipelineHistoryStoreError.storeUnavailable
-            }
-            return nil
+        guard availability == .ready, isStoreLoaded else {
+            throw PipelineHistoryStoreError.storeUnavailable
         }
         if requiresDurableStore, !isDurableStore {
             throw PipelineHistoryStoreError.durableStoreUnavailable
@@ -260,6 +489,9 @@ final class PipelineHistoryStore {
             }
         }
         if let thrownError { throw thrownError }
+        if deletedAssets != nil {
+            synchronizeAssetReferenceSnapshot()
+        }
         return deletedAssets
     }
 
@@ -267,11 +499,8 @@ final class PipelineHistoryStore {
         requiresDurableStore: Bool = false,
         beforeDeleting: ([DeletedPipelineHistoryAssets]) -> Void = { _ in }
     ) throws -> [DeletedPipelineHistoryAssets] {
-        guard isStoreLoaded else {
-            if requiresDurableStore {
-                throw PipelineHistoryStoreError.storeUnavailable
-            }
-            return []
+        guard availability == .ready, isStoreLoaded else {
+            throw PipelineHistoryStoreError.storeUnavailable
         }
         if requiresDurableStore, !isDurableStore {
             throw PipelineHistoryStoreError.durableStoreUnavailable
@@ -283,7 +512,7 @@ final class PipelineHistoryStore {
             do {
                 let request = pipelineHistoryRequest()
                 request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: false)]
-                let entities = try container.viewContext.fetch(request)
+                let entities = try historyFetcher(container.viewContext, request)
                 deletedAssets = entities.map(Self.deletedAssets(from:))
                 beforeDeleting(deletedAssets)
                 for entity in entities {
@@ -295,14 +524,20 @@ final class PipelineHistoryStore {
             }
         }
         if let thrownError { throw thrownError }
+        if !deletedAssets.isEmpty {
+            synchronizeAssetReferenceSnapshot()
+        }
         return deletedAssets
     }
 
     func trim(
         to maxCount: Int,
-        beforeDeleting: ([DeletedPipelineHistoryAssets]) -> Void = { _ in }
+        beforeDeleting: ([DeletedPipelineHistoryAssets]) -> Void = { _ in },
+        shouldSynchronizeAssetReferenceSnapshot: Bool = true
     ) throws -> [DeletedPipelineHistoryAssets] {
-        guard isStoreLoaded else { return [] }
+        guard availability == .ready, isStoreLoaded else {
+            throw PipelineHistoryStoreError.storeUnavailable
+        }
         guard maxCount > 0 else {
             let deletedAssets = try clearAll(beforeDeleting: beforeDeleting)
             return deletedAssets
@@ -314,7 +549,8 @@ final class PipelineHistoryStore {
             do {
                 let request = pipelineHistoryRequest()
                 request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: false)]
-                guard let entities = try? container.viewContext.fetch(request), entities.count > maxCount else { return }
+                let entities = try historyFetcher(container.viewContext, request)
+                guard entities.count > maxCount else { return }
                 let dropped = entities[maxCount...]
                 deletedAssets = dropped.map(Self.deletedAssets(from:))
                 beforeDeleting(deletedAssets)
@@ -327,6 +563,9 @@ final class PipelineHistoryStore {
             }
         }
         if let thrownError { throw thrownError }
+        if shouldSynchronizeAssetReferenceSnapshot, !deletedAssets.isEmpty {
+            synchronizeAssetReferenceSnapshot()
+        }
         return deletedAssets
     }
 
@@ -392,10 +631,6 @@ final class PipelineHistoryStore {
         entity.meetingSummaryJSON = item.meetingSummaryJSON
     }
 
-    private static func save(_ context: NSManagedObjectContext) throws {
-        try context.save()
-    }
-
     private func saveContext() throws {
         guard container.viewContext.hasChanges else { return }
         do {
@@ -404,6 +639,50 @@ final class PipelineHistoryStore {
             container.viewContext.rollback()
             throw error
         }
+    }
+
+    private func synchronizeAssetReferenceSnapshot() {
+        guard canSynchronizeAssetReferenceSnapshot,
+              referenceTrust.permitsStartupReferenceCleanup,
+              let fileNames = loadAssetReferenceFileNames() else {
+            return
+        }
+        do {
+            try saveAssetReferenceSnapshot(
+                audioFileNames: fileNames.audio,
+                transcriptFileNames: fileNames.transcripts
+            )
+        } catch {
+            canSynchronizeAssetReferenceSnapshot = false
+            referenceTrust = .unavailable
+        }
+    }
+
+    private func loadAssetReferenceFileNames() -> (
+        audio: Set<String>,
+        transcripts: Set<String>
+    )? {
+        guard availability == .ready, isStoreLoaded else { return nil }
+        var audioFileNames = Set<String>()
+        var transcriptFileNames = Set<String>()
+        var fetchError: Error?
+        container.viewContext.performAndWait {
+            do {
+                let request = NSFetchRequest<NSDictionary>(entityName: "PipelineHistoryEntry")
+                request.resultType = .dictionaryResultType
+                request.propertiesToFetch = ["audioFileName", "transcriptFileName"]
+                let rows = try container.viewContext.fetch(request)
+                audioFileNames = Set(rows.compactMap { $0["audioFileName"] as? String })
+                transcriptFileNames = Set(rows.compactMap { $0["transcriptFileName"] as? String })
+            } catch {
+                fetchError = error
+            }
+        }
+        if let fetchError {
+            markHistoryUnavailable(fetchError)
+            return nil
+        }
+        return (audioFileNames, transcriptFileNames)
     }
 
     private func pipelineHistoryRequest() -> NSFetchRequest<PipelineHistoryEntry> {
@@ -443,17 +722,153 @@ final class PipelineHistoryStore {
         }
     }
 
-    private static func defaultStoreURL() -> URL? {
-        guard let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else {
-            return nil
+    private enum RecoveryBackupInspection {
+        case absent
+        case present
+        case unavailable
+    }
+
+    private static func makeReferenceTrust(
+        isStoreLoaded: Bool,
+        usesInMemoryStore: Bool,
+        storeURL: URL?
+    ) -> PipelineHistoryReferenceTrust {
+        guard isStoreLoaded, !usesInMemoryStore else {
+            return .unavailable
         }
-        let baseURL = appSupport.appendingPathComponent(
-            AppName.displayName,
+        switch inspectRecoveryBackups(near: storeURL) {
+        case .present:
+            return .recovered
+        case .unavailable:
+            return .unavailable
+        case .absent:
+            return .complete
+        }
+    }
+
+    private static func hasPersistentStoreFiles(at storeURL: URL?) -> Bool {
+        guard let storeURL else { return false }
+        return FileManager.default.fileExists(atPath: storeURL.path)
+    }
+
+    private static func assetReferenceSnapshotURL(for storeURL: URL?) -> URL? {
+        guard let storeURL else { return nil }
+        let storeName = storeURL.deletingPathExtension().lastPathComponent
+        return storeURL.deletingLastPathComponent().appendingPathComponent(
+            "\(storeName)-asset-references.json"
+        )
+    }
+
+    private static func inspectRecoveryBackups(
+        near storeURL: URL?
+    ) -> RecoveryBackupInspection {
+        guard let storeURL else { return .absent }
+        let archiveInspection = inspectPublishedHistoryArchives(near: storeURL)
+        switch archiveInspection {
+        case .present, .unavailable:
+            return archiveInspection
+        case .absent:
+            return inspectLegacyRecoveryEvidence(near: storeURL)
+        }
+    }
+
+    private static func inspectPublishedHistoryArchives(
+        near storeURL: URL
+    ) -> RecoveryBackupInspection {
+        let recoveryRootURL = storeURL.deletingLastPathComponent()
+            .appendingPathComponent("Recovery", isDirectory: true)
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: recoveryRootURL.path) else {
+            return .absent
+        }
+        let transactionsURL = recoveryRootURL.appendingPathComponent(
+            ".transactions",
             isDirectory: true
         )
+        if fileManager.fileExists(atPath: transactionsURL.path) {
+            do {
+                guard try transactionsURL.resourceValues(forKeys: [.isDirectoryKey])
+                    .isDirectory == true,
+                      try fileManager.contentsOfDirectory(atPath: transactionsURL.path).isEmpty else {
+                    return .unavailable
+                }
+            } catch {
+                return .unavailable
+            }
+        }
+        do {
+            let entries = try fileManager.contentsOfDirectory(
+                at: recoveryRootURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+            var hasPublishedArchive = false
+            for entry in entries {
+                let isDirectory = try entry.resourceValues(forKeys: [.isDirectoryKey])
+                    .isDirectory == true
+                if entry.lastPathComponent == ".transactions" {
+                    guard isDirectory else { return .unavailable }
+                    if try !fileManager.contentsOfDirectory(atPath: entry.path).isEmpty {
+                        return .unavailable
+                    }
+                    continue
+                }
+                guard entry.lastPathComponent.hasPrefix("history-") else { continue }
+                guard isDirectory else { return .unavailable }
+                let manifestURL = entry.appendingPathComponent("manifest.json")
+                let payloadURL = entry.appendingPathComponent("payload", isDirectory: true)
+                guard fileManager.fileExists(atPath: manifestURL.path),
+                      fileManager.fileExists(atPath: payloadURL.path) else {
+                    return .unavailable
+                }
+                let manifest = try JSONDecoder().decode(
+                    HistoryArchiveSnapshot.self,
+                    from: Data(contentsOf: manifestURL)
+                )
+                guard manifest.schemaVersion == HistoryArchiveSnapshot.currentSchemaVersion,
+                      entry.lastPathComponent.hasSuffix(
+                        "-\(manifest.id.uuidString.lowercased())"
+                      ) else {
+                    return .unavailable
+                }
+                hasPublishedArchive = true
+            }
+            return hasPublishedArchive ? .present : .absent
+        } catch {
+            return .unavailable
+        }
+    }
+
+    private static func inspectLegacyRecoveryEvidence(
+        near storeURL: URL
+    ) -> RecoveryBackupInspection {
+        let recoveryRootURL = storeURL.deletingLastPathComponent()
+            .appendingPathComponent("History Recovery", isDirectory: true)
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: recoveryRootURL.path) else {
+            return .absent
+        }
+        do {
+            let entries = try fileManager.contentsOfDirectory(
+                at: recoveryRootURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+            for entry in entries {
+                guard try entry.resourceValues(forKeys: [.isDirectoryKey])
+                    .isDirectory == true else {
+                    continue
+                }
+                return .present
+            }
+            return .absent
+        } catch {
+            return .unavailable
+        }
+    }
+
+    private static func defaultStoreURL() -> URL? {
+        let baseURL = AppName.applicationSupportDirectory
         try? FileManager.default.createDirectory(
             at: baseURL,
             withIntermediateDirectories: true
@@ -484,63 +899,6 @@ final class PipelineHistoryStore {
 
         semaphore.wait()
         return capturedError
-    }
-
-    private static func moveFile(from sourceURL: URL, to destinationURL: URL) throws {
-        try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
-    }
-
-    private static func moveSQLiteStoreFilesToRecovery(
-        at storeURL: URL,
-        moveItem: (URL, URL) throws -> Void
-    ) throws -> String? {
-        let fileManager = FileManager.default
-        let components = [
-            storeURL,
-            URL(fileURLWithPath: storeURL.path + "-wal"),
-            URL(fileURLWithPath: storeURL.path + "-shm")
-        ].filter { fileManager.fileExists(atPath: $0.path) }
-        guard !components.isEmpty else { return nil }
-
-        let recoveryRootURL = storeURL.deletingLastPathComponent()
-            .appendingPathComponent("History Recovery", isDirectory: true)
-        let backupName = "\(recoveryTimestamp())-\(UUID().uuidString)"
-        let backupURL = recoveryRootURL.appendingPathComponent(
-            backupName,
-            isDirectory: true
-        )
-        try fileManager.createDirectory(
-            at: backupURL,
-            withIntermediateDirectories: true
-        )
-
-        var movedComponents: [URL] = []
-        do {
-            for component in components {
-                try moveItem(
-                    component,
-                    backupURL.appendingPathComponent(component.lastPathComponent)
-                )
-                movedComponents.append(component)
-            }
-        } catch {
-            for component in movedComponents.reversed() {
-                let backupComponent = backupURL.appendingPathComponent(
-                    component.lastPathComponent
-                )
-                try? moveItem(backupComponent, component)
-            }
-            throw error
-        }
-        return backupName
-    }
-
-    private static func recoveryTimestamp() -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return formatter.string(from: Date())
     }
 
     private static func encodeCalendarMatch(_ match: CalendarEventMatch?) -> String? {

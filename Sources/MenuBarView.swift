@@ -125,7 +125,11 @@ struct MenuBarView: View {
             Button(recordingButtonTitle) {
                 appState.toggleRecording()
             }
-            .disabled(appState.isTranscribing)
+            .disabled(
+                appState.isTranscribing
+                    || appState.isHistoryUnavailable
+                    || appState.isHistoryRecoveryOperationInProgress
+            )
 
             if let hotkeyError = appState.hotkeyMonitoringErrorMessage {
                 Divider()
@@ -136,7 +140,32 @@ struct MenuBarView: View {
                     .lineLimit(3)
             }
 
-            if let warning = appState.historyPersistenceWarning {
+            if appState.isHistoryUnavailable,
+               let warning = appState.historyPersistenceWarning {
+                let presentation = warning.presentation()
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(
+                        presentation.title,
+                        systemImage: "externaldrive.badge.exclamationmark"
+                    )
+                    .font(.caption.weight(.semibold))
+                    Text(presentation.body)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HistoryUnavailableRecoveryActions()
+                        .controlSize(.small)
+                }
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+            } else if !appState.historyRecoverySnapshots.isEmpty {
+                Divider()
+                Button("Recovery…") {
+                    appState.openHistoryRecoverySettings()
+                }
+            } else if let warning = appState.historyPersistenceWarning {
                 Divider()
                 Label(
                     warning.presentation().compactMessage,

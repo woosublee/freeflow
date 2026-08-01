@@ -19,7 +19,7 @@ struct PromptsSettingsUIContractTests {
     private static func testNavigation(tabs: String, settings: String) {
         precondition(tabs.contains("case prompts"), "Missing Prompts settings tab")
         precondition(
-            tabs.contains("[.general, .appearance, .models, .prompts, .shortcuts, .input, .calendar, .about, .runLog, .debug]"),
+            tabs.contains("[.general, .appearance, .models, .prompts, .shortcuts, .input, .calendar, .recovery, .about, .runLog, .debug]"),
             "Prompts must appear between Models and Shortcuts"
         )
         precondition(tabs.contains("case .prompts: return \"Prompts\""))

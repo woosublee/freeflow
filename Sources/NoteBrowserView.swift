@@ -412,12 +412,18 @@ private struct AudioImportSheet: View {
 
 // MARK: - Note Browser View
 
+private struct RecoveryScrollRestoreRequest: Identifiable {
+    let id = UUID()
+    let itemID: UUID
+}
+
 struct NoteBrowserView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var exportManager: ObsidianExportManager
     @State private var selectedItemID: UUID?
     @State private var searchText = ""
     @State private var knownHistoryIDs: Set<UUID> = []
+    @State private var recoveryScrollRestoreRequest: RecoveryScrollRestoreRequest?
     @State private var pendingAudioImport: PendingAudioImport?
     @State private var recordingPulse = false
 
@@ -429,6 +435,23 @@ struct NoteBrowserView: View {
             $0.contextSummary.lowercased().contains(q) ||
             ($0.customTitle ?? "").lowercased().contains(q) ||
             ($0.calendarMatch?.title ?? "").lowercased().contains(q)
+        }
+    }
+
+    private func scheduleRecoveryScrollRestore(for itemID: UUID) {
+        recoveryScrollRestoreRequest = RecoveryScrollRestoreRequest(itemID: itemID)
+    }
+
+    private func restoreRecoveryScrollPosition(
+        request: RecoveryScrollRestoreRequest?,
+        proxy: ScrollViewProxy
+    ) {
+        guard let request,
+              filteredHistory.contains(where: { $0.id == request.itemID }) else {
+            return
+        }
+        DispatchQueue.main.async {
+            proxy.scrollTo(request.itemID, anchor: .center)
         }
     }
 
@@ -479,7 +502,11 @@ struct NoteBrowserView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        Group {
+            if appState.isHistoryUnavailable {
+                historyUnavailableView
+            } else {
+                HStack(spacing: 0) {
             sidebarPanel
             detailPanel
         }
@@ -504,18 +531,48 @@ struct NoteBrowserView: View {
         }
         .onReceive(appState.$pipelineHistory) { newHistory in
             let ids = newHistory.map(\.id)
-            // Select the latest item if the current selection disappears
+            let isRecoveryImport = appState.isHistoryRecoveryOperationInProgress
+            // Keep the note the user was viewing visible after a recovery import.
             guard let current = selectedItemID, ids.contains(current) else {
                 selectedItemID = ids.first
+                if isRecoveryImport, let fallback = ids.first {
+                    scheduleRecoveryScrollRestore(for: fallback)
+                }
                 knownHistoryIDs = Set(ids)
                 return
             }
-            // Auto-select only genuinely new items; ignore existing item edits
-            if let newest = ids.first, newest != current, !knownHistoryIDs.contains(newest) {
+            if isRecoveryImport {
+                scheduleRecoveryScrollRestore(for: current)
+            } else if let newest = ids.first, newest != current, !knownHistoryIDs.contains(newest) {
+                // Auto-select only genuinely new items; ignore existing item edits.
                 selectedItemID = newest
             }
             knownHistoryIDs = Set(ids)
+                }
+            }
         }
+    }
+
+    private var historyUnavailableView: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: "externaldrive.badge.exclamationmark")
+                .font(.system(size: 42, weight: .light))
+                .foregroundStyle(.orange)
+            Text("Recording history couldn’t be opened")
+                .font(.system(size: 20, weight: .semibold))
+            Text("Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery.")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
+            HistoryUnavailableRecoveryActions()
+                .controlSize(.large)
+            Spacer()
+        }
+        .padding(32)
+        .frame(minWidth: 800, maxWidth: .infinity, minHeight: 520, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
     }
 
     // MARK: - Sidebar
@@ -749,22 +806,37 @@ struct NoteBrowserView: View {
                     Spacer()
                 }
             } else {
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(spacing: 2) {
-                        ForEach(filteredHistory) { item in
-                            NoteListRow(
-                                displayData: NoteListRowDisplayData(
-                                    item: item,
-                                    retryingIDs: appState.retryingItemIDs,
-                                    cloudProgress: appState.cloudTranscriptionProgressByHistoryID[item.id]
-                                ),
-                                isSelected: selectedItemID == item.id
-                            )
-                            .onTapGesture { selectedItemID = item.id }
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        LazyVStack(spacing: 2) {
+                            ForEach(filteredHistory) { item in
+                                NoteListRow(
+                                    displayData: NoteListRowDisplayData(
+                                        item: item,
+                                        retryingIDs: appState.retryingItemIDs,
+                                        cloudProgress: appState.cloudTranscriptionProgressByHistoryID[item.id]
+                                    ),
+                                    isSelected: selectedItemID == item.id
+                                )
+                                .id(item.id)
+                                .onTapGesture { selectedItemID = item.id }
+                            }
                         }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
+                    .onAppear {
+                        restoreRecoveryScrollPosition(
+                            request: recoveryScrollRestoreRequest,
+                            proxy: proxy
+                        )
+                    }
+                    .onChange(of: recoveryScrollRestoreRequest?.id) { _ in
+                        restoreRecoveryScrollPosition(
+                            request: recoveryScrollRestoreRequest,
+                            proxy: proxy
+                        )
+                    }
                 }
             }
         }

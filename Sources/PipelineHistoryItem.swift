@@ -412,6 +412,64 @@ struct PipelineHistoryItem: Identifiable, Codable {
         )
     }
 
+    func replacingAssetFileNames(
+        audioFileName: String?,
+        transcriptFileName: String?
+    ) -> PipelineHistoryItem {
+        PipelineHistoryItem(
+            intent: intent,
+            selectedText: selectedText,
+            capturedSelection: capturedSelection,
+            id: id,
+            timestamp: timestamp,
+            recordingStartedAt: recordingStartedAt,
+            recordingEndedAt: recordingEndedAt,
+            calendarMatch: calendarMatch,
+            rawTranscript: rawTranscript,
+            postProcessedTranscript: postProcessedTranscript,
+            postProcessingPrompt: postProcessingPrompt,
+            systemPrompt: systemPrompt,
+            contextSummary: contextSummary,
+            contextSystemPrompt: contextSystemPrompt,
+            contextPrompt: contextPrompt,
+            contextScreenshotDataURL: contextScreenshotDataURL,
+            contextScreenshotStatus: contextScreenshotStatus,
+            postProcessingStatus: postProcessingStatus,
+            aiProcessingOutcome: aiProcessingOutcome,
+            debugStatus: debugStatus,
+            customVocabulary: customVocabulary,
+            customSystemPrompt: customSystemPrompt,
+            audioFileName: audioFileName,
+            usedLocalTranscription: usedLocalTranscription,
+            usedContextCapture: usedContextCapture,
+            usedPostProcessing: usedPostProcessing,
+            transcriptionLanguageCode: transcriptionLanguageCode,
+            localTranscriptionModelID: localTranscriptionModelID,
+            transcriptFileName: transcriptFileName,
+            contextAppName: contextAppName,
+            contextBundleIdentifier: contextBundleIdentifier,
+            contextWindowTitle: contextWindowTitle,
+            customTitle: customTitle,
+            meetingSummaryJSON: meetingSummaryJSON
+        )
+    }
+
+    func isLogicallyEquivalentForHistoryRecovery(to other: PipelineHistoryItem) -> Bool {
+        guard id == other.id else { return false }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let normalized = replacingAssetFileNames(audioFileName: nil, transcriptFileName: nil)
+        let otherNormalized = other.replacingAssetFileNames(
+            audioFileName: nil,
+            transcriptFileName: nil
+        )
+        guard let normalizedData = try? encoder.encode(normalized),
+              let otherData = try? encoder.encode(otherNormalized) else {
+            return false
+        }
+        return normalizedData == otherData
+    }
+
     func normalizedAfterProcessInterruption() -> PipelineHistoryItem {
         guard postProcessingStatus != Self.cloudTranscribingStatus,
               isIncompleteTranscription else {

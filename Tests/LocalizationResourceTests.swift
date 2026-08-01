@@ -143,6 +143,31 @@ struct LocalizationResourceTests {
         assert(cloudProgressEnglish == "Transcribing %d of %d…")
         assert(cloudProgressKorean == "%d/%d 청크 전사 중…")
         assert(cloudResumeKorean == "클라우드 전사 재개 중…")
+        let recoverySingularCounts: [String: String] = [
+            "%lld record found.": "%lld개 기록을 찾았습니다.",
+            "Import %lld record…": "%lld개 기록 가져오기…",
+            "%lld record is ready to import.": "%lld개 기록을 가져올 수 있습니다.",
+            "%lld record is already in the current history.": "%lld개 기록은 이미 현재 기록에 있습니다.",
+            "%lld record conflicts with the current history.": "%lld개 기록이 현재 기록과 충돌합니다."
+        ]
+        for (key, korean) in recoverySingularCounts {
+            let english = try localizedValue(key: key, language: "en", root: root)
+            let localizedKorean = try localizedValue(key: key, language: "ko", root: root)
+            assert(english == key)
+            assert(localizedKorean == korean)
+        }
+        let snapshotFailureEnglish = try localizedValue(
+            key: "Recovery snapshot operation could not be completed.",
+            language: "en",
+            root: root
+        )
+        let snapshotFailureKorean = try localizedValue(
+            key: "Recovery snapshot operation could not be completed.",
+            language: "ko",
+            root: root
+        )
+        assert(snapshotFailureEnglish == "Recovery snapshot operation could not be completed.")
+        assert(snapshotFailureKorean == "복구 보관본 작업을 완료하지 못했습니다.")
         try assertAIProcessingBackendErrorTranslations(root: root)
         let partialTitleEntry = strings["Some audio recovered"]
             as? [String: Any]
@@ -342,8 +367,8 @@ struct LocalizationResourceTests {
         process.arguments = [
             "xcstringstool", "extract", "--SwiftUI", "--modern-localizable-strings",
             "--output-format", "xcstrings", "-o", temporaryDirectory.path,
-            "Sources/SetupView.swift", "Sources/MenuBarView.swift", "Sources/App.swift",
-            "Sources/AppDelegate.swift", "Sources/SetupFlow.swift"
+            "Sources/SetupView.swift", "Sources/MenuBarView.swift", "Sources/HistoryRecoveryView.swift",
+            "Sources/App.swift", "Sources/AppDelegate.swift", "Sources/SetupFlow.swift"
         ]
         try process.run()
         process.waitUntilExit()
@@ -693,6 +718,7 @@ struct LocalizationResourceTests {
             "Sources/SetupView.swift", "Sources/MenuBarView.swift", "Sources/ShortcutComponents.swift",
             "Sources/App.swift",
             "Sources/AppDelegate.swift", "Sources/SetupFlow.swift", "Sources/SettingsView.swift",
+            "Sources/HistoryRecoveryView.swift", "Sources/CalendarIntegrationModels.swift",
             "Sources/ModelDropdownView.swift", "Sources/AppState.swift", "Sources/AudioImportOptions.swift",
             "Sources/LocalAIModel.swift", "Sources/LocalAIModelRowView.swift",
             "Sources/CalendarRecordingReminderScheduler.swift", "Sources/LocalizedUserMessage.swift",

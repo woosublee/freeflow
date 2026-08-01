@@ -15412,6 +15412,1046 @@
           }
         }
       }
+    },
+    "Audio file unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio file unavailable"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "오디오 파일을 찾을 수 없음"
+          }
+        }
+      }
+    },
+    "This recording's audio file is unavailable, so it can't be transcribed.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This recording's audio file is unavailable, so it can't be transcribed."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 녹음의 오디오 파일을 찾을 수 없어 재전사할 수 없습니다."
+          }
+        }
+      }
+    },
+    "Open Data Folder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Data Folder"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "데이터 폴더 열기"
+          }
+        }
+      }
+    },
+    "Open the data folder to keep the original history available for support and recovery.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open the data folder to keep the original history available for support and recovery."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "지원 및 복구에 사용할 수 있도록 원본 기록이 보존된 데이터 폴더를 여세요."
+          }
+        }
+      }
+    },
+    "Quit Quill": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quit Quill"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill 종료"
+          }
+        }
+      }
+    },
+    "Archive Old History and Start Fresh…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archive Old History and Start Fresh…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 기록을 보관하고 새로 시작…"
+          }
+        }
+      }
+    },
+    "Archive and Start Fresh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archive and Start Fresh"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "보관하고 새로 시작"
+          }
+        }
+      }
+    },
+    "Archive old history?": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archive old history?"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 기록을 보관할까요?"
+          }
+        }
+      }
+    },
+    "Archiving recording history…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archiving recording history…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "녹음 기록을 보관하는 중…"
+          }
+        }
+      }
+    },
+    "Finish the current recording or transcription before archiving history.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish the current recording or transcription before archiving history."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기록을 보관하기 전에 현재 녹음 또는 전사를 완료하세요."
+          }
+        }
+      }
+    },
+    "Archiving recording history is still in progress.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archiving recording history is still in progress."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "녹음 기록을 보관하는 작업이 아직 진행 중입니다."
+          }
+        }
+      }
+    },
+    "Old history was archived": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Old history was archived"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 기록을 보관함"
+          }
+        }
+      }
+    },
+    "New history is saving separately. Restore, import, and merge are not available yet.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New history is saving separately. Restore, import, and merge are not available yet."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "새 기록은 별도로 저장 중입니다. 복원, 가져오기, 병합은 아직 제공되지 않습니다."
+          }
+        }
+      }
+    },
+    "Open Recovery Folder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Recovery Folder"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복구 폴더 열기"
+          }
+        }
+      }
+    },
+    "Open the recovery folder to keep the archived history available for a future recovery.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open the recovery folder to keep the archived history available for a future recovery."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "향후 복구에 사용할 수 있도록 보관된 기록을 복구 폴더에서 유지하세요."
+          }
+        }
+      }
+    },
+    "Your earlier notes will not appear in the new history. The original database, audio, transcripts, and recovery metadata will be kept in a recovery snapshot. Restore, import, and merge are not available yet. Cancel to leave everything unchanged.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your earlier notes will not appear in the new history. The original database, audio, transcripts, and recovery metadata will be kept in a recovery snapshot. Restore, import, and merge are not available yet. Cancel to leave everything unchanged."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 노트는 새 기록에 표시되지 않습니다. 원본 데이터베이스, 오디오, 전사문, 복구 메타데이터는 복구 스냅샷에 보관됩니다. 복원, 가져오기, 병합은 아직 제공되지 않습니다. 취소하면 아무 데이터도 이동하지 않습니다."
+          }
+        }
+      }
+    },
+    "Recording history couldn’t be opened": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recording history couldn’t be opened"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "녹음 기록을 열 수 없음"
+          }
+        }
+      }
+    },
+    "Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "노트와 오디오 파일은 삭제되지 않았습니다. Quill을 다시 시작해 재시도하거나 데이터 폴더를 열어 지원 및 복구에 사용할 수 있습니다."
+          }
+        }
+      }
+    },
+    "Recover Earlier History…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recover Earlier History…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 기록 복구…"
+          }
+        }
+      }
+    },
+    "Start Fresh…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start Fresh…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "새 기록으로 시작…"
+          }
+        }
+      }
+    },
+    "Archive old history and open Recovery?": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archive old history and open Recovery?"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 기록을 보관하고 기록 복구를 열까요?"
+          }
+        }
+      }
+    },
+    "Archive and Open Recovery": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archive and Open Recovery"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "보관하고 기록 복구 열기"
+          }
+        }
+      }
+    },
+    "Quill will preserve the original database, audio, transcripts, and recovery metadata in a recovery snapshot. It will then start a new history and open Recovery settings. Your earlier notes are not imported automatically.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill will preserve the original database, audio, transcripts, and recovery metadata in a recovery snapshot. It will then start a new history and open Recovery settings. Your earlier notes are not imported automatically."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill은 원본 데이터베이스, 오디오, 전사문, 복구 메타데이터를 복구 보관본에 보존합니다. 이후 새 기록을 시작하고 기록 복구 설정을 엽니다. 이전 기록은 자동으로 가져오지 않습니다."
+          }
+        }
+      }
+    },
+    "Archive old history and start fresh?": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archive old history and start fresh?"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이전 기록을 보관하고 새 기록을 시작할까요?"
+          }
+        }
+      }
+    },
+    "Quill will preserve the original database, audio, transcripts, and recovery metadata in a recovery snapshot. It will then start a separate new history. You can import earlier notes later from Recovery settings.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill will preserve the original database, audio, transcripts, and recovery metadata in a recovery snapshot. It will then start a separate new history. You can import earlier notes later from Recovery settings."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill은 원본 데이터베이스, 오디오, 전사문, 복구 메타데이터를 복구 보관본에 보존합니다. 이후 별도의 새 기록을 시작합니다. 이전 기록은 나중에 기록 복구 설정에서 가져올 수 있습니다."
+          }
+        }
+      }
+    },
+    "Recovery": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기록 복구"
+          }
+        }
+      }
+    },
+    "Recovery…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기록 복구…"
+          }
+        }
+      }
+    },
+    "Review archived histories before importing them into the current history.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review archived histories before importing them into the current history."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "보관된 기록을 현재 기록으로 가져오기 전에 내용을 확인하세요."
+          }
+        }
+      }
+    },
+    "No Recovery Snapshots": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No Recovery Snapshots"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복구 보관본 없음"
+          }
+        }
+      }
+    },
+    "Recovery snapshots appear here after you start a fresh history from protected mode.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery snapshots appear here after you start a fresh history from protected mode."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "보호 모드에서 새 기록을 시작한 뒤 복구 보관본이 여기에 표시됩니다."
+          }
+        }
+      }
+    },
+    "Delete recovery snapshot?": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete recovery snapshot?"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복구 보관본을 삭제할까요?"
+          }
+        }
+      }
+    },
+    "Delete Recovery Snapshot": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete Recovery Snapshot"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복구 보관본 삭제"
+          }
+        }
+      }
+    },
+    "This permanently deletes the archived history and its recovery progress. This cannot be undone.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This permanently deletes the archived history and its recovery progress. This cannot be undone."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "보관된 기록과 복구 진행 상태가 영구적으로 삭제됩니다. 이 작업은 되돌릴 수 없습니다."
+          }
+        }
+      }
+    },
+    "This recovery snapshot could not be verified. It is preserved and can only be deleted manually.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This recovery snapshot could not be verified. It is preserved and can only be deleted manually."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 복구 보관본은 확인할 수 없습니다. 보존되며 수동으로만 삭제할 수 있습니다."
+          }
+        }
+      }
+    },
+    "Check the recovery contents before importing notes.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check the recovery contents before importing notes."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기록을 가져오기 전에 복구 내용을 확인하세요."
+          }
+        }
+      }
+    },
+    "Check Recovery Contents": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check Recovery Contents"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복구 내용 확인"
+          }
+        }
+      }
+    },
+    "This recovery snapshot could not be read. The original files are preserved.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This recovery snapshot could not be read. The original files are preserved."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 복구 보관본의 내용을 읽을 수 없습니다. 원본 파일은 그대로 보존됩니다."
+          }
+        }
+      }
+    },
+    "Retry Inspection": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retry Inspection"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다시 확인"
+          }
+        }
+      }
+    },
+    "%lld record found.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld record found."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록을 찾았습니다."
+          }
+        }
+      }
+    },
+    "%lld records found.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld records found."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록을 찾았습니다."
+          }
+        }
+      }
+    },
+    "Unable to Inspect": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to Inspect"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "확인 실패"
+          }
+        }
+      }
+    },
+    "Import %lld record…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Import %lld record…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록 가져오기…"
+          }
+        }
+      }
+    },
+    "Import %lld records…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Import %lld records…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록 가져오기…"
+          }
+        }
+      }
+    },
+    "%lld record is ready to import.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld record is ready to import."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록을 가져올 수 있습니다."
+          }
+        }
+      }
+    },
+    "%lld records are ready to import.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld records are ready to import."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록을 가져올 수 있습니다."
+          }
+        }
+      }
+    },
+    "%lld record is already in the current history.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld record is already in the current history."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록은 이미 현재 기록에 있습니다."
+          }
+        }
+      }
+    },
+    "%lld records are already in the current history.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld records are already in the current history."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록은 이미 현재 기록에 있습니다."
+          }
+        }
+      }
+    },
+    "%lld record conflicts with the current history.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld record conflicts with the current history."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록이 현재 기록과 충돌합니다."
+          }
+        }
+      }
+    },
+    "%lld records conflict with the current history.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld records conflict with the current history."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록이 현재 기록과 충돌합니다."
+          }
+        }
+      }
+    },
+    "Cancel Scheduled Deletion": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel Scheduled Deletion"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "삭제 예정 취소"
+          }
+        }
+      }
+    },
+    "Delete Now": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete Now"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "지금 삭제"
+          }
+        }
+      }
+    },
+    "Delete Recovery Snapshot…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete Recovery Snapshot…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복구 보관본 삭제…"
+          }
+        }
+      }
+    },
+    "Needs Attention": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Needs Attention"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "확인 필요"
+          }
+        }
+      }
+    },
+    "Available": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Available"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사용 가능"
+          }
+        }
+      }
+    },
+    "Partially Recovered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Partially Recovered"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일부 복구됨"
+          }
+        }
+      }
+    },
+    "Recovery Complete": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery Complete"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복구 완료"
+          }
+        }
+      }
+    },
+    "History recovery is still in progress.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History recovery is still in progress."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기록 복구 작업이 아직 진행 중입니다."
+          }
+        }
+      }
+    },
+    "Recovering history…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovering history…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기록을 복구하는 중…"
+          }
+        }
+      }
+    },
+    "Checking recovery contents…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking recovery contents…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복구 내용을 확인하는 중…"
+          }
+        }
+      }
+    },
+    "Cancelling scheduled deletion…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancelling scheduled deletion…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "삭제 예정을 취소하는 중…"
+          }
+        }
+      }
+    },
+    "Deleting recovery snapshot…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deleting recovery snapshot…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복구 보관본을 삭제하는 중…"
+          }
+        }
+      }
+    },
+    "Recovery snapshot operation could not be completed.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery snapshot operation could not be completed."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복구 보관본 작업을 완료하지 못했습니다."
+          }
+        }
+      }
+    },
+    "Some history could not be recovered.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some history could not be recovered."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일부 기록을 복구하지 못했습니다."
+          }
+        }
+      }
+    },
+    "History recovery could not be completed.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "History recovery could not be completed."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기록 복구를 완료하지 못했습니다."
+          }
+        }
+      }
+    },
+    "Scheduled for deletion on %@.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scheduled for deletion on %@."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@에 삭제될 예정입니다."
+          }
+        }
+      }
     }
   },
   "version": "1.0"
