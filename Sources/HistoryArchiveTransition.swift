@@ -9,33 +9,6 @@ enum HistoryArchiveSafety: Equatable, Sendable {
     case transitioning
 }
 
-struct HistoryArchiveSnapshotComponent: Codable, Equatable, Sendable {
-    enum Identifier: String, Codable, CaseIterable, Sendable {
-        case sqlite
-        case sqliteWAL
-        case sqliteSHM
-        case assetReferenceSnapshot
-        case audio
-        case transcripts
-        case cloudTranscriptionJobs
-        case legacyRecoveryEvidence
-    }
-
-    let identifier: Identifier
-    let relativePath: String
-    let byteCount: UInt64
-    let isDirectory: Bool
-}
-
-struct HistoryArchiveSnapshot: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 1
-
-    let schemaVersion: Int
-    let id: UUID
-    let archivedAt: Date
-    let components: [HistoryArchiveSnapshotComponent]
-}
-
 struct HistoryArchiveTransitionResult: Sendable {
     let snapshot: HistoryArchiveSnapshot
     let recoveryDirectory: URL
@@ -260,7 +233,7 @@ final class HistoryArchiveTransition {
                 let values = try entry.resourceValues(forKeys: [.isDirectoryKey])
                 guard values.isDirectory == true else { continue }
                 if entry.lastPathComponent.hasPrefix(Self.snapshotPrefix) {
-                    guard Self.isPublishedSnapshot(entry) else {
+                    guard isPublishedSnapshot(entry) else {
                         return .unresolvedInterruptedTransaction
                     }
                     hasPublishedSnapshot = true
@@ -315,7 +288,7 @@ final class HistoryArchiveTransition {
                     transaction.snapshotDirectoryName,
                     isDirectory: true
                 )
-                if Self.isPublishedSnapshot(snapshotDirectory) {
+                if isPublishedSnapshot(snapshotDirectory) {
                     try syncDirectory(recoveryDirectory)
                     try fileManager.removeItem(at: transactionURL)
                     continue
@@ -358,6 +331,7 @@ final class HistoryArchiveTransition {
     private func verifyFreshHistory(at storageRoot: URL) throws {
         let storeURL = storageRoot.appendingPathComponent("PipelineHistory.sqlite")
         let writer = makeStore(storeURL)
+        defer { try? writer.detachForArchiveVerification() }
         guard writer.availability == .ready,
               writer.durability == .durable,
               writer.verifyHistoryReadable() else {
@@ -379,22 +353,27 @@ final class HistoryArchiveTransition {
             usedPostProcessing: false
         )
         _ = try writer.upsert(probe, maxCount: Int.max, requiresDurableStore: true)
+        try writer.detachForArchiveVerification()
 
         let reader = makeStore(storeURL)
+        defer { try? reader.detachForArchiveVerification() }
         guard reader.availability == .ready,
               reader.verifyHistoryReadable(),
               reader.loadAllHistory().contains(where: { $0.id == probe.id }) else {
             throw HistoryArchiveTransitionError.probeDidNotPersist
         }
         _ = try reader.delete(id: probe.id)
+        try reader.detachForArchiveVerification()
 
         let activeStore = makeStore(storeURL)
+        defer { try? activeStore.detachForArchiveVerification() }
         guard activeStore.availability == .ready,
               activeStore.durability == .durable,
               activeStore.verifyHistoryReadable(),
               !activeStore.loadAllHistory().contains(where: { $0.id == probe.id }) else {
             throw HistoryArchiveTransitionError.probeDidNotDelete
         }
+        try activeStore.detachForArchiveVerification()
     }
 
     private func rollback(
@@ -488,11 +467,11 @@ final class HistoryArchiveTransition {
             + id.uuidString.lowercased()
     }
 
-    private static func isPublishedSnapshot(_ directory: URL) -> Bool {
+    private func isPublishedSnapshot(_ directory: URL) -> Bool {
         let manifestURL = directory.appendingPathComponent("manifest.json")
         let payloadURL = directory.appendingPathComponent("payload", isDirectory: true)
-        guard FileManager.default.fileExists(atPath: manifestURL.path),
-              FileManager.default.fileExists(atPath: payloadURL.path),
+        guard fileManager.fileExists(atPath: manifestURL.path),
+              fileManager.fileExists(atPath: payloadURL.path),
               let data = try? Data(contentsOf: manifestURL),
               let manifest = try? JSONDecoder().decode(HistoryArchiveSnapshot.self, from: data) else {
             return false
@@ -501,17 +480,26 @@ final class HistoryArchiveTransition {
     }
 
     private static func byteCount(at url: URL, fileManager: FileManager) -> UInt64 {
-        let attributes = try? fileManager.attributesOfItem(atPath: url.path)
-        if let size = attributes?[.size] as? NSNumber {
-            return size.uint64Value
+        let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory
+            ?? false
+        if !isDirectory {
+            let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+            if let size = attributes?[.size] as? NSNumber {
+                return size.uint64Value
+            }
+            return 0
         }
-        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else {
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey]
+        ) else {
             return 0
         }
         var total: UInt64 = 0
         for case let fileURL as URL in enumerator {
-            let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            total += UInt64(max(0, size))
+            let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+            guard values?.isDirectory != true else { continue }
+            total += UInt64(max(0, values?.fileSize ?? 0))
         }
         return total
     }

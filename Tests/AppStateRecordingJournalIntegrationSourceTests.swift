@@ -150,6 +150,8 @@ struct AppStateRecordingJournalIntegrationSourceTests {
             precondition(failurePreparationBody.contains(required))
         }
 
+        precondition(source.contains("@MainActor\n    private func finishRecordingAfterJournalPersistenceFailure("))
+        precondition(source.contains("@MainActor\n    private func finishStoppedSegmentedRecording("))
         let finishFailureBody = try functionBody(
             named: "finishRecordingAfterJournalPersistenceFailure",
             in: source

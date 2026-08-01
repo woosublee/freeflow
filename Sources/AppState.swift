@@ -2919,15 +2919,31 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         } else if initialHistoryArchiveSafety == .unresolvedArchive,
                   pipelineHistoryStore.availability == .ready {
+            Self.recoverRecordingJournalsBeforeHistoryLoad(
+                recordingJournalStore: recordingJournalStore,
+                historyStore: pipelineHistoryStore
+            )
             savedHistory = pipelineHistoryStore.loadAllHistory()
             if pipelineHistoryStore.availability == .ready {
+                savedHistory = Self.markInterruptedRecoveryPlaceholders(
+                    in: savedHistory,
+                    store: pipelineHistoryStore
+                )
                 try? cloudTranscriptionJobStore.removeStaleTemporaryArtifacts()
                 cloudReconciliation = cloudTranscriptionJobStore.reconcile(
                     history: savedHistory,
                     audioRoot: audioDirectory
                 )
+                let historyStore = pipelineHistoryStore
+                do {
+                    savedHistory = try LegacyNoteTitleMigration.migrate(history: savedHistory) { item in
+                        try historyStore.update(item)
+                    }
+                } catch {
+                    print("Failed to migrate legacy note titles: \(error)")
+                }
             }
-            print("Skipping automatic history recovery and cleanup because an archived history remains unresolved.")
+            print("Skipping automatic archive snapshot cleanup because an archived history remains unresolved.")
         } else {
             print("Skipping history startup work because persistent history is unavailable.")
         }
@@ -5494,6 +5510,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
+    @MainActor
     private func finishRecordingAfterJournalPersistenceFailure(
         controller: SegmentedRecordingJournalController,
         sourceFailure: RecordingJournalSourcePersistenceFailure,
@@ -5669,19 +5686,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
     ) {
         let inputID = activeAudioInputID ?? selectedMicrophoneID
         stopPhysicalAudioRecorder(inputID: inputID) { [weak self] temporaryURLs in
-            guard let self else {
-                for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
-                completion(.empty)
-                return
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
+                    completion(.empty)
+                    return
+                }
+                self.detachSegmentedJournalSinks()
+                self.finishStoppedSegmentedRecording(
+                    temporaryURLs: temporaryURLs,
+                    completion: completion
+                )
             }
-            self.detachSegmentedJournalSinks()
-            self.finishStoppedSegmentedRecording(
-                temporaryURLs: temporaryURLs,
-                completion: completion
-            )
         }
     }
 
+    @MainActor
     private func finishStoppedSegmentedRecording(
         temporaryURLs: [URL],
         completion: @escaping (StoppedAudioRecording) -> Void

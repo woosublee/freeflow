@@ -4230,9 +4230,11 @@ struct RunLogView: View {
                 .frame(maxWidth: .infinity)
             } else {
                 VStack(spacing: 0) {
-                    HistoryArchiveNoticeView()
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 12)
+                    if appState.historyArchiveSafety == .unresolvedArchive {
+                        HistoryArchiveNoticeView()
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 12)
+                    }
                     if appState.pipelineHistory.isEmpty {
                         VStack {
                             Spacer()

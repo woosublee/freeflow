@@ -484,9 +484,11 @@ struct NoteBrowserView: View {
                 historyUnavailableView
             } else {
                 VStack(spacing: 0) {
-                    HistoryArchiveNoticeView()
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
+                    if appState.historyArchiveSafety == .unresolvedArchive {
+                        HistoryArchiveNoticeView()
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                    }
                     HStack(spacing: 0) {
             sidebarPanel
             detailPanel

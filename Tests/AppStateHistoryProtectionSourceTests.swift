@@ -59,10 +59,14 @@ struct AppStateHistoryProtectionSourceTests {
         )
         let archivedStartup = String(source[archivedStartupRange])
         try expect(
-            archivedStartup.contains("cloudTranscriptionJobStore.reconcile(")
-                && !archivedStartup.contains("recoverRecordingJournalsBeforeHistoryLoad(")
+            archivedStartup.contains("recoverRecordingJournalsBeforeHistoryLoad(")
+                && archivedStartup.contains("markInterruptedRecoveryPlaceholders(")
+                && archivedStartup.contains("LegacyNoteTitleMigration.migrate(")
+                && archivedStartup.contains("cloudTranscriptionJobStore.reconcile(")
+                && !archivedStartup.contains("pipelineHistoryStore.trim(")
+                && !archivedStartup.contains("bootstrapAssetReferenceSnapshot(")
                 && !archivedStartup.contains("sweepOrphanStoredFiles("),
-            "published archives preserve old-data cleanup safeguards while reconciling new-generation cloud jobs"
+            "published archives recover only the active generation while preserving old-data cleanup safeguards"
         )
         try expect(
             source.contains("func archiveOldHistoryAndStartFresh() -> Bool")
@@ -82,7 +86,7 @@ struct AppStateHistoryProtectionSourceTests {
         for requiredGuard in [
             "historyArchiveSafety == .normal",
             "pendingAudioImportJobIDs.isEmpty",
-            "cloudTranscriptionHistoryCoordinator.hasActiveWork",
+            "!cloudTranscriptionHistoryCoordinator.hasActiveWork",
             "meetingSummaryGeneratingNoteIDs.isEmpty",
             "pendingRecordingJournalFinalizationCount == 0",
             "pendingRecordingStartCount == 0"

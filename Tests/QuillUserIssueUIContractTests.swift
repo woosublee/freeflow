@@ -264,6 +264,12 @@ struct QuillUserIssueUIContractTests {
             menuBar.contains(".disabled(appState.isTranscribing || appState.isHistoryUnavailable"),
             "Menu Bar disables recording while history is unavailable"
         )
+        for source in [noteBrowser, settings] {
+            try expect(
+                source.contains("if appState.historyArchiveSafety == .unresolvedArchive {\n                        HistoryArchiveNoticeView()"),
+                "archive notice padding renders only when an archive notice is visible"
+            )
+        }
         try expect(
             noteBrowser.contains("if appState.isHistoryUnavailable"),
             "Note Browser checks protected state before normal empty history"

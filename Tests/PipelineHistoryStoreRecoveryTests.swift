@@ -12,6 +12,7 @@ struct PipelineHistoryStoreRecoveryTests {
         try testPublishedArchiveLowersReferenceTrust()
         try testUnfinishedArchiveTransactionDisablesReferenceCleanup()
         try testArchivePreparationDetachesReadFailedStoreWithoutMutatingCanonicalFiles()
+        try testArchiveVerificationDetachesReadyStoreWithoutMutatingCanonicalFiles()
         try testUnavailableStorePreservesDatabaseComponentsAndRejectsMutations()
         try testReadFailureEntersProtectionMode()
         try testReadabilityProbeUsesBoundedFetch()
@@ -145,7 +146,7 @@ struct PipelineHistoryStoreRecoveryTests {
             withIntermediateDirectories: true
         )
         let manifest = try JSONSerialization.data(withJSONObject: [
-            "schemaVersion": 1,
+            "schemaVersion": HistoryArchiveSnapshot.currentSchemaVersion,
             "id": archiveID.uuidString,
             "archivedAt": 1_754_010_203,
             "components": []
@@ -197,6 +198,20 @@ struct PipelineHistoryStoreRecoveryTests {
         try expect(
             try Data(contentsOf: fixture.storeURL) == originalBytes,
             "archive preparation does not modify the canonical SQLite file"
+        )
+    }
+
+    private static func testArchiveVerificationDetachesReadyStoreWithoutMutatingCanonicalFiles() throws {
+        let fixture = try PersistentStoreFixture()
+        defer { fixture.remove() }
+        let store = PipelineHistoryStore(storeURL: fixture.storeURL)
+        let originalBytes = try Data(contentsOf: fixture.storeURL)
+
+        try store.detachForArchiveVerification()
+
+        try expect(
+            try Data(contentsOf: fixture.storeURL) == originalBytes,
+            "archive verification detaches a ready store without rewriting canonical SQLite"
         )
     }
 

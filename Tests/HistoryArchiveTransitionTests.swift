@@ -99,6 +99,14 @@ struct HistoryArchiveTransitionTests {
         let manifestData = try Data(contentsOf: manifestURL)
         let manifest = try JSONDecoder().decode(HistoryArchiveSnapshot.self, from: manifestData)
         try expect(manifest.id == archiveID, "manifest identifies the published archive")
+        let expectedAudioByteCount = UInt64(
+            Data("audio".utf8).count + fixture.inflightBytes.count
+        )
+        try expect(
+            manifest.components.first(where: { $0.identifier == .audio })?.byteCount
+                == expectedAudioByteCount,
+            "manifest recursively records every archived audio byte"
+        )
         let manifestText = String(decoding: manifestData, as: UTF8.self)
         try expect(
             !manifestText.contains("Transcript content must not appear in metadata"),

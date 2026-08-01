@@ -12,6 +12,33 @@ enum PipelineHistoryStoreError: Error {
     case durableStoreUnavailable
 }
 
+struct HistoryArchiveSnapshotComponent: Codable, Equatable, Sendable {
+    enum Identifier: String, Codable, CaseIterable, Sendable {
+        case sqlite
+        case sqliteWAL
+        case sqliteSHM
+        case assetReferenceSnapshot
+        case audio
+        case transcripts
+        case cloudTranscriptionJobs
+        case legacyRecoveryEvidence
+    }
+
+    let identifier: Identifier
+    let relativePath: String
+    let byteCount: UInt64
+    let isDirectory: Bool
+}
+
+struct HistoryArchiveSnapshot: Codable, Equatable, Sendable {
+    static let currentSchemaVersion = 1
+
+    let schemaVersion: Int
+    let id: UUID
+    let archivedAt: Date
+    let components: [HistoryArchiveSnapshotComponent]
+}
+
 enum PipelineHistoryStoreAvailability: Equatable, Sendable {
     case ready
     case unavailable
@@ -230,6 +257,16 @@ final class PipelineHistoryStore {
         guard availability == .unavailable else {
             throw PipelineHistoryStoreError.storeUnavailable
         }
+        try detachPersistentStores()
+        isStoreLoaded = false
+        canSynchronizeAssetReferenceSnapshot = false
+    }
+
+    func detachForArchiveVerification() throws {
+        try detachPersistentStores()
+    }
+
+    private func detachPersistentStores() throws {
         var thrownError: Error?
         container.viewContext.performAndWait {
             do {
@@ -243,8 +280,6 @@ final class PipelineHistoryStore {
             }
         }
         if let thrownError { throw thrownError }
-        isStoreLoaded = false
-        canSynchronizeAssetReferenceSnapshot = false
     }
 
     func assetReferenceSnapshotState(
@@ -692,12 +727,6 @@ final class PipelineHistoryStore {
         )
     }
 
-    private struct HistoryArchiveManifestInspection: Decodable {
-        let schemaVersion: Int
-        let id: UUID
-        let archivedAt: Date
-    }
-
     private static func inspectRecoveryBackups(
         near storeURL: URL?
     ) -> RecoveryBackupInspection {
@@ -761,10 +790,10 @@ final class PipelineHistoryStore {
                     return .unavailable
                 }
                 let manifest = try JSONDecoder().decode(
-                    HistoryArchiveManifestInspection.self,
+                    HistoryArchiveSnapshot.self,
                     from: Data(contentsOf: manifestURL)
                 )
-                guard manifest.schemaVersion == 1,
+                guard manifest.schemaVersion == HistoryArchiveSnapshot.currentSchemaVersion,
                       entry.lastPathComponent.hasSuffix(
                         "-\(manifest.id.uuidString.lowercased())"
                       ) else {
