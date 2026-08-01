@@ -460,6 +460,17 @@ final class HistoryArchiveTransition {
         }
     }
 
+    private static func expectedIsDirectory(
+        for identifier: HistoryArchiveSnapshotComponent.Identifier
+    ) -> Bool {
+        switch identifier {
+        case .sqlite, .sqliteWAL, .sqliteSHM, .assetReferenceSnapshot:
+            return false
+        case .audio, .transcripts, .cloudTranscriptionJobs, .legacyRecoveryEvidence:
+            return true
+        }
+    }
+
     private static func snapshotDirectoryName(archivedAt: Date, id: UUID) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -493,7 +504,8 @@ final class HistoryArchiveTransition {
         for component in manifest.components {
             guard identifiers.insert(component.identifier).inserted,
                   relativePaths.insert(component.relativePath).inserted,
-                  component.relativePath == Self.relativePath(for: component.identifier) else {
+                  component.relativePath == Self.relativePath(for: component.identifier),
+                  component.isDirectory == Self.expectedIsDirectory(for: component.identifier) else {
                 return false
             }
             let componentURL = payloadURL.appendingPathComponent(component.relativePath)
@@ -655,11 +667,16 @@ private enum HistoryArchiveDurability {
             var remaining = rawBuffer.count
             while remaining > 0 {
                 let written = Darwin.write(descriptor, pointer, remaining)
-                guard written > 0 else {
-                    throw HistoryArchiveTransitionError.systemCall("write archive metadata", errno)
+                if written > 0 {
+                    remaining -= written
+                    pointer = pointer.advanced(by: written)
+                    continue
                 }
-                remaining -= written
-                pointer = pointer.advanced(by: written)
+                let errorCode = errno
+                guard errorCode != EINTR, errorCode != EAGAIN else {
+                    continue
+                }
+                throw HistoryArchiveTransitionError.systemCall("write archive metadata", errorCode)
             }
         }
     }

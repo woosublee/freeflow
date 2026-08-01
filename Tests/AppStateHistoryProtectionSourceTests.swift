@@ -189,6 +189,57 @@ struct AppStateHistoryProtectionSourceTests {
             )
         }
 
+        let invalidationRange = try source.range(
+            from: "func invalidateHistoryRecoveryInspectionResults()",
+            to: "func importHistoryRecoverySnapshot(id: UUID) -> Bool"
+        )
+        let invalidation = String(source[invalidationRange])
+        try expectOrdered(
+            [
+                "historyRecoveryInspections = [:]",
+                "historyRecoveryInspectionQueue = []",
+                "historyRecoveryInspectionAttemptedIDs = []",
+                "guard selectedSettingsTab == .recovery,"
+            ],
+            in: invalidation,
+            label: "recovery inspection invalidation clears stale scheduling state before it can return"
+        )
+
+        let importRange = try source.range(
+            from: "func importHistoryRecoverySnapshot(id: UUID) -> Bool",
+            to: "func cancelHistoryRecoveryScheduledDeletion(id: UUID) -> Bool"
+        )
+        let recoveryImport = String(source[importRange])
+        try expectOrdered(
+            [
+                "historyRecoveryImportResult = nil",
+                "try pipelineHistoryStore.detachForArchiveVerification()"
+            ],
+            in: recoveryImport,
+            label: "a new recovery import clears prior partial feedback before detaching history"
+        )
+
+        let snapshotOperationRange = try source.range(
+            from: "private func runHistoryRecoverySnapshotOperation(",
+            to: "private func completeHistoryRecoverySnapshotOperation(at storageRoot: URL)"
+        )
+        let snapshotOperation = String(source[snapshotOperationRange])
+        try expect(
+            snapshotOperation.contains("completeHistoryRecoverySnapshotOperationFailure(")
+                && !snapshotOperation.contains("completeHistoryRecoveryOperationFailure("),
+            "snapshot-only recovery failures do not reuse active-store replacement"
+        )
+        let snapshotFailureRange = try source.range(
+            from: "private func completeHistoryRecoverySnapshotOperationFailure(at storageRoot: URL)",
+            to: "static func appStorageRootDirectory() -> URL"
+        )
+        let snapshotFailure = String(source[snapshotFailureRange])
+        try expect(
+            !snapshotFailure.contains("pipelineHistoryStoreAtURLFactory")
+                && !snapshotFailure.contains("pipelineHistoryStore ="),
+            "snapshot-only recovery failure keeps the active Core Data store attached"
+        )
+
         print("AppStateHistoryProtectionSourceTests passed")
     }
 

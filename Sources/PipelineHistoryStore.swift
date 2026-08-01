@@ -647,10 +647,6 @@ final class PipelineHistoryStore {
               let fileNames = loadAssetReferenceFileNames() else {
             return
         }
-        guard referenceTrust.permitsStartupReferenceCleanup else {
-            canSynchronizeAssetReferenceSnapshot = false
-            return
-        }
         do {
             try saveAssetReferenceSnapshot(
                 audioFileNames: fileNames.audio,

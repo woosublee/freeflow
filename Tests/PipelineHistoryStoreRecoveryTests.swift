@@ -8,6 +8,7 @@ struct PipelineHistoryStoreRecoveryTests {
         try testAssetReferenceSnapshotDetectsHistoryLoss()
         try testMetadataOnlyUpdateDoesNotRewriteAssetSnapshot()
         try testSnapshotSynchronizationFetchesOnlyAssetFileNames()
+        try testSnapshotSynchronizationHasOneReferenceTrustGuard()
         try testApplicationSupportDirectoryHasDeterministicFallback()
         try testPublishedArchiveLowersReferenceTrust()
         try testUnfinishedArchiveTransactionDisablesReferenceCleanup()
@@ -117,6 +118,25 @@ struct PipelineHistoryStoreRecoveryTests {
                 && synchronization.contains("request.resultType = .dictionaryResultType")
                 && synchronization.contains("request.propertiesToFetch = [\"audioFileName\", \"transcriptFileName\"]"),
             "snapshot synchronization fetches only asset filenames"
+        )
+    }
+
+    private static func testSnapshotSynchronizationHasOneReferenceTrustGuard() throws {
+        let source = try String(contentsOfFile: "Sources/PipelineHistoryStore.swift", encoding: .utf8)
+        guard let start = source.range(of: "private func synchronizeAssetReferenceSnapshot()"),
+              let end = source.range(
+                of: "private func pipelineHistoryRequest()",
+                range: start.upperBound..<source.endIndex
+              ) else {
+            throw RecoveryTestFailure("missing asset snapshot synchronization helpers")
+        }
+        let synchronization = String(source[start.lowerBound..<end.lowerBound])
+        let guardCount = synchronization.components(
+            separatedBy: "referenceTrust.permitsStartupReferenceCleanup"
+        ).count - 1
+        try expect(
+            guardCount == 1,
+            "asset snapshot synchronization checks reference trust once before fetching assets"
         )
     }
 

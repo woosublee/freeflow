@@ -142,6 +142,34 @@ enum HistoryRecoveryServiceError: Error, LocalizedError {
     }
 }
 
+enum HistoryRecoveryDurability {
+    static func writeAll(
+        _ data: Data,
+        write: (UnsafePointer<UInt8>, Int) -> (written: Int, errorCode: Int32)
+    ) throws {
+        try data.withUnsafeBytes { rawBuffer in
+            guard var pointer = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return
+            }
+            var remaining = rawBuffer.count
+            while remaining > 0 {
+                let outcome = write(pointer, remaining)
+                if outcome.written > 0 {
+                    guard outcome.written <= remaining else {
+                        throw HistoryRecoveryServiceError.metadataWriteFailed
+                    }
+                    remaining -= outcome.written
+                    pointer = pointer.advanced(by: outcome.written)
+                    continue
+                }
+                guard outcome.errorCode == EINTR || outcome.errorCode == EAGAIN else {
+                    throw HistoryRecoveryServiceError.metadataWriteFailed
+                }
+            }
+        }
+    }
+}
+
 final class HistoryRecoveryService {
     private let storageRoot: URL
     private let fileManager: FileManager
@@ -509,7 +537,8 @@ final class HistoryRecoveryService {
             identifier: identifier,
             descriptor: descriptor
         )
-        if let existingDestinationFileName {
+        if let existingDestinationFileName,
+           isSafeFileName(existingDestinationFileName) {
             let existingURL = destinationDirectory.appendingPathComponent(existingDestinationFileName)
             if fileManager.fileExists(atPath: existingURL.path),
                !containsSymbolicLink(at: existingURL),
@@ -861,19 +890,9 @@ final class HistoryRecoveryService {
     }
 
     private func writeAll(_ data: Data, to descriptor: Int32) throws {
-        try data.withUnsafeBytes { rawBuffer in
-            guard var pointer = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return
-            }
-            var remaining = rawBuffer.count
-            while remaining > 0 {
-                let written = Darwin.write(descriptor, pointer, remaining)
-                guard written > 0 else {
-                    throw HistoryRecoveryServiceError.metadataWriteFailed
-                }
-                remaining -= written
-                pointer = pointer.advanced(by: written)
-            }
+        try HistoryRecoveryDurability.writeAll(data) { pointer, remaining in
+            let written = Darwin.write(descriptor, pointer, remaining)
+            return (written: written, errorCode: errno)
         }
     }
 

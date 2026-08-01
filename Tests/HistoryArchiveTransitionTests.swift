@@ -8,12 +8,14 @@ struct HistoryArchiveTransitionTests {
         try testArchiveAcceptsMissingSQLiteCompanions()
         try testArchiveAllowsAnotherGenerationWhenSnapshotIsPublished()
         try testInvalidPublishedSnapshotBlocksAnotherArchive()
+        try testPublishedSnapshotRejectsNonDirectoryAudioComponent()
         try testSymbolicLinkPublishedSnapshotBlocksAnotherArchive()
         try testHiddenSymbolicLinkInPublishedPayloadBlocksAnotherArchive()
         try testFreshStoreProbeFailureRollsBackTheOriginalGeneration()
         try testFirstMoveFailurePreservesTheOriginalSQLite()
         try testMoveFailureRollsBackEveryMovedComponent()
         try testPublishSyncFailureLeavesTransactionForSafeStartupRecovery()
+        try testArchiveMetadataWriterRetriesRetryableErrors()
         try testInterruptedTransactionRollsBackWithoutCreatingFreshHistory()
         try testAbandonedTransactionTempFileDoesNotBlockStartup()
         print("HistoryArchiveTransitionTests passed")
@@ -228,6 +230,51 @@ struct HistoryArchiveTransitionTests {
         )
     }
 
+    private static func testPublishedSnapshotRejectsNonDirectoryAudioComponent() throws {
+        let fixture = try HistoryArchiveFixture()
+        defer { fixture.remove() }
+        let result = try HistoryArchiveTransition().archiveAndCreateFreshHistory(at: fixture.rootURL)
+        let recoveryURL = fixture.rootURL.appendingPathComponent("Recovery", isDirectory: true)
+        guard let snapshotURL = try FileManager.default.contentsOfDirectory(
+            at: recoveryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).first(where: { $0.lastPathComponent.hasSuffix(result.snapshot.id.uuidString.lowercased()) }) else {
+            throw HistoryArchiveTestFailure("missing published snapshot")
+        }
+        let payloadURL = snapshotURL.appendingPathComponent("payload", isDirectory: true)
+        let audioURL = payloadURL.appendingPathComponent("audio", isDirectory: true)
+        let replacementAudio = Data("replacement audio".utf8)
+        try FileManager.default.removeItem(at: audioURL)
+        try replacementAudio.write(to: audioURL)
+
+        let manifestURL = snapshotURL.appendingPathComponent("manifest.json")
+        let manifest = try JSONDecoder().decode(
+            HistoryArchiveSnapshot.self,
+            from: Data(contentsOf: manifestURL)
+        )
+        let malformedManifest = HistoryArchiveSnapshot(
+            schemaVersion: manifest.schemaVersion,
+            id: manifest.id,
+            archivedAt: manifest.archivedAt,
+            components: manifest.components.map { component in
+                guard component.identifier == .audio else { return component }
+                return HistoryArchiveSnapshotComponent(
+                    identifier: component.identifier,
+                    relativePath: component.relativePath,
+                    byteCount: UInt64(replacementAudio.count),
+                    isDirectory: false
+                )
+            }
+        )
+        try JSONEncoder().encode(malformedManifest).write(to: manifestURL)
+
+        try expect(
+            HistoryArchiveTransition.inspect(at: fixture.rootURL) == .unresolvedInterruptedTransaction,
+            "a published audio file cannot masquerade as a valid directory component"
+        )
+    }
+
     private static func testSymbolicLinkPublishedSnapshotBlocksAnotherArchive() throws {
         let fixture = try HistoryArchiveFixture()
         defer { fixture.remove() }
@@ -301,6 +348,27 @@ struct HistoryArchiveTransitionTests {
         try expect(
             HistoryArchiveTransition.inspect(at: fixture.rootURL) == .unresolvedInterruptedTransaction,
             "a hidden symbolic link in a published payload remains protected instead of allowing another archive"
+        )
+    }
+
+    private static func testArchiveMetadataWriterRetriesRetryableErrors() throws {
+        let source = try String(
+            contentsOfFile: "Sources/HistoryArchiveTransition.swift",
+            encoding: .utf8
+        )
+        guard let start = source.range(of: "private static func writeAll(_ data: Data, to descriptor: Int32) throws"),
+              let end = source.range(
+                of: "private static func fullSync(_ descriptor: Int32) throws",
+                range: start.upperBound..<source.endIndex
+              ) else {
+            throw HistoryArchiveTestFailure("missing archive durable metadata writer")
+        }
+        let writeAll = String(source[start.lowerBound..<end.lowerBound])
+        try expect(
+            writeAll.contains("errorCode != EINTR, errorCode != EAGAIN")
+                && writeAll.contains("guard errorCode != EINTR, errorCode != EAGAIN else {")
+                && writeAll.contains("continue"),
+            "archive metadata writes retry interrupted and temporarily blocked system calls"
         )
     }
 

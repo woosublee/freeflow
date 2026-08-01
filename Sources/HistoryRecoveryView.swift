@@ -182,6 +182,14 @@ struct HistoryRecoverySettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if let importResult = appState.historyRecoveryImportResult,
+               importResult.snapshotID == snapshot.id,
+               importResult.failedRecordCount > 0 || importResult.conflictRecordCount > 0 {
+                Text(localizedCatalogString("Some history could not be recovered."))
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
             if let deletionDate = snapshot.scheduledDeletionAt {
                 Text(
                     localizedCatalogFormat(
@@ -207,7 +215,13 @@ struct HistoryRecoverySettingsView: View {
 
                 if let inspection = appState.historyRecoveryInspections[snapshot.id],
                    snapshot.status != .completed {
-                    Button(localizedCatalogFormat("Import %lld records…", inspection.importableRecordCount)) {
+                    Button(
+                        localizedRecoveryRecordCount(
+                            inspection.importableRecordCount,
+                            singularKey: "Import %lld record…",
+                            pluralKey: "Import %lld records…"
+                        )
+                    ) {
                         _ = appState.importHistoryRecoverySnapshot(id: snapshot.id)
                     }
                     .disabled(appState.isHistoryRecoveryOperationInProgress)
@@ -260,18 +274,50 @@ struct HistoryRecoverySettingsView: View {
     @ViewBuilder
     private func inspectionSummary(_ inspection: HistoryRecoveryInspection) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(localizedCatalogFormat("%lld records found.", inspection.readableRecordCount))
-            Text(localizedCatalogFormat("%lld records are ready to import.", inspection.importableRecordCount))
+            Text(
+                localizedRecoveryRecordCount(
+                    inspection.readableRecordCount,
+                    singularKey: "%lld record found.",
+                    pluralKey: "%lld records found."
+                )
+            )
+            Text(
+                localizedRecoveryRecordCount(
+                    inspection.importableRecordCount,
+                    singularKey: "%lld record is ready to import.",
+                    pluralKey: "%lld records are ready to import."
+                )
+            )
             if inspection.alreadyPresentRecordCount > 0 {
-                Text(localizedCatalogFormat("%lld records are already in the current history.", inspection.alreadyPresentRecordCount))
+                Text(
+                    localizedRecoveryRecordCount(
+                        inspection.alreadyPresentRecordCount,
+                        singularKey: "%lld record is already in the current history.",
+                        pluralKey: "%lld records are already in the current history."
+                    )
+                )
             }
             if inspection.conflictRecordCount > 0 {
-                Text(localizedCatalogFormat("%lld records conflict with the current history.", inspection.conflictRecordCount))
-                    .foregroundStyle(.orange)
+                Text(
+                    localizedRecoveryRecordCount(
+                        inspection.conflictRecordCount,
+                        singularKey: "%lld record conflicts with the current history.",
+                        pluralKey: "%lld records conflict with the current history."
+                    )
+                )
+                .foregroundStyle(.orange)
             }
         }
         .font(.caption)
         .foregroundStyle(.secondary)
+    }
+
+    private func localizedRecoveryRecordCount(
+        _ count: Int,
+        singularKey: String,
+        pluralKey: String
+    ) -> String {
+        localizedCatalogFormat(count == 1 ? singularKey : pluralKey, count)
     }
 
     private func statusTitle(for snapshot: HistoryRecoverySnapshotDescriptor) -> LocalizedStringKey {

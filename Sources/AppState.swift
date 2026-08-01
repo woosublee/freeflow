@@ -2137,6 +2137,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var historyRecoveryInspectionRevision = 0
     @Published private(set) var isHistoryRecoveryOperationInProgress = false
     @Published private(set) var historyRecoveryOperationMessage: String?
+    @Published private(set) var historyRecoveryImportResult: HistoryRecoveryImportResult?
     var historyUnavailableMessage: String {
         QuillUserIssueRecord(code: .historyPersistenceUnavailable)
             .presentation().compactMessage
@@ -4977,6 +4978,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     func invalidateHistoryRecoveryInspectionResults() {
         historyRecoveryInspectionRevision &+= 1
         historyRecoveryInspections = [:]
+        historyRecoveryInspectionQueue = []
+        historyRecoveryInspectionAttemptedIDs = []
         guard selectedSettingsTab == .recovery,
               !isHistoryRecoveryOperationInProgress else {
             return
@@ -5018,6 +5021,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
               }) else {
             return false
         }
+        historyRecoveryImportResult = nil
         do {
             try pipelineHistoryStore.detachForArchiveVerification()
         } catch {
@@ -5108,6 +5112,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     ) {
         let storageRoot = Self.appStorageRootDirectory()
         let appStateReference = WeakAppStateReference(self)
+        historyRecoveryImportResult = nil
         isHistoryRecoveryOperationInProgress = true
         historyRecoveryOperationMessage = message
         Task.detached(priority: .userInitiated) {
@@ -5120,7 +5125,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 }
             } catch {
                 await MainActor.run {
-                    appStateReference.value?.completeHistoryRecoveryOperationFailure(
+                    appStateReference.value?.completeHistoryRecoverySnapshotOperationFailure(
                         at: storageRoot
                     )
                 }
@@ -5136,6 +5141,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
         historyRecoveryOperationMessage = nil
         synchronizeHistoryPersistenceState()
         startNextHistoryRecoveryInspection()
+    }
+
+    @MainActor
+    private func completeHistoryRecoverySnapshotOperationFailure(at storageRoot: URL) {
+        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
+        refreshHistoryRecoverySnapshots()
+        isHistoryRecoveryOperationInProgress = false
+        historyRecoveryOperationMessage = nil
+        synchronizeHistoryPersistenceState()
+        invalidateHistoryRecoveryInspectionResults()
+        errorMessage = localizedCatalogString("Recovery snapshot operation could not be completed.")
     }
 
     static func appStorageRootDirectory() -> URL {
@@ -6674,10 +6690,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
         refreshHistoryRecoverySnapshots()
         isHistoryRecoveryOperationInProgress = false
-        historyRecoveryOperationMessage = result.failedRecordCount == 0
-            && result.conflictRecordCount == 0
-            ? nil
-            : localizedCatalogString("Some history could not be recovered.")
+        historyRecoveryOperationMessage = nil
+        if result.failedRecordCount > 0 || result.conflictRecordCount > 0 {
+            historyRecoveryImportResult = result
+        } else {
+            historyRecoveryImportResult = nil
+        }
         synchronizeHistoryPersistenceState()
         invalidateHistoryRecoveryInspectionResults()
     }
@@ -6697,6 +6715,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         refreshHistoryRecoverySnapshots()
         isHistoryRecoveryOperationInProgress = false
         historyRecoveryOperationMessage = nil
+        historyRecoveryImportResult = nil
         synchronizeHistoryPersistenceState()
         invalidateHistoryRecoveryInspectionResults()
         errorMessage = localizedCatalogString("History recovery could not be completed.")
@@ -9168,6 +9187,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         hotkeyManager.stop()
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
+        activeRecordingID = nil
         activeRecordingTranscriptionEnabled = nil
         cancelRecordingInitializationTimer()
         clearAudioRecorderCallbacks()
@@ -9435,6 +9455,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 break
             case .notDetermined:
                 guard let triggerMode = activeRecordingTriggerMode else {
+                    activeRecordingID = nil
                     activeRecordingTranscriptionEnabled = nil
                     return
                 }
@@ -9450,7 +9471,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     self.isAwaitingSpeechRecognitionPermission = false
                     self.restartHotkeyMonitoring()
 
-                    guard let pendingContext else { return }
+                    guard let pendingContext else {
+                        self.activeRecordingID = nil
+                        return
+                    }
                     if granted {
                         self.errorMessage = nil
                         if pendingContext.triggerMode == .toggle {
@@ -9484,6 +9508,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     } else {
                         self.restoreAudioInterruptionIfNeeded()
                         self.activeRecordingCalendarSnapshot = nil
+                        self.activeRecordingID = nil
                         self.errorMessage = localizedCatalogString("Speech Recognition permission is required for Apple Live transcription. Enable it in System Settings > Privacy & Security > Speech Recognition.")
                         self.statusText = localizedCatalogString("No Speech Recognition")
                         self.activeRecordingTriggerMode = nil
@@ -9496,6 +9521,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             default:
                 isRecording = false
                 activeRecordingCalendarSnapshot = nil
+                activeRecordingID = nil
                 activeRecordingTranscriptionEnabled = nil
                 syncCriticalDictationActivity()
                 restoreAudioInterruptionIfNeeded()
@@ -11471,11 +11497,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         } catch {
             if journalRecordingID == nil,
-               !pipelineHistoryStore.loadAllHistory().contains(where: { $0.id == recordingID }) {
-                Self.deleteStoredFiles(
-                    audioFileName: audioFileName,
-                    transcriptFileName: nil
-                )
+               pipelineHistoryStore.availability == .ready,
+               pipelineHistoryStore.durability == .durable,
+               pipelineHistoryStore.verifyHistoryReadable() {
+                let history = pipelineHistoryStore.loadAllHistory()
+                if pipelineHistoryStore.availability == .ready,
+                   pipelineHistoryStore.durability == .durable,
+                   !history.contains(where: { $0.id == recordingID }) {
+                    Self.deleteStoredFiles(
+                        audioFileName: audioFileName,
+                        transcriptFileName: nil
+                    )
+                }
             }
             let message = userIssue(for: error).record.presentation().compactMessage
             completeStoppedRecording(

@@ -16021,6 +16021,22 @@
         }
       }
     },
+    "%lld record found.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld record found."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록을 찾았습니다."
+          }
+        }
+      }
+    },
     "%lld records found.": {
       "localizations": {
         "en": {
@@ -16053,6 +16069,22 @@
         }
       }
     },
+    "Import %lld record…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Import %lld record…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록 가져오기…"
+          }
+        }
+      }
+    },
     "Import %lld records…": {
       "localizations": {
         "en": {
@@ -16065,6 +16097,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "%lld개 기록 가져오기…"
+          }
+        }
+      }
+    },
+    "%lld record is ready to import.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld record is ready to import."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록을 가져올 수 있습니다."
           }
         }
       }
@@ -16085,6 +16133,22 @@
         }
       }
     },
+    "%lld record is already in the current history.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld record is already in the current history."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록은 이미 현재 기록에 있습니다."
+          }
+        }
+      }
+    },
     "%lld records are already in the current history.": {
       "localizations": {
         "en": {
@@ -16097,6 +16161,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "%lld개 기록은 이미 현재 기록에 있습니다."
+          }
+        }
+      }
+    },
+    "%lld record conflicts with the current history.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld record conflicts with the current history."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld개 기록이 현재 기록과 충돌합니다."
           }
         }
       }
@@ -16305,6 +16385,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "복구 보관본을 삭제하는 중…"
+          }
+        }
+      }
+    },
+    "Recovery snapshot operation could not be completed.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery snapshot operation could not be completed."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복구 보관본 작업을 완료하지 못했습니다."
           }
         }
       }

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 @main
@@ -5,6 +6,8 @@ struct HistoryRecoveryServiceTests {
     static func main() throws {
         try testCatalogsValidSnapshotWithoutChangingSourceBytes()
         try testCatalogRejectsTraversalComponent()
+        try testCatalogRejectsNonDirectoryAudioComponent()
+        try testCatalogRejectsDuplicateComponent()
         try testCatalogShowsCorruptManifestForManualManagement()
         try testCatalogRejectsSymbolicLinkPayload()
         try testCatalogCountsHiddenPayloadFiles()
@@ -14,7 +17,12 @@ struct HistoryRecoveryServiceTests {
         try testInvalidSnapshotInspectionDoesNotWriteFailureState()
         try testLogicalComparisonIgnoresOnlyDestinationAssetNames()
         try testStateWritesReplacePriorStateAtomically()
+        try testDurableWriteRetriesInterruptedAndWouldBlockWrites()
+        try testDurableWriteRejectsNonRetryableWriteFailure()
         try testImportCopiesAssetsAndRetriesWithoutDuplicates()
+        try testImportDoesNotReuseUnsafePersistedAssetName()
+        try testImportMarksUnsafeSourceAssetRecordFailedAndContinues()
+        try testImportMarksMismatchedDestinationRecordFailedAndContinues()
         try testImportKeepsCurrentRecordOnUUIDConflict()
         try testCompletedSnapshotRetentionCanBeCancelled()
         try testInvalidSnapshotCannotCancelScheduledDeletion()
@@ -64,6 +72,64 @@ struct HistoryRecoveryServiceTests {
         let descriptor = try required(service.listSnapshots().first)
         try expect(snapshot.lastPathComponent.hasPrefix("history-"), "fixture published snapshot is named")
         try expect(descriptor.integrity == .invalid, "traversal component is never importable")
+    }
+
+    private static func testCatalogRejectsNonDirectoryAudioComponent() throws {
+        let fixture = try HistoryRecoveryFixture()
+        defer { fixture.remove() }
+        let snapshotURL = try fixture.writeSnapshot()
+        let payloadURL = snapshotURL.appendingPathComponent("payload", isDirectory: true)
+        let audioBytes = Data("not an audio directory".utf8)
+        try audioBytes.write(to: payloadURL.appendingPathComponent("audio"))
+        let manifestURL = snapshotURL.appendingPathComponent("manifest.json")
+        let manifest = try JSONDecoder().decode(
+            HistoryArchiveSnapshot.self,
+            from: Data(contentsOf: manifestURL)
+        )
+        let malformedManifest = HistoryArchiveSnapshot(
+            schemaVersion: manifest.schemaVersion,
+            id: manifest.id,
+            archivedAt: manifest.archivedAt,
+            components: manifest.components + [
+                HistoryArchiveSnapshotComponent(
+                    identifier: .audio,
+                    relativePath: "audio",
+                    byteCount: UInt64(audioBytes.count),
+                    isDirectory: false
+                )
+            ]
+        )
+        try JSONEncoder().encode(malformedManifest).write(to: manifestURL)
+
+        let descriptor = try required(HistoryRecoveryService(storageRoot: fixture.rootURL).listSnapshots().first)
+        try expect(
+            descriptor.integrity == .invalid,
+            "a published audio file is not a recoverable audio directory component"
+        )
+    }
+
+    private static func testCatalogRejectsDuplicateComponent() throws {
+        let fixture = try HistoryRecoveryFixture()
+        defer { fixture.remove() }
+        let snapshotURL = try fixture.writeSnapshot()
+        let manifestURL = snapshotURL.appendingPathComponent("manifest.json")
+        let manifest = try JSONDecoder().decode(
+            HistoryArchiveSnapshot.self,
+            from: Data(contentsOf: manifestURL)
+        )
+        let malformedManifest = HistoryArchiveSnapshot(
+            schemaVersion: manifest.schemaVersion,
+            id: manifest.id,
+            archivedAt: manifest.archivedAt,
+            components: manifest.components + [try required(manifest.components.first)]
+        )
+        try JSONEncoder().encode(malformedManifest).write(to: manifestURL)
+
+        let descriptor = try required(HistoryRecoveryService(storageRoot: fixture.rootURL).listSnapshots().first)
+        try expect(
+            descriptor.integrity == .invalid,
+            "duplicate archive component declarations are not a recovery source"
+        )
     }
 
     private static func testCatalogShowsCorruptManifestForManualManagement() throws {
@@ -317,6 +383,44 @@ struct HistoryRecoveryServiceTests {
         )
     }
 
+    private static func testDurableWriteRetriesInterruptedAndWouldBlockWrites() throws {
+        let bytes = Data([1, 2, 3, 4])
+        var writes: [Data] = []
+        var attempts = 0
+
+        try HistoryRecoveryDurability.writeAll(bytes) { pointer, remaining in
+            defer { attempts += 1 }
+            switch attempts {
+            case 0:
+                return (written: 0, errorCode: EINTR)
+            case 1:
+                writes.append(Data(bytes: pointer, count: 2))
+                return (written: 2, errorCode: 0)
+            case 2:
+                return (written: 0, errorCode: EAGAIN)
+            default:
+                writes.append(Data(bytes: pointer, count: remaining))
+                return (written: remaining, errorCode: 0)
+            }
+        }
+
+        try expect(
+            attempts == 4 && writes == [Data([1, 2]), Data([3, 4])],
+            "durable recovery writes retry interruptions without advancing their buffer"
+        )
+    }
+
+    private static func testDurableWriteRejectsNonRetryableWriteFailure() throws {
+        do {
+            try HistoryRecoveryDurability.writeAll(Data([1])) { _, _ in
+                (written: 0, errorCode: EIO)
+            }
+            throw HistoryRecoveryTestFailure("non-retryable durable write unexpectedly succeeded")
+        } catch HistoryRecoveryServiceError.metadataWriteFailed {
+            // Expected: only EINTR and EAGAIN are retried.
+        }
+    }
+
     private static func testImportCopiesAssetsAndRetriesWithoutDuplicates() throws {
         let fixture = try HistoryRecoveryFixture()
         defer { fixture.remove() }
@@ -397,6 +501,163 @@ struct HistoryRecoveryServiceTests {
         try expect(
             service.listSnapshots().first?.state?.status == .completed,
             "fully imported snapshot becomes eligible for seven-day retention"
+        )
+    }
+
+    private static func testImportDoesNotReuseUnsafePersistedAssetName() throws {
+        let fixture = try HistoryRecoveryFixture()
+        defer { fixture.remove() }
+        let sourceItem = makeHistoryItem(
+            id: UUID(uuidString: "1F9E66D3-7B9B-4E25-BE5B-1392C339C2A7")!,
+            audioFileName: "archived.wav",
+            transcriptFileName: "archived.txt"
+        )
+        _ = try fixture.writeHistorySnapshot(item: sourceItem)
+        let activeStore = PipelineHistoryStore(storeURL: fixture.activeStoreURL)
+        defer { try? activeStore.detachForArchiveVerification() }
+        try FileManager.default.createDirectory(
+            at: fixture.activeAudioDirectory,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: fixture.activeTranscriptDirectory,
+            withIntermediateDirectories: true
+        )
+        let outsideURL = fixture.rootURL.appendingPathComponent("outside.wav")
+        let outsideBytes = Data("archived audio".utf8)
+        try outsideBytes.write(to: outsideURL)
+        let service = HistoryRecoveryService(storageRoot: fixture.rootURL)
+        try service.saveState(
+            HistoryRecoveryState(
+                snapshotID: fixture.snapshotID,
+                status: .available,
+                records: [
+                    HistoryRecoveryRecordState(
+                        id: sourceItem.id,
+                        status: .planned,
+                        audioFileName: "../outside.wav"
+                    )
+                ],
+                completedAt: nil
+            )
+        )
+
+        _ = try service.importSnapshot(
+            id: fixture.snapshotID,
+            into: activeStore,
+            audioDirectory: fixture.activeAudioDirectory,
+            transcriptDirectory: fixture.activeTranscriptDirectory
+        )
+
+        let importedItem = try required(activeStore.loadAllHistory().first)
+        try expect(
+            importedItem.audioFileName != "../outside.wav",
+            "a persisted recovery mapping cannot escape the active audio directory"
+        )
+        try expect(
+            try Data(contentsOf: outsideURL) == outsideBytes,
+            "an unsafe persisted recovery mapping leaves files outside active storage untouched"
+        )
+    }
+
+    private static func testImportMarksUnsafeSourceAssetRecordFailedAndContinues() throws {
+        let fixture = try HistoryRecoveryFixture()
+        defer { fixture.remove() }
+        let invalidSourceItem = makeHistoryItem(
+            id: UUID(uuidString: "E56DF956-EC51-4085-A398-C1171B0B7973")!,
+            audioFileName: "../escape.wav",
+            transcriptFileName: "archived.txt"
+        )
+        let validSourceItem = makeHistoryItem(
+            id: UUID(uuidString: "840E1C87-A4B2-4B1F-8B38-EE356CD4DD2B")!,
+            audioFileName: "archived.wav",
+            transcriptFileName: "archived.txt"
+        )
+        _ = try fixture.writeHistorySnapshot(items: [invalidSourceItem, validSourceItem])
+        let activeStore = PipelineHistoryStore(storeURL: fixture.activeStoreURL)
+        defer { try? activeStore.detachForArchiveVerification() }
+        let service = HistoryRecoveryService(storageRoot: fixture.rootURL)
+
+        let result = try service.importSnapshot(
+            id: fixture.snapshotID,
+            into: activeStore,
+            audioDirectory: fixture.activeAudioDirectory,
+            transcriptDirectory: fixture.activeTranscriptDirectory
+        )
+
+        try expect(result.importedRecordCount == 1, "a valid archive record imports after a bad asset name")
+        try expect(result.failedRecordCount == 1, "an unsafe source asset name marks only its record failed")
+        try expect(
+            activeStore.loadAllHistory().contains(where: { $0.id == validSourceItem.id })
+                && !activeStore.loadAllHistory().contains(where: { $0.id == invalidSourceItem.id }),
+            "unsafe archive asset paths cannot create an active history record"
+        )
+        let records = try required(service.listSnapshots().first?.state?.records)
+        try expect(
+            records.first(where: { $0.id == invalidSourceItem.id })?.status == .failed,
+            "the unsafe source asset record remains visible for later recovery review"
+        )
+    }
+
+    private static func testImportMarksMismatchedDestinationRecordFailedAndContinues() throws {
+        let fixture = try HistoryRecoveryFixture()
+        defer { fixture.remove() }
+        let mismatchedDestinationItem = makeHistoryItem(
+            id: UUID(uuidString: "3110241E-3DD2-4A9D-B9EC-B3AF85A95C54")!,
+            audioFileName: "archived.wav",
+            transcriptFileName: "archived.txt"
+        )
+        let validSourceItem = makeHistoryItem(
+            id: UUID(uuidString: "8BA5B1F4-7569-4649-8CAE-CB62831BA52C")!,
+            audioFileName: "archived.wav",
+            transcriptFileName: "archived.txt"
+        )
+        _ = try fixture.writeHistorySnapshot(items: [mismatchedDestinationItem, validSourceItem])
+        let destinationDirectory = fixture.activeAudioDirectory
+            .appendingPathComponent("existing.wav", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: destinationDirectory,
+            withIntermediateDirectories: true
+        )
+        try Data("archived audio".utf8).write(
+            to: destinationDirectory.appendingPathComponent("same-size.wav")
+        )
+        let activeStore = PipelineHistoryStore(storeURL: fixture.activeStoreURL)
+        defer { try? activeStore.detachForArchiveVerification() }
+        let service = HistoryRecoveryService(storageRoot: fixture.rootURL)
+        try service.saveState(
+            HistoryRecoveryState(
+                snapshotID: fixture.snapshotID,
+                status: .available,
+                records: [
+                    HistoryRecoveryRecordState(
+                        id: mismatchedDestinationItem.id,
+                        status: .planned,
+                        audioFileName: "existing.wav"
+                    )
+                ],
+                completedAt: nil
+            )
+        )
+
+        let result = try service.importSnapshot(
+            id: fixture.snapshotID,
+            into: activeStore,
+            audioDirectory: fixture.activeAudioDirectory,
+            transcriptDirectory: fixture.activeTranscriptDirectory
+        )
+
+        try expect(result.importedRecordCount == 1, "a valid record imports after a bad destination")
+        try expect(result.failedRecordCount == 1, "a directory destination cannot be reused as audio")
+        try expect(
+            activeStore.loadAllHistory().contains(where: { $0.id == validSourceItem.id })
+                && !activeStore.loadAllHistory().contains(where: { $0.id == mismatchedDestinationItem.id }),
+            "a mismatched destination cannot create an active history row"
+        )
+        let records = try required(service.listSnapshots().first?.state?.records)
+        try expect(
+            records.first(where: { $0.id == mismatchedDestinationItem.id })?.status == .failed,
+            "the mismatched destination remains recoverable as a failed record"
         )
     }
 
@@ -684,6 +945,10 @@ private final class HistoryRecoveryFixture {
     }
 
     func writeHistorySnapshot(item: PipelineHistoryItem) throws -> URL {
+        try writeHistorySnapshot(items: [item])
+    }
+
+    func writeHistorySnapshot(items: [PipelineHistoryItem]) throws -> URL {
         let snapshotURL = rootURL
             .appendingPathComponent("Recovery", isDirectory: true)
             .appendingPathComponent(
@@ -710,7 +975,9 @@ private final class HistoryRecoveryFixture {
 
         let storeURL = payloadURL.appendingPathComponent("PipelineHistory.sqlite")
         let archiveStore = PipelineHistoryStore(storeURL: storeURL)
-        _ = try archiveStore.upsert(item, maxCount: Int.max, requiresDurableStore: true)
+        for item in items {
+            _ = try archiveStore.upsert(item, maxCount: Int.max, requiresDurableStore: true)
+        }
         try archiveStore.detachForArchiveVerification()
 
         let components = try [

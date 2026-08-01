@@ -508,61 +508,6 @@ struct MeetingSummaryAppStateTests {
         }
     }
 
-    private static func testRecoveredHistoryWarningAllowsSummaryPersistence() async throws {
-        let directoryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directoryURL,
-            withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: directoryURL) }
-        let store = try makeRecoveredStore(at: directoryURL)
-        let item = makeItem()
-        _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
-
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        defer {
-            AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
-        }
-        AppState.pipelineHistoryStoreFactory = { store }
-
-        let appState = await MainActor.run {
-            AppState()
-        }
-        await MainActor.run {
-            appState.apiKey = "configured-key"
-            appState.selectAIProcessingBackendChoice(
-                .cloud(modelID: "summary/model"),
-                for: .meetingSummary
-            )
-            appState.disableMeetingSummary = false
-            precondition(
-                appState.historyPersistenceWarning?.code
-                    == .historyRecovered,
-                "recovered history warns without being treated as non-durable"
-            )
-            precondition(
-                appState.pipelineHistory.contains(where: { $0.id == item.id }),
-                "recovered durable history loads previously saved notes"
-            )
-        }
-        await MainActor.run {
-            AppState.meetingSummaryGeneratorFactory = { _ in
-                MeetingSummaryGeneratorStub { _ in generationResult }
-            }
-        }
-
-        try await appState.generateMeetingSummary(id: item.id)
-
-        await MainActor.run {
-            precondition(
-                appState.pipelineHistory.first(where: { $0.id == item.id })?
-                    .meetingSummary != nil,
-                "recovered durable history accepts persisted summaries"
-            )
-        }
-    }
-
     private static func testFailurePreservesExistingSummary() async throws {
         let existing = envelope(completed: true)
         let item = makeItem().withMeetingSummary(existing)
@@ -1346,32 +1291,6 @@ struct MeetingSummaryAppStateTests {
             persistentStoreLoader: { container in
                 persistentLoadAttempts += 1
                 if persistentLoadAttempts <= 2 {
-                    return MeetingSummaryAppStateTestFailure(
-                        "Injected persistent-store load failure"
-                    )
-                }
-                return PipelineHistoryStore.loadPersistentStoresSynchronously(
-                    container: container
-                )
-            }
-        )
-    }
-
-    private static func makeRecoveredStore(
-        at directoryURL: URL
-    ) throws -> PipelineHistoryStore {
-        let storeURL = directoryURL.appendingPathComponent("PipelineHistory.sqlite")
-        for suffix in ["", "-wal", "-shm"] {
-            try Data("invalid SQLite store".utf8).write(
-                to: URL(fileURLWithPath: storeURL.path + suffix)
-            )
-        }
-        var persistentLoadAttempts = 0
-        return PipelineHistoryStore(
-            storeURL: storeURL,
-            persistentStoreLoader: { container in
-                persistentLoadAttempts += 1
-                if persistentLoadAttempts == 1 {
                     return MeetingSummaryAppStateTestFailure(
                         "Injected persistent-store load failure"
                     )

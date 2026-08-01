@@ -28,6 +28,8 @@ struct QuillUserIssueUIContractTests {
             menuBar,
             appState
         )
+        try testRecoveryImportOutcomePersistsOutsideProgressOverlay(appState, historyRecovery)
+        try testRecoveryCountGrammarUsesSingularCatalogKeys(historyRecovery)
         print("QuillUserIssueUIContractTests passed")
     }
 
@@ -281,6 +283,45 @@ struct QuillUserIssueUIContractTests {
         )
     }
 
+    private static func testRecoveryImportOutcomePersistsOutsideProgressOverlay(
+        _ appState: String,
+        _ historyRecovery: String
+    ) throws {
+        try expect(
+            appState.contains("@Published private(set) var historyRecoveryImportResult")
+                && appState.contains("historyRecoveryImportResult = result"),
+            "AppState publishes partial recovery import outcomes after the operation ends"
+        )
+        try expect(
+            historyRecovery.contains("appState.historyRecoveryImportResult")
+                && historyRecovery.contains("Some history could not be recovered."),
+            "Recovery renders a partial import outcome independently of its progress overlay"
+        )
+        let overlay = block(
+            historyRecovery,
+            from: ".overlay {",
+            to: ".onAppear {"
+        )
+        try expect(
+            !overlay.contains("historyRecoveryImportResult"),
+            "partial recovery feedback does not disappear with the progress overlay"
+        )
+    }
+
+    private static func testRecoveryCountGrammarUsesSingularCatalogKeys(
+        _ historyRecovery: String
+    ) throws {
+        try expect(
+            historyRecovery.contains("private func localizedRecoveryRecordCount(")
+                && historyRecovery.contains("%lld record found.")
+                && historyRecovery.contains("Import %lld record…")
+                && historyRecovery.contains("%lld record is ready to import.")
+                && historyRecovery.contains("%lld record is already in the current history.")
+                && historyRecovery.contains("%lld record conflicts with the current history."),
+            "Recovery record counts choose singular catalog keys before formatting"
+        )
+    }
+
     private static func testHistoryUnavailableProtectionAndArchiveNotice(
         _ noteBrowser: String,
         _ settings: String,
@@ -317,6 +358,11 @@ struct QuillUserIssueUIContractTests {
             settings.contains("HistoryRecoverySettingsView()")
                 && settings.contains("tab != .recovery || !appState.historyRecoverySnapshots.isEmpty"),
             "Settings exposes Recovery only when a snapshot exists"
+        )
+        try expect(
+            settings.contains("case .recovery where !appState.historyRecoverySnapshots.isEmpty:")
+                && settings.contains("case .recovery:\n                    GeneralSettingsView()"),
+            "Settings falls back to General when an asynchronous snapshot deletion hides Recovery"
         )
         try expect(
             menuBar.contains("Button(\"Recovery…\")")

@@ -148,22 +148,41 @@ struct RecoveredRecordingNoteBrowserSourceTests {
     private static func testRecoveryImportPreservesSelectedListPosition(
         _ source: String
     ) throws {
-        try expect(
-            source.contains("private struct RecoveryScrollRestoreRequest")
-                && source.contains("appState.isHistoryRecoveryOperationInProgress")
-                && source.contains("ScrollViewReader")
-                && source.contains(".id(item.id)")
-                && source.contains("proxy.scrollTo(request.itemID, anchor: .center)"),
-            "Recovery imports preserve the selected note as the list scroll anchor"
+        let selectionUpdate = block(
+            source,
+            from: ".onReceive(appState.$pipelineHistory) { newHistory in",
+            to: "private var historyUnavailableView: some View"
         )
         try expect(
-            source.contains("if isRecoveryImport {")
-                && source.contains("scheduleRecoveryScrollRestore(for: current)"),
-            "Recovery imports keep an existing selected note instead of selecting the newest imported note"
+            selectionUpdate.contains("let isRecoveryImport = appState.isHistoryRecoveryOperationInProgress")
+                && selectionUpdate.contains("if isRecoveryImport {")
+                && selectionUpdate.contains("scheduleRecoveryScrollRestore(for: current)"),
+            "Recovery imports schedule the existing selection as the list restore anchor"
+        )
+
+        let restore = block(
+            source,
+            from: "private func restoreRecoveryScrollPosition(",
+            to: "private func transcriptionChoiceMenuItem"
         )
         try expect(
-            source.contains("filteredHistory.contains(where: { $0.id == request.itemID })"),
-            "scroll restoration leaves an active search filter unchanged when it hides the selected note"
+            restore.contains("filteredHistory.contains(where: { $0.id == request.itemID })")
+                && restore.contains("DispatchQueue.main.async")
+                && restore.contains("proxy.scrollTo(request.itemID, anchor: .center)"),
+            "scroll restoration keeps an active search filter unchanged and scrolls asynchronously"
+        )
+
+        let reader = block(
+            source,
+            from: "ScrollViewReader { proxy in",
+            to: ".frame(width: 280)"
+        )
+        try expect(
+            reader.contains(".id(item.id)")
+                && reader.contains(".onChange(of: recoveryScrollRestoreRequest?.id)")
+                && reader.contains("restoreRecoveryScrollPosition(")
+                && reader.contains("request: recoveryScrollRestoreRequest"),
+            "ScrollViewReader observes the scheduled recovery request and restores the matching row"
         )
     }
 

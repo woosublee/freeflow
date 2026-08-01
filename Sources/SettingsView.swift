@@ -402,8 +402,10 @@ struct SettingsView: View {
                     InputSettingsView()
                 case .calendar:
                     CalendarSettingsView()
-                case .recovery:
+                case .recovery where !appState.historyRecoverySnapshots.isEmpty:
                     HistoryRecoverySettingsView()
+                case .recovery:
+                    GeneralSettingsView()
                 case .about:
                     AboutSettingsView()
                 case .runLog where AppBuild.isDevBundle:
