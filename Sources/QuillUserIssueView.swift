@@ -10,6 +10,7 @@ struct QuillUserIssueView: View {
     let presentation: QuillUserIssuePresentation
     var style: QuillUserIssueViewStyle = .full
     var action: (() -> Void)?
+    var actionTitleOverride: String?
     // Only meaningful for .warningBanner: when non-nil, a small close button
     // renders top-right of the banner. The centered error card (.full /
     // .inline styles) never passes this, so it never gets a dismiss control.
@@ -142,11 +143,15 @@ struct QuillUserIssueView: View {
 
     @ViewBuilder
     private var actionButton: some View {
-        if let action, presentation.recoveryAction != .none {
-            Button(actionTitle, action: action)
-                .font(.caption.weight(.semibold))
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+        if let action,
+           actionTitleOverride != nil || presentation.recoveryAction != .none {
+            Button(
+                localizedCatalogString(actionTitleOverride ?? actionTitle),
+                action: action
+            )
+            .font(.caption.weight(.semibold))
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
     }
 
@@ -178,6 +183,6 @@ struct QuillUserIssueView: View {
         case .none:
             key = ""
         }
-        return localizedCatalogString(key)
+        return key
     }
 }

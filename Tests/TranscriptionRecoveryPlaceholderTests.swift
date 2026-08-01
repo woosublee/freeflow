@@ -57,6 +57,7 @@ struct TranscriptionRecoveryPlaceholderTests {
         assert(item.usedLocalTranscription)
         assert(item.usedPostProcessing == false)
         assert(item.transcriptionLanguageCode == "ko")
+        assert(item.spokenLanguage == nil)
         assert(item.localTranscriptionModelID == "local-model")
         assert(item.contextAppName == "Notes")
         assert(item.contextBundleIdentifier == "com.apple.Notes")

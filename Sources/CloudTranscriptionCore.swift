@@ -65,6 +65,17 @@ struct CloudTranscriptionJobIdentity: Codable, Equatable, Sendable {
 struct CloudTranscriptionCheckpoint: Codable, Equatable, Sendable {
     let identity: CloudTranscriptionJobIdentity
     let completedRawTranscripts: [String]
+    let engineLanguageCode: String?
+
+    init(
+        identity: CloudTranscriptionJobIdentity,
+        completedRawTranscripts: [String],
+        engineLanguageCode: String? = nil
+    ) {
+        self.identity = identity
+        self.completedRawTranscripts = completedRawTranscripts
+        self.engineLanguageCode = engineLanguageCode
+    }
 }
 
 enum CloudTranscriptionProgress: Equatable, Sendable {
@@ -258,6 +269,8 @@ struct CloudTranscriptionCore: Sendable {
         multipart: CloudTranscriptionMultipartLayout,
         checkpointStore: any CloudTranscriptionCheckpointStore,
         request: @escaping @Sendable (URL, TimeInterval) async throws -> String,
+        engineLanguageCode: @escaping @Sendable () async -> String? = { nil },
+        restoreEngineLanguageCode: @escaping @Sendable (String?) async -> Void = { _ in },
         progress: @escaping @Sendable (CloudTranscriptionProgress) -> Void
     ) async throws -> String {
         try plan.validate()
@@ -279,6 +292,7 @@ struct CloudTranscriptionCore: Sendable {
             identity: identity
         )
         var completedRawTranscripts = loadedCheckpoint?.completedRawTranscripts ?? []
+        await restoreEngineLanguageCode(loadedCheckpoint?.engineLanguageCode)
         guard completedRawTranscripts.count <= plan.chunks.count else {
             throw CloudTranscriptionChunkingError.invalidChunkPlan
         }
@@ -319,7 +333,8 @@ struct CloudTranscriptionCore: Sendable {
                     try await checkpointStore.save(
                         CloudTranscriptionCheckpoint(
                             identity: identity,
-                            completedRawTranscripts: completedRawTranscripts
+                            completedRawTranscripts: completedRawTranscripts,
+                            engineLanguageCode: await engineLanguageCode()
                         )
                     )
                     break

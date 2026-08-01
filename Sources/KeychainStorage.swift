@@ -5,7 +5,8 @@ enum AppSettingsStorage {
     static var storageDirectoryOverride: URL?
 
     private static var defaultStorageDirectory: URL {
-        AppName.applicationSupportDirectory
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return appSupport.appendingPathComponent(AppName.displayName, isDirectory: true)
     }
 
     private static var storageDirectory: URL {

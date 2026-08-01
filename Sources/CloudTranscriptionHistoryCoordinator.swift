@@ -88,10 +88,6 @@ final class CloudTranscriptionHistoryCoordinator {
 
     private var activeSessions: [UUID: CloudTranscriptionJobSession] = [:]
 
-    var hasActiveWork: Bool {
-        !activeTasks.isEmpty || !activeSessions.isEmpty
-    }
-
     func activate(
         historyID: UUID,
         session: CloudTranscriptionJobSession

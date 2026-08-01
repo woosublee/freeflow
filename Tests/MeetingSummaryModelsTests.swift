@@ -2,11 +2,25 @@ import Foundation
 
 @main
 struct MeetingSummaryModelsTests {
+    private static let languageContext = MeetingSummaryLanguageContext(
+        requestedOutputLanguage: "English",
+        appliedLanguageCode: "en",
+        resolutionSource: .configured
+    )
+
     static func main() throws {
         testFingerprintIsDeterministicAndChangesWithTranscript()
         testFingerprintIncludesCalendarMetadata()
         try testLegacyV1EnvelopeDecodesDisplayOnlyEvidence()
-        testNewSummariesUseSchemaVersion2()
+        try testLegacySummaryDecodesWithoutLanguageContext()
+        try testLegacyAttemptDecodesWithoutSourceFingerprint()
+        try testAttemptIsBoundToItsSourceFingerprint()
+        try testLanguageContextRoundTrips()
+        try testFailedAttemptPresentationIncludesLocalizedLanguageDetails()
+        try testFailedAttemptPresentationPlacesFailureReasonBeforeLanguage()
+        try testLegacySummaryDefaultsToVerifiedEvidence()
+        try testUnverifiedEvidenceRoundTrips()
+        testNewSummariesUseSchemaVersion4()
         testCompletionStateSurvivesEquivalentRegeneration()
         testMarkdownRendererIncludesAllSections()
         testSourceLocatorFindsExactQuote()
@@ -17,15 +31,18 @@ struct MeetingSummaryModelsTests {
     private static func testFingerprintIsDeterministicAndChangesWithTranscript() {
         let source = MeetingSummarySource(
             transcript: "Decision: ship Friday.",
-            calendar: nil
+            calendar: nil,
+            languageContext: languageContext
         )
         let same = MeetingSummarySource(
             transcript: "Decision: ship Friday.\n",
-            calendar: nil
+            calendar: nil,
+            languageContext: languageContext
         )
         let changed = MeetingSummarySource(
             transcript: "Decision: ship Monday.",
-            calendar: nil
+            calendar: nil,
+            languageContext: languageContext
         )
 
         precondition(source.fingerprint == same.fingerprint)
@@ -43,11 +60,13 @@ struct MeetingSummaryModelsTests {
         )
         let withoutCalendar = MeetingSummarySource(
             transcript: "Discuss launch.",
-            calendar: nil
+            calendar: nil,
+            languageContext: languageContext
         )
         let withCalendar = MeetingSummarySource(
             transcript: "Discuss launch.",
-            calendar: calendar
+            calendar: calendar,
+            languageContext: languageContext
         )
 
         precondition(withoutCalendar.fingerprint != withCalendar.fingerprint)
@@ -72,10 +91,220 @@ struct MeetingSummaryModelsTests {
         )
     }
 
-    private static func testNewSummariesUseSchemaVersion2() {
+    private static func testLegacySummaryDecodesWithoutLanguageContext() throws {
+        let legacyJSON = Data(#"{"schemaVersion":2,"promptVersion":2,"generatedAt":0,"sourceFingerprint":"f","modelID":"m","backendKind":"local","content":{"overview":{"text":"text","sourceQuotes":["quote"]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}}"#.utf8)
+
+        let decoded = try JSONDecoder().decode(MeetingSummaryEnvelope.self, from: legacyJSON)
+
+        precondition(decoded.languageContext == nil)
+    }
+
+    private static func testLegacyAttemptDecodesWithoutSourceFingerprint() throws {
+        let legacyJSON = Data(#"{"occurredAt":0,"outcome":"failed","backendKind":"cloud","modelID":"summary/model","language":null,"issue":null}"#.utf8)
+
+        let decoded = try JSONDecoder().decode(
+            MeetingSummaryAttempt.self,
+            from: legacyJSON
+        )
+
         precondition(
-            MeetingSummaryEnvelope.currentSchemaVersion == 2,
-            "new summaries persist evidence-bearing schema v2"
+            decoded.sourceFingerprint == nil,
+            "attempts persisted before provenance remain readable but are not current"
+        )
+    }
+
+    private static func testAttemptIsBoundToItsSourceFingerprint() throws {
+        let source = MeetingSummarySource(
+            transcript: "Decision: ship Friday.",
+            calendar: nil,
+            languageContext: languageContext
+        )
+        let attempt = MeetingSummaryAttempt(
+            occurredAt: Date(timeIntervalSince1970: 2_100),
+            outcome: .failed,
+            backendKind: .cloud,
+            modelID: "summary/model",
+            providerHost: "api.example.com",
+            language: languageContext,
+            issue: QuillUserIssueRecord(code: .meetingSummaryUnavailable),
+            sourceFingerprint: source.fingerprint
+        )
+        let encoded = try JSONEncoder().encode(attempt)
+        let payload = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+
+        precondition(
+            payload?["sourceFingerprint"] as? String == source.fingerprint,
+            "a provider attempt persists only the safe fingerprint of its submitted source"
+        )
+        precondition(attempt.isCurrent(for: source))
+        precondition(
+            !attempt.isCurrent(for: MeetingSummarySource(
+                transcript: "Decision: ship Monday.",
+                calendar: nil,
+                languageContext: languageContext
+            )),
+            "a diagnostic from source A is not current for source B"
+        )
+    }
+
+    private static func testLanguageContextRoundTrips() throws {
+        let expected = MeetingSummaryLanguageContext(
+            requestedOutputLanguage: "",
+            appliedLanguageCode: "ko",
+            resolutionSource: .engineDetected
+        )
+        let envelope = MeetingSummaryEnvelope(
+            schemaVersion: MeetingSummaryEnvelope.currentSchemaVersion,
+            promptVersion: 3,
+            generatedAt: Date(timeIntervalSince1970: 1_000),
+            sourceFingerprint: "f",
+            modelID: "m",
+            backendKind: .local,
+            languageContext: expected,
+            content: MeetingSummaryContent(
+                overview: MeetingSummaryEvidenceText(text: "text", sourceQuotes: []),
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                openQuestions: []
+            )
+        )
+
+        let decoded = try JSONDecoder().decode(
+            MeetingSummaryEnvelope.self,
+            from: JSONEncoder().encode(envelope)
+        )
+
+        precondition(decoded.languageContext == expected)
+    }
+
+    private static func testFailedAttemptPresentationIncludesLocalizedLanguageDetails() throws {
+        let bundleURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("build/localization")
+        guard let bundle = Bundle(path: bundleURL.path) else {
+            throw MeetingSummaryModelsTestFailure("Missing localization bundle")
+        }
+        let attempt = MeetingSummaryAttempt(
+            occurredAt: Date(timeIntervalSince1970: 2_000),
+            outcome: .failed,
+            backendKind: .cloud,
+            modelID: "summary/model",
+            providerHost: "api.example.com",
+            language: MeetingSummaryLanguageContext(
+                requestedOutputLanguage: "",
+                appliedLanguageCode: "ko",
+                resolutionSource: .engineDetected
+            ),
+            issue: QuillUserIssueRecord(
+                code: .meetingSummaryUnavailable,
+                context: QuillUserIssueContext(
+                    httpStatus: 429,
+                    providerHost: "api.example.com",
+                    providerCode: "rate_limit_exceeded",
+                    modelID: "summary/model"
+                )
+            )
+        )
+
+        guard let english = attempt.issuePresentation(language: "en", bundle: bundle),
+              let korean = attempt.issuePresentation(language: "ko", bundle: bundle) else {
+            throw MeetingSummaryModelsTestFailure("Failed attempt requires a presentation")
+        }
+        precondition(english.detailsRows == [
+            QuillUserIssueDetailsRow(label: "HTTP status", value: "429"),
+            QuillUserIssueDetailsRow(label: "Provider", value: "api.example.com"),
+            QuillUserIssueDetailsRow(label: "Provider code", value: "rate_limit_exceeded"),
+            QuillUserIssueDetailsRow(label: "Model", value: "summary/model"),
+            QuillUserIssueDetailsRow(label: "Summary language", value: "Korean (ko)"),
+            QuillUserIssueDetailsRow(label: "Language source", value: "Detected by transcription engine")
+        ])
+        precondition(korean.detailsRows == [
+            QuillUserIssueDetailsRow(label: "HTTP 상태", value: "429"),
+            QuillUserIssueDetailsRow(label: "제공자", value: "api.example.com"),
+            QuillUserIssueDetailsRow(label: "제공자 코드", value: "rate_limit_exceeded"),
+            QuillUserIssueDetailsRow(label: "모델", value: "summary/model"),
+            QuillUserIssueDetailsRow(label: "요약 언어", value: "한국어 (ko)"),
+            QuillUserIssueDetailsRow(label: "언어 확인 방법", value: "전사 엔진 감지")
+        ])
+    }
+
+    private static func testFailedAttemptPresentationPlacesFailureReasonBeforeLanguage() throws {
+        let bundleURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("build/localization")
+        guard let bundle = Bundle(path: bundleURL.path) else {
+            throw MeetingSummaryModelsTestFailure("Missing localization bundle")
+        }
+        let attempt = MeetingSummaryAttempt(
+            occurredAt: Date(timeIntervalSince1970: 2_000),
+            outcome: .failed,
+            backendKind: .local,
+            modelID: "qwen2.5-7b-instruct",
+            providerHost: nil,
+            language: MeetingSummaryLanguageContext(
+                requestedOutputLanguage: "",
+                appliedLanguageCode: "ko",
+                resolutionSource: .engineDetected
+            ),
+            issue: QuillUserIssueRecord(
+                code: .meetingSummaryInvalidResponse,
+                context: QuillUserIssueContext(
+                    modelID: "qwen2.5-7b-instruct",
+                    localBackend: "Local AI",
+                    meetingSummaryFailureSubtype: .jsonSchema
+                )
+            )
+        )
+
+        guard let presentation = attempt.issuePresentation(language: "en", bundle: bundle) else {
+            throw MeetingSummaryModelsTestFailure("Missing summary failure presentation")
+        }
+        precondition(presentation.detailsRows == [
+            QuillUserIssueDetailsRow(label: "Model", value: "qwen2.5-7b-instruct"),
+            QuillUserIssueDetailsRow(label: "Failure reason", value: "Summary format"),
+            QuillUserIssueDetailsRow(label: "Local backend", value: "Local AI"),
+            QuillUserIssueDetailsRow(label: "Summary language", value: "Korean (ko)"),
+            QuillUserIssueDetailsRow(label: "Language source", value: "Detected by transcription engine")
+        ])
+    }
+
+    private static func testLegacySummaryDefaultsToVerifiedEvidence() throws {
+        let legacyJSON = Data(#"{"schemaVersion":3,"promptVersion":3,"generatedAt":0,"sourceFingerprint":"f","modelID":"m","backendKind":"local","content":{"overview":{"text":"text","sourceQuotes":["quote"]},"keyPoints":[],"decisions":[],"actionItems":[],"openQuestions":[]}}"#.utf8)
+        let decoded = try JSONDecoder().decode(MeetingSummaryEnvelope.self, from: legacyJSON)
+
+        precondition(decoded.evidenceVerification == nil)
+        precondition(decoded.effectiveEvidenceVerification == .verified)
+    }
+
+    private static func testUnverifiedEvidenceRoundTrips() throws {
+        let envelope = MeetingSummaryEnvelope(
+            schemaVersion: MeetingSummaryEnvelope.currentSchemaVersion,
+            promptVersion: 3,
+            generatedAt: Date(timeIntervalSince1970: 1_000),
+            sourceFingerprint: "f",
+            modelID: "m",
+            backendKind: .local,
+            evidenceVerification: .unverified,
+            content: MeetingSummaryContent(
+                overview: MeetingSummaryEvidenceText(text: "text", sourceQuotes: ["quote"]),
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                openQuestions: []
+            )
+        )
+        let decoded = try JSONDecoder().decode(
+            MeetingSummaryEnvelope.self,
+            from: JSONEncoder().encode(envelope)
+        )
+
+        precondition(decoded.evidenceVerification == .unverified)
+        precondition(decoded.effectiveEvidenceVerification == .unverified)
+    }
+
+    private static func testNewSummariesUseSchemaVersion4() {
+        precondition(
+            MeetingSummaryEnvelope.currentSchemaVersion == 4,
+            "new summaries persist evidence-aware schema v4"
         )
     }
 
@@ -144,6 +373,14 @@ struct MeetingSummaryModelsTests {
         precondition(rendered.contains("## Decisions"))
         precondition(rendered.contains("## Action Items"))
         precondition(rendered.contains("## Open Questions"))
+    }
+}
+
+private struct MeetingSummaryModelsTestFailure: Error {
+    let message: String
+
+    init(_ message: String) {
+        self.message = message
     }
 }
 

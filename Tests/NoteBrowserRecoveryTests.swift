@@ -28,7 +28,7 @@ struct NoteBrowserRecoveryTests {
             transcript: " transcript ",
             retryAvailability: .noAudio
         )
-        precondition(transcriptOnly.showsRetryButton)
+        precondition(!transcriptOnly.showsRetryButton)
         precondition(transcriptOnly.canCopy)
         precondition(transcriptOnly.canSaveFiles)
     }

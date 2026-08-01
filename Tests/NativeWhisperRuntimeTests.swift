@@ -4,7 +4,9 @@ import Foundation
 struct NativeWhisperRuntimeTests {
     static func main() async throws {
         try await testRuntimeReturnsStdoutTranscript()
-        try await testRuntimeReadsOutputJSONTextField()
+        try await testRuntimeReadsOutputJSONLanguage()
+        try await testRuntimeNormalizesOutputJSONText()
+        try await testRuntimeRejectsPunctuationOnlyOutputJSON()
         try await testRuntimeUsesTimestampDecodingKeepsGPUEnabledAndDisablesTextContext()
         try await testRuntimePassesExplicitLanguage()
         try await testRuntimeRejectsMissingRunner()
@@ -28,12 +30,12 @@ struct NativeWhisperRuntimeTests {
         let audio = try writeFile(root.appendingPathComponent("audio.wav"), data: Data([2]))
         let runtime = NativeWhisperRuntime(runnerURL: helper)
 
-        let transcript = try await runtime.transcribe(audioURL: audio, modelURL: model, languageCode: "en")
+        let result = try await runtime.transcribe(audioURL: audio, modelURL: model, languageCode: "en")
 
-        assert(transcript == "hello from native whisper")
+        assert(result.text == "hello from native whisper")
     }
 
-    private static func testRuntimeReadsOutputJSONTextField() async throws {
+    private static func testRuntimeReadsOutputJSONLanguage() async throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let helper = try writeHelper(root: root, body: """
@@ -41,7 +43,7 @@ struct NativeWhisperRuntimeTests {
         while [ "$#" -gt 0 ]; do
           if [ "$1" = "-of" ]; then
             shift
-            printf '{"text":"json transcript"}' > "$1.json"
+            printf '{"result":{"language":"ko"},"transcription":[{"text":"12345 ---"}]}' > "$1.json"
             exit 0
           fi
           shift
@@ -52,9 +54,67 @@ struct NativeWhisperRuntimeTests {
         let audio = try writeFile(root.appendingPathComponent("audio.wav"), data: Data([2]))
         let runtime = NativeWhisperRuntime(runnerURL: helper)
 
-        let transcript = try await runtime.transcribe(audioURL: audio, modelURL: model, languageCode: "ko")
+        let result = try await runtime.transcribe(audioURL: audio, modelURL: model, languageCode: nil)
 
-        assert(transcript == "json transcript")
+        assert(result.text == "12345 ---")
+        assert(result.spokenLanguage == SpokenLanguageResolution(
+            languageCode: "ko",
+            source: .engineDetected
+        ))
+    }
+
+    private static func testRuntimeNormalizesOutputJSONText() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = try writeHelper(root: root, body: """
+        #!/bin/sh
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = "-of" ]; then
+            shift
+            printf '{"result":{"language":"en"},"transcription":[{"text":"Wait...  really?!"}]}' > "$1.json"
+            exit 0
+          fi
+          shift
+        done
+        exit 2
+        """)
+        let model = try writeFile(root.appendingPathComponent("model.bin"), data: Data([1]))
+        let audio = try writeFile(root.appendingPathComponent("audio.wav"), data: Data([2]))
+        let runtime = NativeWhisperRuntime(runnerURL: helper)
+
+        let result = try await runtime.transcribe(audioURL: audio, modelURL: model, languageCode: nil)
+
+        assert(result.text == "Wait. really?!")
+    }
+
+    private static func testRuntimeRejectsPunctuationOnlyOutputJSON() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = try writeHelper(root: root, body: """
+        #!/bin/sh
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = "-of" ]; then
+            shift
+            printf '{"result":{"language":"en"},"transcription":[{"text":"...?!"}]}' > "$1.json"
+            exit 0
+          fi
+          shift
+        done
+        exit 2
+        """)
+        let model = try writeFile(root.appendingPathComponent("model.bin"), data: Data([1]))
+        let audio = try writeFile(root.appendingPathComponent("audio.wav"), data: Data([2]))
+        let runtime = NativeWhisperRuntime(runnerURL: helper)
+
+        do {
+            _ = try await runtime.transcribe(audioURL: audio, modelURL: model, languageCode: nil)
+            assertionFailure("Expected punctuation-only JSON transcript rejection")
+        } catch let error as NativeWhisperRuntimeError {
+            guard case .noTranscript = error else {
+                assertionFailure("Expected noTranscript, got \(error)")
+                return
+            }
+        }
     }
 
     private static func testRuntimeUsesTimestampDecodingKeepsGPUEnabledAndDisablesTextContext() async throws {

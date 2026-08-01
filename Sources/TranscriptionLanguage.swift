@@ -45,6 +45,45 @@ struct TranscriptionLanguage: Identifiable, Hashable, Codable {
         all.first { $0.code == code } ?? .auto
     }
 
+    static func code(forSummaryOutput outputLanguage: String?) -> String? {
+        switch outputLanguage {
+        case "Korean": "ko"
+        case "English": "en"
+        case "Japanese": "ja"
+        case "Chinese": "zh"
+        case "Spanish": "es"
+        case "French": "fr"
+        case "German": "de"
+        case "Portuguese": "pt"
+        default: nil
+        }
+    }
+
+    static func summaryPromptLanguage(for code: String?) -> String? {
+        switch code?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "ko": "Korean"
+        case "en": "English"
+        case "ja": "Japanese"
+        case "zh": "Chinese"
+        case "zh-hans", "zh-cn", "zh-sg": "Simplified Chinese"
+        case "zh-hant", "zh-hk", "zh-mo", "zh-tw": "Traditional Chinese"
+        case "es": "Spanish"
+        case "fr": "French"
+        case "de": "German"
+        case "pt", "pt-br", "pt-pt": "Portuguese"
+        default: nil
+        }
+    }
+
+    static func localizedSummaryLanguageName(
+        for code: String,
+        language: String = preferredLocalizedStringLanguage(),
+        bundle: Bundle = .main
+    ) -> String? {
+        guard let key = summaryPromptLanguage(for: code) else { return nil }
+        return localizedCatalogString(key, language: language, bundle: bundle)
+    }
+
     // mlx-whisper에 넘길 인자값 (auto이면 language 옵션 생략)
     var whisperArgument: String? {
         code == "auto" ? nil : code
@@ -61,5 +100,16 @@ struct TranscriptionLanguage: Identifiable, Hashable, Codable {
         // 언어 코드가 같은 로케일 중 첫 번째 선택 (예: "ko" → "ko-KR")
         let lang = requested.language.languageCode?.identifier ?? code
         return supported.first { $0.language.languageCode?.identifier == lang } ?? requested
+    }
+}
+
+struct RealtimeTranscriptionLanguageConfiguration: Equatable, Sendable {
+    let requestLanguage: String?
+    let requestedLanguageCode: String
+
+    init(transcriptionLanguage: TranscriptionLanguage) {
+        let requestLanguage = transcriptionLanguage.whisperArgument
+        self.requestLanguage = requestLanguage
+        self.requestedLanguageCode = requestLanguage ?? "auto"
     }
 }

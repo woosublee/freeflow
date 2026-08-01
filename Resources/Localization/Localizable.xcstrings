@@ -6735,6 +6735,70 @@
         }
       }
     },
+    "Provider code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Provider code"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "제공자 코드"
+          }
+        }
+      }
+    },
+    "Spoken language could not be determined": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spoken language could not be determined"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "발화 언어를 확인할 수 없습니다"
+          }
+        }
+      }
+    },
+    "Quill could not determine the spoken language for this meeting summary.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill could not determine the spoken language for this meeting summary."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill이 이 회의 요약의 발화 언어를 확인할 수 없습니다."
+          }
+        }
+      }
+    },
+    "Choose an output language in Models settings, then try again.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose an output language in Models settings, then try again."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "모델 설정에서 출력 언어를 선택한 뒤 다시 시도하세요."
+          }
+        }
+      }
+    },
     "English": {
       "localizations": {
         "en": {
@@ -11845,6 +11909,278 @@
         }
       }
     },
+    "Failure reason": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Failure reason"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "실패 원인"
+          }
+        }
+      }
+    },
+    "Empty output": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Empty output"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "빈 출력"
+          }
+        }
+      }
+    },
+    "Response envelope": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Response envelope"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "응답 형식"
+          }
+        }
+      }
+    },
+    "Summary format": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Summary format"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "요약 형식"
+          }
+        }
+      }
+    },
+    "Context budget": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Context budget"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컨텍스트 예산"
+          }
+        }
+      }
+    },
+    "Merge budget": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Merge budget"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "병합 예산"
+          }
+        }
+      }
+    },
+    "Source evidence missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Source evidence missing"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "근거 원문 누락"
+          }
+        }
+      }
+    },
+    "Source quote not found": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Source quote not found"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "근거 인용을 찾을 수 없음"
+          }
+        }
+      }
+    },
+    "Overview evidence": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Overview evidence"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "개요 근거"
+          }
+        }
+      }
+    },
+    "Duplicate overview evidence": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Duplicate overview evidence"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "중복된 개요 근거"
+          }
+        }
+      }
+    },
+    "Owner is not grounded": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Owner is not grounded"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "담당자 근거 불일치"
+          }
+        }
+      }
+    },
+    "Due date is not grounded": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Due date is not grounded"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기한 근거 불일치"
+          }
+        }
+      }
+    },
+    "Output language mismatch": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Output language mismatch"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "출력 언어 불일치"
+          }
+        }
+      }
+    },
+    "Some evidence could not be verified.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some evidence could not be verified."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일부 근거를 확인하지 못했습니다."
+          }
+        }
+      }
+    },
+    "Review the summary before sharing it.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review the summary before sharing it."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "공유하기 전에 요약을 검토하세요."
+          }
+        }
+      }
+    },
+    "Retry Summary": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retry Summary"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "요약 재시도"
+          }
+        }
+      }
+    },
+    "Summary language could not be determined": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Summary language could not be determined"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "요약 언어를 확인할 수 없습니다"
+          }
+        }
+      }
+    },
     "The provider returned a response Quill could not use for the summary.": {
       "localizations": {
         "en": {
@@ -13733,38 +14069,6 @@
         }
       }
     },
-    "Audio file unavailable": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Audio file unavailable"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "오디오 파일을 찾을 수 없음"
-          }
-        }
-      }
-    },
-    "This recording's audio file is unavailable, so it can't be transcribed.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This recording's audio file is unavailable, so it can't be transcribed."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이 녹음의 오디오 파일을 찾을 수 없어 재전사할 수 없습니다."
-          }
-        }
-      }
-    },
     "Audio recording": {
       "localizations": {
         "en": {
@@ -14741,262 +15045,6 @@
         }
       }
     },
-    "Open Data Folder": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open Data Folder"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "데이터 폴더 열기"
-          }
-        }
-      }
-    },
-    "Open the data folder to keep the original history available for support and recovery.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open the data folder to keep the original history available for support and recovery."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "지원 및 복구에 사용할 수 있도록 원본 기록이 보존된 데이터 폴더를 여세요."
-          }
-        }
-      }
-    },
-    "Quit Quill": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Quit Quill"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Quill 종료"
-          }
-        }
-      }
-    },
-    "Archive Old History and Start Fresh…": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Archive Old History and Start Fresh…"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이전 기록을 보관하고 새로 시작…"
-          }
-        }
-      }
-    },
-    "Archive and Start Fresh": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Archive and Start Fresh"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "보관하고 새로 시작"
-          }
-        }
-      }
-    },
-    "Archive old history?": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Archive old history?"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이전 기록을 보관할까요?"
-          }
-        }
-      }
-    },
-    "Archiving recording history…": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Archiving recording history…"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "녹음 기록을 보관하는 중…"
-          }
-        }
-      }
-    },
-    "Finish the current recording or transcription before archiving history.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Finish the current recording or transcription before archiving history."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "기록을 보관하기 전에 현재 녹음 또는 전사를 완료하세요."
-          }
-        }
-      }
-    },
-    "Archiving recording history is still in progress.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Archiving recording history is still in progress."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "녹음 기록을 보관하는 작업이 아직 진행 중입니다."
-          }
-        }
-      }
-    },
-    "Old history was archived": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Old history was archived"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이전 기록을 보관함"
-          }
-        }
-      }
-    },
-    "New history is saving separately. Restore, import, and merge are not available yet.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "New history is saving separately. Restore, import, and merge are not available yet."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "새 기록은 별도로 저장 중입니다. 복원, 가져오기, 병합은 아직 제공되지 않습니다."
-          }
-        }
-      }
-    },
-    "Open Recovery Folder": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open Recovery Folder"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "복구 폴더 열기"
-          }
-        }
-      }
-    },
-    "Open the recovery folder to keep the archived history available for a future recovery.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open the recovery folder to keep the archived history available for a future recovery."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "향후 복구에 사용할 수 있도록 보관된 기록을 복구 폴더에서 유지하세요."
-          }
-        }
-      }
-    },
-    "Your earlier notes will not appear in the new history. The original database, audio, transcripts, and recovery metadata will be kept in a recovery snapshot. Restore, import, and merge are not available yet. Cancel to leave everything unchanged.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Your earlier notes will not appear in the new history. The original database, audio, transcripts, and recovery metadata will be kept in a recovery snapshot. Restore, import, and merge are not available yet. Cancel to leave everything unchanged."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이전 노트는 새 기록에 표시되지 않습니다. 원본 데이터베이스, 오디오, 전사문, 복구 메타데이터는 복구 스냅샷에 보관됩니다. 복원, 가져오기, 병합은 아직 제공되지 않습니다. 취소하면 아무 데이터도 이동하지 않습니다."
-          }
-        }
-      }
-    },
-    "Recording history couldn’t be opened": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Recording history couldn’t be opened"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "녹음 기록을 열 수 없음"
-          }
-        }
-      }
-    },
-    "Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "노트와 오디오 파일은 삭제되지 않았습니다. Quill을 다시 시작해 재시도하거나 데이터 폴더를 열어 지원 및 복구에 사용할 수 있습니다."
-          }
-        }
-      }
-    },
     "History isn't being saved": {
       "localizations": {
         "en": {
@@ -15233,6 +15281,118 @@
           "stringUnit": {
             "state": "translated",
             "value": "이 온디바이스 모델은 이 Mac에서 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "Summary language": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Summary language"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "요약 언어"
+          }
+        }
+      }
+    },
+    "Language source": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Language source"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "언어 확인 방법"
+          }
+        }
+      }
+    },
+    "Explicitly selected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Explicitly selected"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "직접 선택"
+          }
+        }
+      }
+    },
+    "Detected by transcription engine": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Detected by transcription engine"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "전사 엔진 감지"
+          }
+        }
+      }
+    },
+    "Inferred from transcript": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Inferred from transcript"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "전사문 추정"
+          }
+        }
+      }
+    },
+    "Traditional Chinese": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Traditional Chinese"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "번체 중국어"
+          }
+        }
+      }
+    },
+    "Simplified Chinese": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Simplified Chinese"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "간체 중국어"
           }
         }
       }

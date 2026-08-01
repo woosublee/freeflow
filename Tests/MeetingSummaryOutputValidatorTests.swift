@@ -17,6 +17,12 @@ struct MeetingSummaryOutputValidatorTests {
         try testRejectsYearlessLocalizedDateForISODueDate()
         try testRejectsWrongLanguageInGeneratedProse()
         try testPreservesSourceQuoteLanguageWhileValidatingGeneratedProse()
+        try testSameAsSpokenLanguageRejectsEnglishSummaryForKorean()
+        try testTraditionalChineseIsAcceptedForTraditionalAndGenericChinese()
+        try testTraditionalChineseIsRejectedForSimplifiedChinese()
+        testEvidenceRepairReplacesWhitespaceAndPunctuationVariantWithSourceSubstring()
+        testEvidenceRepairMarksUnresolvedCitationUnverified()
+        testEvidenceRepairSanitizesUngroundedActionMetadata()
         print("MeetingSummaryOutputValidatorTests passed")
     }
 
@@ -144,6 +150,95 @@ struct MeetingSummaryOutputValidatorTests {
             outputLanguage: "Korean",
             against: sourceQuote
         )
+    }
+
+    private static func testSameAsSpokenLanguageRejectsEnglishSummaryForKorean() throws {
+        let language = MeetingSummaryLanguageContext(
+            requestedOutputLanguage: "",
+            appliedLanguageCode: "ko",
+            resolutionSource: .engineDetected
+        )
+        let draft = v2WithQuote(
+            "회의에서 다음 주 화요일에 출시하기로 결정했습니다.",
+            overview: "The team decided to release next Tuesday."
+        )
+
+        try expectFailure(.languageMismatch) {
+            try MeetingSummaryOutputValidator().validate(
+                draft,
+                outputLanguage: language.appliedLanguageCode,
+                against: "회의에서 다음 주 화요일에 출시하기로 결정했습니다."
+            )
+        }
+    }
+
+    private static func testTraditionalChineseIsAcceptedForTraditionalAndGenericChinese() throws {
+        let quote = "團隊決定下週二發布產品，並在今天完成說明文件。"
+        let draft = v2WithQuote(
+            quote,
+            overview: "團隊決定下週二發布產品。"
+        )
+
+        try MeetingSummaryOutputValidator().validate(
+            draft,
+            outputLanguage: "zh-Hant",
+            against: quote
+        )
+        try MeetingSummaryOutputValidator().validate(
+            draft,
+            outputLanguage: "zh",
+            against: quote
+        )
+    }
+
+    private static func testTraditionalChineseIsRejectedForSimplifiedChinese() throws {
+        let quote = "團隊決定下週二發布產品，並在今天完成說明文件。"
+        try expectFailure(.languageMismatch) {
+            try MeetingSummaryOutputValidator().validate(
+                v2WithQuote(
+                    quote,
+                    overview: "團隊決定下週二發布產品。"
+                ),
+                outputLanguage: "zh-Hans",
+                against: quote
+            )
+        }
+    }
+
+    private static func testEvidenceRepairReplacesWhitespaceAndPunctuationVariantWithSourceSubstring() {
+        let sourceQuote = "Minsu will send the release notes\non Friday."
+        let repaired = MeetingSummaryEvidenceRepairer().repair(
+            v2WithQuote("“Minsu will send the release notes on Friday”"),
+            sourceTexts: [sourceQuote]
+        )
+
+        precondition(repaired.verification == .verified)
+        precondition(repaired.draft.overview.sourceQuotes == [sourceQuote])
+    }
+
+    private static func testEvidenceRepairMarksUnresolvedCitationUnverified() {
+        let repaired = MeetingSummaryEvidenceRepairer().repair(
+            v2WithQuote("Invented source quote."),
+            sourceTexts: ["Minsu will send the release notes."]
+        )
+
+        precondition(repaired.verification == .unverified)
+        precondition(
+            repaired.draft.overview.sourceQuotes == ["Invented source quote."],
+            "unresolved summary evidence remains visible but is marked unverified"
+        )
+    }
+
+    private static func testEvidenceRepairSanitizesUngroundedActionMetadata() {
+        let sourceQuote = "Minsu will send the release notes on Friday."
+        let repaired = MeetingSummaryEvidenceRepairer().repair(
+            v2WithOwner("Jiyun", quote: sourceQuote),
+            sourceTexts: [sourceQuote]
+        )
+
+        precondition(repaired.verification == .unverified)
+        precondition(repaired.draft.actionItems[0].owner == nil)
+        precondition(repaired.draft.actionItems[0].dueDate == nil)
     }
 
     private static func v2WithQuote(

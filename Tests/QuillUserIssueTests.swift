@@ -6,13 +6,14 @@ struct QuillUserIssueTests {
         let bundle = try compiledLocalizationBundle()
         try testEveryCodeHasCompleteEnglishAndKoreanPresentation(bundle: bundle)
         try testSeverityAndRecoveryActions()
-        try testHistoryUnavailablePresentation(bundle: bundle)
-        try testHistoryArchivedPresentation(bundle: bundle)
         try testVersionedPersistenceRoundTripAndRejection()
         try testPersistedPayloadExcludesPrivateDiagnostics()
         try testLocalIssueUsesBoundedDiagnosticCategoryAndExcerpt()
         try testMissingProviderAPIKeyFactory()
         try testCompactMessageAndSafeDetailsAreDeterministic(bundle: bundle)
+        try testMeetingSummaryLanguageUnavailableAndProviderCodeDetails(bundle: bundle)
+        try testMeetingSummaryFailureSubtypeUsesSafeLocalizedDetails(bundle: bundle)
+        try testMeetingSummaryIssueActionResolver()
         print("QuillUserIssueTests passed")
     }
 
@@ -52,8 +53,7 @@ struct QuillUserIssueTests {
             .meetingSummaryUnavailable,
             .meetingSummaryInvalidResponse,
             .historyPersistenceUnavailable,
-            .historyRecovered,
-            .historyArchived
+            .historyRecovered
         ]
 
         for code in QuillUserIssueCode.allCases {
@@ -140,51 +140,83 @@ struct QuillUserIssueTests {
         )
     }
 
-    private static func testHistoryUnavailablePresentation(bundle: Bundle) throws {
-        let record = QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+    private static func testMeetingSummaryFailureSubtypeUsesSafeLocalizedDetails(
+        bundle: Bundle
+    ) throws {
+        let record = QuillUserIssueRecord(
+            code: .meetingSummaryInvalidResponse,
+            context: QuillUserIssueContext(
+                providerHost: "api.example.com",
+                modelID: "qwen2.5-7b-instruct",
+                meetingSummaryFailureSubtype: .responseEnvelope
+            )
+        )
         let english = record.presentation(language: "en", bundle: bundle)
         let korean = record.presentation(language: "ko", bundle: bundle)
 
+        try expect(english.detailsRows == [
+            QuillUserIssueDetailsRow(label: "Provider", value: "api.example.com"),
+            QuillUserIssueDetailsRow(label: "Model", value: "qwen2.5-7b-instruct"),
+            QuillUserIssueDetailsRow(label: "Failure reason", value: "Response envelope")
+        ], "summary failure Details append the safe reason after provider and model")
+        try expect(korean.detailsRows == [
+            QuillUserIssueDetailsRow(label: "제공자", value: "api.example.com"),
+            QuillUserIssueDetailsRow(label: "모델", value: "qwen2.5-7b-instruct"),
+            QuillUserIssueDetailsRow(label: "실패 원인", value: "응답 형식")
+        ], "summary failure reason is localized")
+
+        let unrelated = QuillUserIssueRecord(
+            code: .networkUnavailable,
+            context: QuillUserIssueContext(
+                meetingSummaryFailureSubtype: .responseEnvelope
+            )
+        ).presentation(language: "en", bundle: bundle)
         try expect(
-            english.title == "Recording history couldn’t be opened",
-            "history-unavailable English title explains protected state"
+            !unrelated.detailsRows.contains(
+                QuillUserIssueDetailsRow(
+                    label: "Failure reason",
+                    value: "Response envelope"
+                )
+            ),
+            "only summary invalid-response issues expose a summary failure reason"
+        )
+
+        let legacy = try JSONDecoder().decode(
+            QuillUserIssueContext.self,
+            from: Data(#"{"modelID":"legacy/model"}"#.utf8)
+        )
+        let unknown = try JSONDecoder().decode(
+            QuillUserIssueContext.self,
+            from: Data(#"{"meetingSummaryFailureSubtype":"unrecognized-subtype"}"#.utf8)
         )
         try expect(
-            english.body == "Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery.",
-            "history-unavailable English body confirms asset preservation"
-        )
-        try expect(
-            korean.title == "녹음 기록을 열 수 없음",
-            "history-unavailable Korean title is localized"
-        )
-        try expect(
-            korean.body == "노트와 오디오 파일은 삭제되지 않았습니다. Quill을 다시 시작해 재시도하거나 데이터 폴더를 열어 지원 및 복구에 사용할 수 있습니다.",
-            "history-unavailable Korean body confirms asset preservation"
+            legacy.meetingSummaryFailureSubtype == nil
+                && unknown.meetingSummaryFailureSubtype == nil,
+            "legacy and unknown summary failure subtypes decode without discarding the issue"
         )
     }
 
-    private static func testHistoryArchivedPresentation(bundle: Bundle) throws {
-        let record = QuillUserIssueRecord(code: .historyArchived)
-        let english = record.presentation(language: "en", bundle: bundle)
-        let korean = record.presentation(language: "ko", bundle: bundle)
+    private static func testMeetingSummaryIssueActionResolver() throws {
+        let provider = QuillUserIssueRecord(code: .authenticationFailed).presentation()
+        let models = QuillUserIssueRecord(code: .localModelMissing).presentation()
+        let retryTranscription = QuillUserIssueRecord(code: .networkUnavailable).presentation()
+        let none = QuillUserIssueRecord(code: .meetingSummaryUnavailable).presentation()
 
-        try expect(record.severity == .warning, "archived history is an informational warning")
-        try expect(record.recoveryAction == .none, "archived history has no automatic recovery action")
         try expect(
-            english.title == "Old history was archived",
-            "archived-history English title distinguishes archive from restore"
+            MeetingSummaryIssueAction.resolve(provider) == .recovery(.openProviderSettings),
+            "summary authentication keeps the provider-settings recovery route"
         )
         try expect(
-            english.body == "New history is saving separately. Restore, import, and merge are not available yet.",
-            "archived-history English body states the #243 boundary"
+            MeetingSummaryIssueAction.resolve(models) == .recovery(.openModelsSettings),
+            "summary model issues keep the Models settings recovery route"
         )
         try expect(
-            korean.title == "이전 기록을 보관함",
-            "archived-history Korean title is localized"
+            MeetingSummaryIssueAction.resolve(retryTranscription) == .retrySummary,
+            "summary retry never invokes a transcription retry"
         )
         try expect(
-            korean.body == "새 기록은 별도로 저장 중입니다. 복원, 가져오기, 병합은 아직 제공되지 않습니다.",
-            "archived-history Korean body states the #243 boundary"
+            MeetingSummaryIssueAction.resolve(none) == .retrySummary,
+            "summary issues without a recovery action retry summary generation"
         )
     }
 
@@ -347,6 +379,39 @@ struct QuillUserIssueTests {
                 QuillUserIssueDetailsRow(label: "재시도 횟수 소진", value: "예")
             ],
             "Korean details localize labels without changing safe values"
+        )
+    }
+
+    private static func testMeetingSummaryLanguageUnavailableAndProviderCodeDetails(
+        bundle: Bundle
+    ) throws {
+        let unavailable = QuillUserIssueRecord(
+            code: .meetingSummaryLanguageUnavailable,
+            context: QuillUserIssueContext(
+                providerCode: "temporarily_unavailable"
+            )
+        )
+        try expect(
+            unavailable.recoveryAction == .openModelsSettings,
+            "unavailable spoken language opens Models settings"
+        )
+        try expect(
+            unavailable.presentation(language: "en", bundle: bundle).detailsRows
+                == [
+                    QuillUserIssueDetailsRow(
+                        label: "Provider code",
+                        value: "temporarily_unavailable"
+                    )
+                ],
+            "provider code is shown as an allowlisted detail"
+        )
+        let withoutProviderCode = QuillUserIssueRecord(
+            code: .meetingSummaryLanguageUnavailable
+        )
+        try expect(
+            withoutProviderCode.presentation(language: "en", bundle: bundle)
+                .detailsRows.isEmpty,
+            "empty provider code is omitted from details"
         )
     }
 

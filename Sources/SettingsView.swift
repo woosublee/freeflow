@@ -4202,7 +4202,7 @@ struct RunLogView: View {
                 Button("Clear History") {
                     appState.clearPipelineHistory()
                 }
-                .disabled(appState.pipelineHistory.isEmpty || appState.isHistoryUnavailable)
+                .disabled(appState.pipelineHistory.isEmpty)
             }
             .padding(.horizontal, 24)
             .padding(.top, 20)
@@ -4210,49 +4210,22 @@ struct RunLogView: View {
 
             Divider()
 
-            if appState.isHistoryUnavailable {
-                VStack(spacing: 12) {
+            if appState.pipelineHistory.isEmpty {
+                VStack {
                     Spacer()
-                    Image(systemName: "externaldrive.badge.exclamationmark")
-                        .font(.system(size: 30, weight: .light))
-                        .foregroundStyle(.orange)
-                    Text("Recording history couldn’t be opened")
-                        .font(.headline)
-                    Text("Your notes and audio files were not deleted. Restart Quill to try again, or open the data folder for support and recovery.")
-                        .font(.caption)
+                    Text("No runs yet. Use dictation to populate history.")
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 420)
-                    HistoryUnavailableRecoveryActions()
                     Spacer()
                 }
-                .padding(24)
                 .frame(maxWidth: .infinity)
             } else {
-                VStack(spacing: 0) {
-                    if appState.historyArchiveSafety == .unresolvedArchive {
-                        HistoryArchiveNoticeView()
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 12)
-                    }
-                    if appState.pipelineHistory.isEmpty {
-                        VStack {
-                            Spacer()
-                            Text("No runs yet. Use dictation to populate history.")
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                        }
-                        .frame(maxWidth: .infinity)
-                    } else {
-                        ScrollView {
-                            LazyVStack(spacing: 12) {
-                                ForEach(appState.pipelineHistory) { item in
-                                    RunLogEntryView(item: item)
-                                }
-                            }
-                            .padding(20)
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(appState.pipelineHistory) { item in
+                            RunLogEntryView(item: item)
                         }
                     }
+                    .padding(20)
                 }
             }
         }
@@ -4427,7 +4400,7 @@ struct RunLogEntryView: View {
                             }
                         }
                         .buttonStyle(.plain)
-                        .disabled(isRetrying || appState.isHistoryUnavailable)
+                        .disabled(isRetrying)
                         .help("Retry transcription")
                     } else {
                         Color.clear
@@ -4450,11 +4423,7 @@ struct RunLogEntryView: View {
                         copyTranscriptToPasteboard()
                     }
 
-                    actionIconButton(
-                        systemName: "trash",
-                        help: "Delete this run",
-                        disabled: appState.isHistoryUnavailable
-                    ) {
+                    actionIconButton(systemName: "trash", help: "Delete this run") {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             appState.deleteHistoryEntry(id: item.id)
                         }

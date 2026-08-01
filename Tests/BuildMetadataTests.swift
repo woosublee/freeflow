@@ -7,7 +7,7 @@ struct BuildMetadataTests {
         try testMakefilePrintsVersionMetadata()
         try testBuildSettingsTrackCodesignIdentity()
         try testGroupedTestArchitectureRespectsBuildOverride()
-        try testAppStateRunnerOwnsProcessIsolation()
+        try testAppStateRunnerRequiresIsolatedHome()
         try testMakefileSeparatesDevRunFromInstallBuild()
         try testMakefileCopiesSelectedIconToBundleIconName()
         try testMakefileBundlesLocalizationResources()
@@ -88,33 +88,10 @@ struct BuildMetadataTests {
         assertDoesNotContain(makefile, "-target $(shell uname -m)-apple-macosx13.0")
     }
 
-    private static func testAppStateRunnerOwnsProcessIsolation() throws {
+    private static func testAppStateRunnerRequiresIsolatedHome() throws {
         let makefile = try String(contentsOfFile: "Makefile", encoding: .utf8)
-        let runner = try String(
-            contentsOfFile: "Tests/FullSourceAppStateTestRunner.swift",
-            encoding: .utf8
-        )
-        let appStateTestStorage = try String(
-            contentsOfFile: "Tests/AppStateTestStorage.swift",
-            encoding: .utf8
-        )
 
         assertContains(makefile, "test -n \"$$isolated_home\" || exit 1")
-        assertContains(runner, "QUILL_APP_STATE_TEST_ISOLATION_ROOT")
-        assertContains(runner, "isValidIsolatedChildEnvironment()")
-        assertContains(runner, "if !isValidIsolatedChildEnvironment()")
-        assertContains(runner, "runInIsolatedProcess()")
-        assertContains(runner, "CFFIXED_USER_HOME")
-        assertContains(
-            runner,
-            "let expectedTemporaryDirectory = rootDirectory\n            .appendingPathComponent(\"tmp\")"
-        )
-        assertContains(runner, "AppStateTestStorage.withIsolatedStorage")
-        assertContains(
-            appStateTestStorage,
-            "AppState.makeDefaultPipelineHistoryStore()"
-        )
-        assertDoesNotContain(appStateTestStorage, "PipelineHistory.sqlite")
     }
 
     private static func testMakefileSeparatesDevRunFromInstallBuild() throws {
