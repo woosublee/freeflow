@@ -2685,6 +2685,10 @@ struct AppStateTranscriptionConfigurationTests {
             let rawTranscript = "가져온 원본 전사문"
             let replacementTranscript = "뒤늦게 설치된 다른 전사문"
             let store = AppState.makeDefaultPipelineHistoryStore()
+            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
+            defer {
+                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+            }
             AppState.pipelineHistoryStoreFactory = { store }
             let sourceURL = rootDirectory.appendingPathComponent(
                 "import-timeout-\(UUID().uuidString).wav"
@@ -2773,6 +2777,10 @@ struct AppStateTranscriptionConfigurationTests {
             let rawTranscript = "재시도 원본 전사문"
             let replacementTranscript = "뒤늦게 설치된 재시도 전사문"
             let store = AppState.makeDefaultPipelineHistoryStore()
+            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
+            defer {
+                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+            }
             AppState.pipelineHistoryStoreFactory = { store }
             let fileName = "retry-timeout-\(UUID().uuidString).wav"
             let audioURL = AppState.audioStorageDirectory()
@@ -2844,6 +2852,10 @@ struct AppStateTranscriptionConfigurationTests {
             resetDefaults()
             let previousOutcome = "failed:previous-processing-error"
             let store = AppState.makeDefaultPipelineHistoryStore()
+            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
+            defer {
+                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+            }
             AppState.pipelineHistoryStoreFactory = { store }
             let fileName = "retry-failure-\(UUID().uuidString).wav"
             let audioURL = AppState.audioStorageDirectory()
@@ -3024,6 +3036,10 @@ struct AppStateTranscriptionConfigurationTests {
             try writeTestWAV(at: audioURL)
 
             let store = AppState.makeDefaultPipelineHistoryStore()
+            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
+            defer {
+                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+            }
             AppState.pipelineHistoryStoreFactory = { store }
             let originalItem = PipelineHistoryItem(
                 id: historyID,
