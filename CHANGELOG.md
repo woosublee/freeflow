@@ -8,6 +8,17 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.35] - 2026-08-05
+
+### Improved
+
+- Extended Local AI post-processing time for cold model startup while keeping Cloud requests responsive.
+- Added clearer timeout guidance for transcript cleanup and selected-text edits.
+
+### Fixed
+
+- Preserved original transcripts when AI cleanup times out and recorded accurate processing outcomes across audio imports, retries, and interrupted Cloud transcription resumes.
+
 ## [0.1.34] - 2026-08-02
 
 ### Improved
