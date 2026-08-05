@@ -81,6 +81,10 @@ enum ProviderDiagnosticCode {
     }
 }
 
+enum QuillUserIssueOperation: String, Codable, Equatable, Sendable {
+    case postProcessing
+}
+
 struct QuillUserIssueContext: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case httpStatus
@@ -91,6 +95,7 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
         case processExitCode
         case retryExhausted
         case meetingSummaryFailureSubtype
+        case operation
     }
 
     let httpStatus: Int?
@@ -101,6 +106,7 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
     let processExitCode: Int32?
     let retryExhausted: Bool?
     let meetingSummaryFailureSubtype: MeetingSummaryFailureSubtype?
+    let operation: QuillUserIssueOperation?
 
     init(
         httpStatus: Int? = nil,
@@ -110,7 +116,8 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
         localBackend: String? = nil,
         processExitCode: Int32? = nil,
         retryExhausted: Bool? = nil,
-        meetingSummaryFailureSubtype: MeetingSummaryFailureSubtype? = nil
+        meetingSummaryFailureSubtype: MeetingSummaryFailureSubtype? = nil,
+        operation: QuillUserIssueOperation? = nil
     ) {
         self.httpStatus = httpStatus
         self.providerHost = providerHost
@@ -120,6 +127,7 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
         self.processExitCode = processExitCode
         self.retryExhausted = retryExhausted
         self.meetingSummaryFailureSubtype = meetingSummaryFailureSubtype
+        self.operation = operation
     }
 
     init(from decoder: Decoder) throws {
@@ -135,6 +143,10 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
             meetingSummaryFailureSubtype: try? container.decodeIfPresent(
                 MeetingSummaryFailureSubtype.self,
                 forKey: .meetingSummaryFailureSubtype
+            ),
+            operation: try container.decodeIfPresent(
+                QuillUserIssueOperation.self,
+                forKey: .operation
             )
         )
     }
@@ -250,7 +262,17 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
         language: String = preferredLocalizedStringLanguage(),
         bundle: Bundle = .main
     ) -> QuillUserIssuePresentation {
-        let copy = code.copy
+        let copy: QuillUserIssueCopy
+        if code == .requestTimedOut,
+           context.operation == .postProcessing {
+            copy = QuillUserIssueCopy(
+                titleKey: "Transcript cleanup timed out",
+                bodyKey: "Quill kept the original transcript because cleanup did not finish in time.",
+                suggestionKey: "Use the original transcript or try cleanup again later."
+            )
+        } else {
+            copy = code.copy
+        }
         let title = localizedCatalogString(
             copy.titleKey,
             language: language,

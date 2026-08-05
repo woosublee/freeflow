@@ -56,7 +56,9 @@ enum PostProcessingError: LocalizedError {
             code = .postProcessingRateLimited
         case .suspectedInstructionExecution, .outputRejected:
             code = .postProcessingGuardFallback
-        case .invalidResponse, .invalidInput, .emptyOutput, .requestTimedOut:
+        case .requestTimedOut:
+            code = .requestTimedOut
+        case .invalidResponse, .invalidInput, .emptyOutput:
             code = .postProcessingFailed
         }
         let statusCode: Int?
@@ -73,7 +75,8 @@ enum PostProcessingError: LocalizedError {
                     httpStatus: statusCode,
                     providerHost: providerHost,
                     modelID: modelID,
-                    localBackend: localBackend
+                    localBackend: localBackend,
+                    operation: .postProcessing
                 )
             ),
             privateDiagnostic: localizedDescription

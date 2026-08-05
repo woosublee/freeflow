@@ -11701,6 +11701,54 @@
         }
       }
     },
+    "Transcript cleanup timed out": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Transcript cleanup timed out"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "전사문 정리 시간이 초과되었습니다"
+          }
+        }
+      }
+    },
+    "Quill kept the original transcript because cleanup did not finish in time.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill kept the original transcript because cleanup did not finish in time."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "정리가 제시간에 끝나지 않아 Quill이 원본 전사문을 유지했습니다."
+          }
+        }
+      }
+    },
+    "Use the original transcript or try cleanup again later.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use the original transcript or try cleanup again later."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "원본 전사문을 사용하거나 나중에 다시 정리해 보세요."
+          }
+        }
+      }
+    },
     "Transcript cleanup is temporarily limited": {
       "localizations": {
         "en": {

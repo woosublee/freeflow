@@ -6,6 +6,7 @@ import Foundation
 struct PostProcessingUserIssueTests {
     static func main() throws {
         try testPostProcessingErrorsMapToWarningRecords()
+        try testTimeoutIssueDoesNotPersistSourceContent()
         try testRawFallbackOutcomeIsPersistedWithTheOriginalTranscript()
         try testRequestFailuresKeepOnlyAllowlistedProviderCode()
         try testNonSuccessResponsesDoNotStoreRawBodies()
@@ -19,7 +20,7 @@ struct PostProcessingUserIssueTests {
             (.rateLimited(model: "provider/model", retryAfter: 10), .postProcessingRateLimited, .retryTranscription),
             (.invalidResponse("missing content"), .postProcessingFailed, .retryTranscription),
             (.emptyOutput, .postProcessingFailed, .retryTranscription),
-            (.requestTimedOut(30), .postProcessingFailed, .retryTranscription),
+            (.requestTimedOut(30), .requestTimedOut, .retryTranscription),
             (.suspectedInstructionExecution, .postProcessingGuardFallback, .none),
             (.outputRejected(.languageMismatch), .postProcessingGuardFallback, .none)
         ]
@@ -34,7 +35,65 @@ struct PostProcessingUserIssueTests {
             try expect(issue.record.recoveryAction == expectedAction, "\(error) recovery action")
             try expect(issue.record.context.providerHost == "api.example.com", "safe provider context")
             try expect(issue.record.context.modelID == "provider/model", "safe model context")
+            if case .requestTimedOut = error {
+                try expect(
+                    issue.record.context.operation == .postProcessing,
+                    "timeout identifies post-processing operation"
+                )
+                let presentation = issue.record.presentation(language: "en")
+                try expect(
+                    presentation.title == "Transcript cleanup timed out",
+                    "timeout uses cleanup-specific copy"
+                )
+                try expect(
+                    presentation.body.contains("original transcript"),
+                    "timeout copy explains raw transcript preservation"
+                )
+                let decoded = try QuillUserIssueRecord.decodePersistedStatus(
+                    issue.record.persistedStatus
+                )
+                try expect(
+                    decoded.code == .requestTimedOut,
+                    "timeout code round-trips"
+                )
+                try expect(
+                    decoded.context.operation == .postProcessing,
+                    "timeout operation round-trips"
+                )
+            }
         }
+    }
+
+    private static func testTimeoutIssueDoesNotPersistSourceContent() throws {
+        let sentinel = "RAW_TRANSCRIPT PROMPT_SECRET sk-secret /Users/private RESPONSE_BODY"
+        let error = PostProcessingError.requestTimedOut(120)
+        let issue = error.userIssue(
+            providerHost: "api.example.com",
+            modelID: "provider/model",
+            localBackend: "Local AI"
+        )
+        let payload = try decodedPayloadString(issue.record.encodedStatus())
+
+        try expect(
+            issue.record.code == .requestTimedOut,
+            "timeout has dedicated stable code"
+        )
+        try expect(
+            issue.record.context.modelID == "provider/model",
+            "timeout keeps safe model metadata"
+        )
+        try expect(
+            issue.record.context.localBackend == "Local AI",
+            "timeout keeps safe backend metadata"
+        )
+        try expect(
+            !payload.contains(sentinel),
+            "timeout record excludes source sentinels"
+        )
+        try expect(
+            !issue.privateDiagnostic.contains(sentinel),
+            "timeout diagnostic excludes source sentinels"
+        )
     }
 
     private static func testRawFallbackOutcomeIsPersistedWithTheOriginalTranscript() throws {
