@@ -143,6 +143,7 @@ struct AppStateTranscriptionConfigurationTests {
         try testAudioOnlyRetryCreatesTranscriptFileAndPreservesMetadata()
         try testHistoryReconstructionPreservesMeetingSummaryMetadata()
         try testSuccessfulTranscriptionHistoryReceivesSpokenLanguage()
+        try testResumedRetryPassesAIProcessingOutcome()
         try testHistoryDeletionForgetsSummaryGenerationStateAfterPersistence()
         try testRealtimeConfiguredLanguageUsesOneRequestAndResolutionValue()
         try testAudioOnlyRetryDeletesNewTranscriptFileWhenStale()
@@ -2985,6 +2986,27 @@ struct AppStateTranscriptionConfigurationTests {
         precondition(history.contains("let effectiveSpokenLanguage = spokenLanguage ??"))
         precondition(history.contains("spokenLanguageCode: effectiveSpokenLanguage?.languageCode"))
         precondition(history.contains("spokenLanguageResolution: effectiveSpokenLanguage?.source"))
+    }
+
+    private static func testResumedRetryPassesAIProcessingOutcome() throws {
+        let source = try String(
+            contentsOfFile: "Sources/AppState.swift",
+            encoding: .utf8
+        )
+        let resumedCloud = sourceBlock(
+            in: source,
+            from: "private func resumeCloudTranscriptionAfterLaunch(",
+            to: "\n    @MainActor\n    private func installCloudTranscriptionTask"
+        )
+
+        precondition(
+            resumedCloud.contains(
+                "aiProcessingOutcome: result.aiProcessingOutcome"
+            )
+        )
+        precondition(
+            resumedCloud.contains(".pipelineHistoryStatus")
+        )
     }
 
     private static func testHistoryDeletionForgetsSummaryGenerationStateAfterPersistence() throws {
