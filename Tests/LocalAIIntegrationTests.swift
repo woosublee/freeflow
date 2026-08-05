@@ -102,7 +102,15 @@ struct LocalAIIntegrationTests {
             tokenCounter: counter
         )
         let sizingPrompt = try MeetingSummaryPromptFactory.singlePass(
-            source: MeetingSummarySource(transcript: "", calendar: nil),
+            source: MeetingSummarySource(
+                transcript: "",
+                calendar: nil,
+                languageContext: MeetingSummaryLanguageContext(
+                    requestedOutputLanguage: "Korean",
+                    appliedLanguageCode: "ko",
+                    resolutionSource: .configured
+                )
+            ),
             outputLanguage: "Korean"
         )
         let budget = try await budgeter.budget(
