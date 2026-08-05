@@ -7,7 +7,6 @@ struct PostProcessingUserIssueTests {
     static func main() throws {
         try testPostProcessingErrorsMapToWarningRecords()
         try testCommandTimeoutUsesEditSpecificCopy()
-        try testTimeoutIssueDoesNotPersistSourceContent()
         try testRawFallbackOutcomeIsPersistedWithTheOriginalTranscript()
         try testRequestFailuresKeepOnlyAllowlistedProviderCode()
         try testNonSuccessResponsesDoNotStoreRawBodies()
@@ -85,38 +84,6 @@ struct PostProcessingUserIssueTests {
         try expect(
             presentation.body.contains("selected text"),
             "command timeout explains selected-text fallback"
-        )
-    }
-
-    private static func testTimeoutIssueDoesNotPersistSourceContent() throws {
-        let sentinel = "RAW_TRANSCRIPT PROMPT_SECRET sk-secret /Users/private RESPONSE_BODY"
-        let error = PostProcessingError.requestTimedOut(120)
-        let issue = error.userIssue(
-            providerHost: "api.example.com",
-            modelID: "provider/model",
-            localBackend: "Local AI"
-        )
-        let payload = try decodedPayloadString(issue.record.encodedStatus())
-
-        try expect(
-            issue.record.code == .requestTimedOut,
-            "timeout has dedicated stable code"
-        )
-        try expect(
-            issue.record.context.modelID == "provider/model",
-            "timeout keeps safe model metadata"
-        )
-        try expect(
-            issue.record.context.localBackend == "Local AI",
-            "timeout keeps safe backend metadata"
-        )
-        try expect(
-            !payload.contains(sentinel),
-            "timeout record excludes source sentinels"
-        )
-        try expect(
-            !issue.privateDiagnostic.contains(sentinel),
-            "timeout diagnostic excludes source sentinels"
         )
     }
 

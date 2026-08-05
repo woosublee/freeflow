@@ -14,6 +14,7 @@ struct PostProcessingBackendTests {
         try await testInvalidTimeoutOverrideUsesBackendDefaults()
         try await testCleanupConvertsRealURLTimeout()
         try await testCommandTransformConvertsRealURLTimeout()
+        try await testTimeoutIssueDoesNotExposeRequestSourceData()
         try await testSequentialChunksUsePerRequestTimeout()
         try await testCommandFallbackUsesPerRequestTimeout()
         try await testOversizedLocalCommandDoesNotReachTransport()
@@ -290,6 +291,94 @@ struct PostProcessingBackendTests {
                     "Cloud timeout reports the effective request timeout"
                 )
             }
+        }
+    }
+
+    private static func testTimeoutIssueDoesNotExposeRequestSourceData() async throws {
+        let transcriptSentinel = "TRANSCRIPT_SENTINEL_7F1A"
+        let promptSentinel = "PROMPT_SENTINEL_8B2C"
+        let credentialSentinel = "sk-CREDENTIAL_SENTINEL_9D3E"
+        let errorSentinel = "ERROR_SENTINEL_/Users/private_4A5F"
+        let service = PostProcessingService(
+            backendExecutor: AIProcessingBackendExecutor(
+                choice: .cloud(modelID: "provider/model"),
+                cloudBaseURL: "https://api.example.com/openai/v1",
+                cloudAPIKey: credentialSentinel
+            ),
+            cloudFallbackModelID: nil,
+            instructionExecutionGuardEnabled: false,
+            transport: { request in
+                guard request.value(forHTTPHeaderField: "Authorization")
+                        == "Bearer \(credentialSentinel)" else {
+                    throw PostProcessingBackendTestFailure(
+                        "Expected credential sentinel in request header"
+                    )
+                }
+                guard let body = request.httpBody,
+                      let bodyText = String(data: body, encoding: .utf8),
+                      bodyText.contains(transcriptSentinel),
+                      bodyText.contains(promptSentinel) else {
+                    throw PostProcessingBackendTestFailure(
+                        "Expected transcript and prompt sentinels in request body"
+                    )
+                }
+                throw URLError(
+                    .timedOut,
+                    userInfo: [NSLocalizedDescriptionKey: errorSentinel]
+                )
+            }
+        )
+
+        let issue: QuillUserIssueError
+        do {
+            _ = try await service.postProcess(
+                transcript: transcriptSentinel,
+                context: testContext,
+                customVocabulary: "",
+                customSystemPrompt: promptSentinel
+            )
+            throw PostProcessingBackendTestFailure(
+                "Expected timeout while testing diagnostic privacy"
+            )
+        } catch let failure as PostProcessingBackendTestFailure {
+            throw failure
+        } catch {
+            issue = service.userIssue(for: error)
+        }
+
+        let encodedRecord = try JSONEncoder().encode(issue.record)
+        guard let recordText = String(data: encodedRecord, encoding: .utf8) else {
+            throw PostProcessingBackendTestFailure(
+                "Expected encoded issue record"
+            )
+        }
+        let presentation = issue.record.presentation(language: "en")
+        let visibleText = ([
+            presentation.title,
+            presentation.body,
+            presentation.suggestion,
+            presentation.compactMessage
+        ] + presentation.detailsRows.flatMap { [$0.label, $0.value] })
+            .joined(separator: " ")
+
+        for sentinel in [
+            transcriptSentinel,
+            promptSentinel,
+            credentialSentinel,
+            errorSentinel
+        ] {
+            try expect(
+                !recordText.contains(sentinel),
+                "timeout record excludes \(sentinel)"
+            )
+            try expect(
+                !issue.privateDiagnostic.contains(sentinel),
+                "timeout diagnostic excludes \(sentinel)"
+            )
+            try expect(
+                !visibleText.contains(sentinel),
+                "timeout presentation excludes \(sentinel)"
+            )
         }
     }
 
