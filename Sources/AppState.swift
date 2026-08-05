@@ -219,6 +219,8 @@ private struct AudioImportTaskConfiguration {
             transcriptionLanguage: transcriptionLanguage,
             localTranscriptionModel: localTranscriptionModel,
             transcriptionModel: transcriptionModel,
+            cloudDependencies: AppState
+                .audioImportCloudTranscriptionDependenciesFactory(),
             cloudExecutionContext: cloudExecutionContext
         )
     }
@@ -411,6 +413,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         () -> CloudTranscriptionDependencies = {
             .live
         }
+    static var audioImportCloudTranscriptionDependenciesFactory:
+        () -> CloudTranscriptionDependencies = {
+            .live
+        }
+    static var postProcessingTransport: PostProcessingService.Transport = { request in
+        try await LLMAPITransport.data(for: request)
+    }
 
     static var googleCalendarTokenLoader: (Bool) -> GoogleCalendarOAuthToken? = { allowsAuthenticationUI in
         GoogleCalendarTokenStore.load(allowsAuthenticationUI: allowsAuthenticationUI)
@@ -4493,7 +4502,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 localServerManager: localServerManager
             ),
             cloudFallbackModelID: choice.isLocal ? nil : cloudFallbackModelID,
-            instructionExecutionGuardEnabled: instructionExecutionGuardEnabled
+            instructionExecutionGuardEnabled: instructionExecutionGuardEnabled,
+            transport: postProcessingTransport
         )
     }
 
@@ -7476,7 +7486,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         transcriptionLanguageCodeOverride: configuration.transcriptionLanguage.code,
                         spokenLanguage: transcription.spokenLanguage,
                         customVocabularyOverride: configuration.customVocabulary,
-                        customSystemPromptOverride: configuration.customSystemPrompt
+                        customSystemPromptOverride: configuration.customSystemPrompt,
+                        aiProcessingOutcome: result.aiProcessingOutcome
                     )
                     self.completeCloudTranscriptionHistory(
                         historyID: noteID,
@@ -7664,6 +7675,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             parsedTranscript: parsedTranscript,
                             isRetry: true
                         ),
+                    aiProcessingOutcome: result.aiProcessingOutcome
+                        .pipelineHistoryStatus,
                     debugStatus: "Retried",
                     transcriptFileName: transcriptFileName,
                     spokenLanguage: transcription.spokenLanguage
@@ -7685,6 +7698,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     postProcessedTranscript: snapshot.item.postProcessedTranscript,
                     postProcessingPrompt: snapshot.item.postProcessingPrompt,
                     postProcessingStatus: issue.persistedStatus,
+                    aiProcessingOutcome: snapshot.item.aiProcessingOutcome,
                     debugStatus: "Retry failed",
                     transcriptFileName: snapshot.item.transcriptFileName
                 )
@@ -7869,6 +7883,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         postProcessedTranscript: String,
         postProcessingPrompt: String?,
         postProcessingStatus: String,
+        aiProcessingOutcome: String,
         debugStatus: String,
         transcriptFileName: String?,
         spokenLanguage: SpokenLanguageResolution? = nil
@@ -7894,6 +7909,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             contextScreenshotDataURL: snapshot.item.contextScreenshotDataURL,
             contextScreenshotStatus: snapshot.item.contextScreenshotStatus,
             postProcessingStatus: postProcessingStatus,
+            aiProcessingOutcome: aiProcessingOutcome,
             debugStatus: debugStatus,
             customVocabulary: snapshot.customVocabulary,
             customSystemPrompt: snapshot.customSystemPrompt,
@@ -11071,6 +11087,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             parsedTranscript: parsed,
                             isRetry: true
                         ),
+                    aiProcessingOutcome: result.aiProcessingOutcome
+                        .pipelineHistoryStatus,
                     debugStatus: "Resumed after relaunch",
                     transcriptFileName: item.transcriptFileName,
                     spokenLanguage: transcription.spokenLanguage

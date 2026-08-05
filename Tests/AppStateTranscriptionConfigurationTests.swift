@@ -135,6 +135,9 @@ struct AppStateTranscriptionConfigurationTests {
         await testRetryAvailabilityRequiresProviderConfiguration()
         await testRetryAvailabilityAcceptsConfiguredAPIStandard()
         try await testRetryPreservesMeetingSummaryMetadata()
+        try await testAudioImportTimeoutPreservesRawTranscriptAndFailedOutcome()
+        try await testRetryTimeoutPreservesRawTranscriptAndFailedOutcome()
+        try await testRetryTranscriptionFailurePreservesExistingAIOutcome()
         try testRetryUsesCurrentPostProcessingAndAudioOnlyMetadata()
         try testAudioOnlyRetryCreatesTranscriptFileAndPreservesMetadata()
         try testHistoryReconstructionPreservesMeetingSummaryMetadata()
@@ -2660,6 +2663,196 @@ struct AppStateTranscriptionConfigurationTests {
         precondition(persisted.meetingSummaryAttempt == attempt)
     }
 
+    private static func testAudioImportTimeoutPreservesRawTranscriptAndFailedOutcome() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
+            resetDefaults()
+            let rawTranscript = "가져온 원본 전사문"
+            let store = AppState.makeDefaultPipelineHistoryStore()
+            AppState.pipelineHistoryStoreFactory = { store }
+            let sourceURL = rootDirectory.appendingPathComponent(
+                "import-timeout-\(UUID().uuidString).wav"
+            )
+            try writeTestWAV(at: sourceURL)
+
+            let originalImportDependencies =
+                AppState.audioImportCloudTranscriptionDependenciesFactory
+            let originalTransport = AppState.postProcessingTransport
+            defer {
+                AppState.audioImportCloudTranscriptionDependenciesFactory =
+                    originalImportDependencies
+                AppState.postProcessingTransport = originalTransport
+            }
+            AppState.audioImportCloudTranscriptionDependenciesFactory = {
+                successfulCloudDependencies(transcript: rawTranscript)
+            }
+            AppState.postProcessingTransport = { _ in
+                throw URLError(.timedOut)
+            }
+
+            let appState = await MainActor.run { AppState() }
+            await MainActor.run {
+                appState.apiKey = "post-processing-key"
+                appState.transcriptionAPIKey = "transcription-key"
+                appState.transcriptionAPIURL = "https://api.example.com/openai/v1"
+                appState.postProcessingBackendChoice = .cloud(
+                    modelID: "provider/model"
+                )
+                appState.importAudioFile(
+                    sourceURL,
+                    choice: .apiStandard(modelID: "whisper-large-v3")
+                )
+            }
+
+            await waitUntil {
+                appState.pipelineHistory.contains {
+                    $0.rawTranscript == rawTranscript
+                        && $0.postProcessingStatus.hasPrefix(
+                            QuillUserIssueRecord.persistedStatusPrefix
+                        )
+                }
+            }
+            guard let item = appState.pipelineHistory.first(where: {
+                $0.rawTranscript == rawTranscript
+            }) else {
+                throw AppStateTranscriptionConfigurationTestError
+                    .missingHistoryItem
+            }
+            try assertTimeoutFallbackHistory(
+                item,
+                rawTranscript: rawTranscript
+            )
+            let persisted = try requireHistoryItem(
+                withID: item.id,
+                in: store.loadAllHistory()
+            )
+            try assertTimeoutFallbackHistory(
+                persisted,
+                rawTranscript: rawTranscript
+            )
+        }
+    }
+
+    private static func testRetryTimeoutPreservesRawTranscriptAndFailedOutcome() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { _ in
+            resetDefaults()
+            let rawTranscript = "재시도 원본 전사문"
+            let store = AppState.makeDefaultPipelineHistoryStore()
+            AppState.pipelineHistoryStoreFactory = { store }
+            let fileName = "retry-timeout-\(UUID().uuidString).wav"
+            let audioURL = AppState.audioStorageDirectory()
+                .appendingPathComponent(fileName)
+            try writeTestWAV(at: audioURL)
+            let originalItem = retryHistoryItem(
+                audioFileName: fileName,
+                aiProcessingOutcome: "failed:previous-processing-error"
+            )
+            _ = try store.append(originalItem, maxCount: 10)
+
+            let originalRetryDependencies =
+                AppState.retryCloudTranscriptionDependenciesFactory
+            let originalTransport = AppState.postProcessingTransport
+            defer {
+                AppState.retryCloudTranscriptionDependenciesFactory =
+                    originalRetryDependencies
+                AppState.postProcessingTransport = originalTransport
+            }
+            AppState.retryCloudTranscriptionDependenciesFactory = {
+                successfulCloudDependencies(transcript: rawTranscript)
+            }
+            AppState.postProcessingTransport = { _ in
+                throw URLError(.timedOut)
+            }
+
+            let appState = await MainActor.run { AppState() }
+            await MainActor.run {
+                appState.apiKey = "post-processing-key"
+                appState.transcriptionAPIKey = "transcription-key"
+                appState.transcriptionAPIURL = "https://api.example.com/openai/v1"
+                appState.postProcessingBackendChoice = .cloud(
+                    modelID: "provider/model"
+                )
+                appState.setNoteBrowserTranscriptionChoice(
+                    .apiStandard(modelID: "whisper-large-v3")
+                )
+                precondition(
+                    appState.noteBrowserRetryAvailability(for: originalItem)
+                        == .ready
+                )
+                appState.retryTranscription(item: originalItem)
+                precondition(
+                    appState.retryingItemIDs.contains(originalItem.id)
+                )
+            }
+
+            await waitUntil {
+                !appState.retryingItemIDs.contains(originalItem.id)
+            }
+            let item = try requireHistoryItem(
+                withID: originalItem.id,
+                in: store.loadAllHistory()
+            )
+            try assertTimeoutFallbackHistory(
+                item,
+                rawTranscript: rawTranscript
+            )
+        }
+    }
+
+    private static func testRetryTranscriptionFailurePreservesExistingAIOutcome() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { _ in
+            resetDefaults()
+            let previousOutcome = "failed:previous-processing-error"
+            let store = AppState.makeDefaultPipelineHistoryStore()
+            AppState.pipelineHistoryStoreFactory = { store }
+            let fileName = "retry-failure-\(UUID().uuidString).wav"
+            let audioURL = AppState.audioStorageDirectory()
+                .appendingPathComponent(fileName)
+            try writeTestWAV(at: audioURL)
+            let originalItem = retryHistoryItem(
+                audioFileName: fileName,
+                aiProcessingOutcome: previousOutcome
+            )
+            _ = try store.append(originalItem, maxCount: 10)
+
+            let originalRetryDependencies =
+                AppState.retryCloudTranscriptionDependenciesFactory
+            defer {
+                AppState.retryCloudTranscriptionDependenciesFactory =
+                    originalRetryDependencies
+            }
+            AppState.retryCloudTranscriptionDependenciesFactory = {
+                failingCloudDependencies()
+            }
+
+            let appState = await MainActor.run { AppState() }
+            await MainActor.run {
+                appState.transcriptionAPIKey = "transcription-key"
+                appState.transcriptionAPIURL =
+                    "https://api.example.com/openai/v1"
+                appState.setNoteBrowserTranscriptionChoice(
+                    .apiStandard(modelID: "whisper-large-v3")
+                )
+                precondition(
+                    appState.noteBrowserRetryAvailability(for: originalItem)
+                        == .ready
+                )
+                appState.retryTranscription(item: originalItem)
+                precondition(
+                    appState.retryingItemIDs.contains(originalItem.id)
+                )
+            }
+
+            await waitUntil {
+                !appState.retryingItemIDs.contains(originalItem.id)
+            }
+            let item = try requireHistoryItem(
+                withID: originalItem.id,
+                in: store.loadAllHistory()
+            )
+            precondition(item.aiProcessingOutcome == previousOutcome)
+        }
+    }
+
     private static func testRetryUsesCurrentPostProcessingAndAudioOnlyMetadata() throws {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
         let retrySnapshot = sourceBlock(
@@ -2873,8 +3066,90 @@ struct AppStateTranscriptionConfigurationTests {
         }
     }
 
+    private static func writeTestWAV(at url: URL) throws {
+        var data = CanonicalPCM16WAV.header(dataByteCount: 8)
+        for sample: Int16 in [1, 1, 2, 2] {
+            var littleEndian = sample.littleEndian
+            withUnsafeBytes(of: &littleEndian) {
+                data.append(contentsOf: $0)
+            }
+        }
+        try data.write(to: url)
+    }
+
+    private static func successfulCloudDependencies(
+        transcript: String
+    ) -> CloudTranscriptionDependencies {
+        let temporaryRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "quill-timeout-history-\(UUID().uuidString)"
+            )
+        return CloudTranscriptionDependencies(
+            encodedUploadCeilingBytes: 20_000_000,
+            upload: { request, _ in
+                try await Task.sleep(nanoseconds: 10_000_000)
+                let data = try JSONSerialization.data(withJSONObject: [
+                    "text": transcript,
+                    "language": "ko",
+                    "segments": []
+                ])
+                return (
+                    data,
+                    HTTPURLResponse(
+                        url: request.url!,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!
+                )
+            },
+            checkpointStore: InMemoryCloudTranscriptionCheckpointStore(),
+            progress: { _ in },
+            temporaryRoot: temporaryRoot,
+            sleep: { _ in }
+        )
+    }
+
+    private static func failingCloudDependencies() -> CloudTranscriptionDependencies {
+        let temporaryRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "quill-retry-failure-\(UUID().uuidString)"
+            )
+        return CloudTranscriptionDependencies(
+            encodedUploadCeilingBytes: 20_000_000,
+            upload: { _, _ in
+                try await Task.sleep(nanoseconds: 10_000_000)
+                throw URLError(.cannotConnectToHost)
+            },
+            checkpointStore: InMemoryCloudTranscriptionCheckpointStore(),
+            progress: { _ in },
+            temporaryRoot: temporaryRoot,
+            sleep: { _ in }
+        )
+    }
+
+    private static func assertTimeoutFallbackHistory(
+        _ item: PipelineHistoryItem,
+        rawTranscript: String
+    ) throws {
+        precondition(
+            item.rawTranscript == rawTranscript,
+            "Expected raw transcript \(rawTranscript), got \(item.rawTranscript); status=\(item.postProcessingStatus) outcome=\(item.aiProcessingOutcome)"
+        )
+        precondition(item.postProcessedTranscript == rawTranscript)
+        precondition(
+            item.aiProcessingOutcome == "failed:request-timed-out"
+        )
+        let issue = try QuillUserIssueRecord.decodePersistedStatus(
+            item.postProcessingStatus
+        )
+        precondition(issue.code == .requestTimedOut)
+        precondition(issue.context.operation == .postProcessing)
+    }
+
     private static func retryHistoryItem(
         audioFileName: String?,
+        aiProcessingOutcome: String = "succeeded",
         spokenLanguageCode: String? = nil,
         spokenLanguageResolution: SpokenLanguageResolutionSource? = nil,
         meetingSummaryAttempt: MeetingSummaryAttempt? = nil
@@ -2888,6 +3163,7 @@ struct AppStateTranscriptionConfigurationTests {
             contextScreenshotDataURL: nil,
             contextScreenshotStatus: "No screenshot",
             postProcessingStatus: QuillUserIssueRecord(code: .localModelMissing).persistedStatus,
+            aiProcessingOutcome: aiProcessingOutcome,
             debugStatus: "Failed",
             customVocabulary: "",
             audioFileName: audioFileName,
