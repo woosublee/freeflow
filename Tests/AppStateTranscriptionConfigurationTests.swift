@@ -73,6 +73,7 @@ struct AppStateTranscriptionConfigurationTests {
         testStoppedTranscriptionCompletionSummaryTrimsFinalTranscript()
         testStoppedTranscriptionCompletionSummaryShowsFallbackIndicatorForNonEmptyRawFallback()
         testStoppedTranscriptionCompletionSummaryHidesFallbackIndicatorForEmptyRawFallback()
+        testTimeoutFailureReasonOverridesCommandFallback()
         testStoppedTranscriptionSettingsSnapshotCapturesHistoryMetadata()
         try testAppStateCreatedTranscriptionServicesPassLegacyMlxWhisperToggle()
         try testRetrySnapshotGatesStoredContextByCurrentToggleAndUsability()
@@ -1037,6 +1038,20 @@ struct AppStateTranscriptionConfigurationTests {
         precondition(summary.finalTranscript.isEmpty)
         precondition(summary.shouldPressEnterAfterPaste)
         precondition(!summary.shouldPersistRawDictationFallback)
+    }
+
+    private static func testTimeoutFailureReasonOverridesCommandFallback() {
+        let timeoutReason = AppState.aiProcessingFailureReason(
+            for: PostProcessingError.requestTimedOut(20),
+            fallback: "command-transform-failed"
+        )
+        let genericReason = AppState.aiProcessingFailureReason(
+            for: URLError(.cannotConnectToHost),
+            fallback: "command-transform-failed"
+        )
+
+        precondition(timeoutReason == "request-timed-out")
+        precondition(genericReason == "command-transform-failed")
     }
 
     private static func testAppStateCreatedTranscriptionServicesPassLegacyMlxWhisperToggle() throws {

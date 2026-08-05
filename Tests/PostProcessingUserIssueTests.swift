@@ -6,6 +6,7 @@ import Foundation
 struct PostProcessingUserIssueTests {
     static func main() throws {
         try testPostProcessingErrorsMapToWarningRecords()
+        try testCommandTimeoutUsesEditSpecificCopy()
         try testTimeoutIssueDoesNotPersistSourceContent()
         try testRawFallbackOutcomeIsPersistedWithTheOriginalTranscript()
         try testRequestFailuresKeepOnlyAllowlistedProviderCode()
@@ -62,6 +63,29 @@ struct PostProcessingUserIssueTests {
                 )
             }
         }
+    }
+
+    private static func testCommandTimeoutUsesEditSpecificCopy() throws {
+        let issue = PostProcessingError.requestTimedOut(20).userIssue(
+            providerHost: "api.example.com",
+            modelID: "provider/model",
+            operation: .commandTransform
+        )
+        let presentation = issue.record.presentation(language: "en")
+
+        try expect(issue.record.code == .requestTimedOut, "command timeout code")
+        try expect(
+            issue.record.context.operation == .commandTransform,
+            "command timeout operation"
+        )
+        try expect(
+            presentation.title == "Text edit timed out",
+            "command timeout uses edit-specific title"
+        )
+        try expect(
+            presentation.body.contains("selected text"),
+            "command timeout explains selected-text fallback"
+        )
     }
 
     private static func testTimeoutIssueDoesNotPersistSourceContent() throws {

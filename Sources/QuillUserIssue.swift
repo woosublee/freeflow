@@ -83,6 +83,7 @@ enum ProviderDiagnosticCode {
 
 enum QuillUserIssueOperation: String, Codable, Equatable, Sendable {
     case postProcessing
+    case commandTransform
 }
 
 struct QuillUserIssueContext: Codable, Equatable, Sendable {
@@ -269,6 +270,13 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
                 titleKey: "Transcript cleanup timed out",
                 bodyKey: "Quill kept the original transcript because cleanup did not finish in time.",
                 suggestionKey: "Use the original transcript or try cleanup again later."
+            )
+        } else if code == .requestTimedOut,
+                  context.operation == .commandTransform {
+            copy = QuillUserIssueCopy(
+                titleKey: "Text edit timed out",
+                bodyKey: "Quill kept the selected text because the edit did not finish in time.",
+                suggestionKey: "Use the selected text or try the edit again later."
             )
         } else {
             copy = code.copy

@@ -37,7 +37,8 @@ enum PostProcessingError: LocalizedError {
     func userIssue(
         providerHost: String?,
         modelID: String,
-        localBackend: String? = nil
+        localBackend: String? = nil,
+        operation: QuillUserIssueOperation = .postProcessing
     ) -> QuillUserIssueError {
         let code: QuillUserIssueCode
         switch self {
@@ -76,7 +77,7 @@ enum PostProcessingError: LocalizedError {
                     providerHost: providerHost,
                     modelID: modelID,
                     localBackend: localBackend,
-                    operation: .postProcessing
+                    operation: operation
                 )
             ),
             privateDiagnostic: localizedDescription
@@ -404,7 +405,10 @@ Behavior:
         }
     }
 
-    func userIssue(for error: Error) -> QuillUserIssueError {
+    func userIssue(
+        for error: Error,
+        operation: QuillUserIssueOperation = .postProcessing
+    ) -> QuillUserIssueError {
         if let issue = error as? QuillUserIssueError {
             return issue
         }
@@ -459,7 +463,8 @@ Behavior:
             return postProcessingError.userIssue(
                 providerHost: providerHost,
                 modelID: resolvedPrimaryModel(),
-                localBackend: isLocalBackend ? "Local AI" : nil
+                localBackend: isLocalBackend ? "Local AI" : nil,
+                operation: operation
             )
         }
         let nsError = error as NSError
@@ -469,7 +474,8 @@ Behavior:
                 severity: .warning,
                 context: QuillUserIssueContext(
                     providerHost: providerHost,
-                    modelID: resolvedPrimaryModel()
+                    modelID: resolvedPrimaryModel(),
+                    operation: operation
                 )
             ),
             privateDiagnostic: "\(nsError.domain) \(nsError.code)"

@@ -11749,6 +11749,54 @@
         }
       }
     },
+    "Text edit timed out": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Text edit timed out"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "텍스트 편집 시간이 초과되었습니다"
+          }
+        }
+      }
+    },
+    "Quill kept the selected text because the edit did not finish in time.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill kept the selected text because the edit did not finish in time."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "편집이 제시간에 끝나지 않아 Quill이 선택한 텍스트를 유지했습니다."
+          }
+        }
+      }
+    },
+    "Use the selected text or try the edit again later.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use the selected text or try the edit again later."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "선택한 텍스트를 사용하거나 나중에 편집을 다시 시도해 보세요."
+          }
+        }
+      }
+    },
     "Transcript cleanup is temporarily limited": {
       "localizations": {
         "en": {

@@ -9937,6 +9937,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }?.original
     }
 
+    static func aiProcessingFailureReason(
+        for error: Error,
+        fallback: String
+    ) -> String {
+        if case .requestTimedOut = error as? PostProcessingError {
+            return "request-timed-out"
+        }
+        return fallback
+    }
+
     private enum TranscriptProcessingOutcome {
         case skippedEmptyRawTranscript
         case voiceMacro(command: String)
@@ -10013,7 +10023,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     : .commandModeSucceeded(invocation: invocation)
                 return (result.transcript, outcome, result.prompt, nil, .succeeded)
             } catch {
-                let issue = postProcessingService.userIssue(for: error)
+                let issue = postProcessingService.userIssue(
+                    for: error,
+                    operation: .commandTransform
+                )
                 os_log(
                     .error,
                     log: recordingLog,
@@ -10025,7 +10038,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     .commandModeFailedFallback(invocation: invocation),
                     "",
                     issue.record,
-                    .failed(reason: "command-transform-failed")
+                    .failed(
+                        reason: Self.aiProcessingFailureReason(
+                            for: error,
+                            fallback: "command-transform-failed"
+                        )
+                    )
                 )
             }
         }
@@ -10068,15 +10086,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     .rawFallback(reason: reason)
                 )
             }
-            let failureReason: String
-            switch error as? PostProcessingError {
-            case .some(.requestTimedOut):
-                failureReason = "request-timed-out"
-            case .some(.emptyOutput):
-                failureReason = "empty-output"
-            default:
-                failureReason = "post-processing-failed"
+            let fallbackReason: String
+            if case .emptyOutput = error as? PostProcessingError {
+                fallbackReason = "empty-output"
+            } else {
+                fallbackReason = "post-processing-failed"
             }
+            let failureReason = Self.aiProcessingFailureReason(
+                for: error,
+                fallback: fallbackReason
+            )
             return (
                 trimmedRawTranscript,
                 .postProcessingFailedFallback,
