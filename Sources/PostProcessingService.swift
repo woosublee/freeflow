@@ -385,9 +385,7 @@ Behavior:
     private func postProcessingTimeoutSeconds(
         for endpoint: AIProcessingEndpoint
     ) -> TimeInterval {
-        let override = UserDefaults.standard.double(
-            forKey: "post_processing_timeout_seconds"
-        )
+        let override = UserDefaults.standard.double(forKey: "post_processing_timeout_seconds")
         if override.isFinite, override > 0 {
             return override
         }
