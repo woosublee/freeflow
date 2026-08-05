@@ -333,10 +333,8 @@ Behavior:
     private let defaultFallbackModel = AppState.defaultPostProcessingFallbackModel
     private let defaultModelReasoningEffort = "low"
     private let postProcessingMaxCompletionTokens = 4096
-    private var postProcessingTimeoutSeconds: TimeInterval {
-        let override = UserDefaults.standard.double(forKey: "post_processing_timeout_seconds")
-        return override > 0 ? override : 20
-    }
+    private static let cloudPostProcessingTimeoutSeconds: TimeInterval = 20
+    private static let localPostProcessingTimeoutSeconds: TimeInterval = 120
     private var isLocalBackend: Bool { backendExecutor.choice.isLocal }
     private var selectedModelID: String { backendExecutor.choice.modelID }
     private var cloudBaseURL: String { backendExecutor.cloudBaseURL }
@@ -379,6 +377,30 @@ Behavior:
             : nil
         self.instructionExecutionGuardEnabled = instructionExecutionGuardEnabled
         self.transport = transport
+    }
+
+    private func postProcessingTimeoutSeconds(
+        for endpoint: AIProcessingEndpoint
+    ) -> TimeInterval {
+        let override = UserDefaults.standard.double(
+            forKey: "post_processing_timeout_seconds"
+        )
+        if override.isFinite, override > 0 {
+            return override
+        }
+        return endpoint.kind == .local
+            ? Self.localPostProcessingTimeoutSeconds
+            : Self.cloudPostProcessingTimeoutSeconds
+    }
+
+    private func performTransport(
+        for request: URLRequest
+    ) async throws -> (Data, URLResponse) {
+        do {
+            return try await transport(request)
+        } catch let error as URLError where error.code == .timedOut {
+            throw PostProcessingError.requestTimedOut(request.timeoutInterval)
+        }
     }
 
     func userIssue(for error: Error) -> QuillUserIssueError {
@@ -876,7 +898,7 @@ Behavior:
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = postProcessingTimeoutSeconds
+        request.timeoutInterval = postProcessingTimeoutSeconds(for: endpoint)
         let model = endpoint.selectedModelID
 
         let systemPrompt = postProcessingSystemPrompt(
@@ -938,7 +960,7 @@ Model: \(model)
 
         request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
 
-        let (data, response) = try await transport(request)
+        let (data, response) = try await performTransport(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw PostProcessingError.invalidResponse("No HTTP response")
         }
@@ -1076,7 +1098,7 @@ Model: \(model)
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = postProcessingTimeoutSeconds
+        request.timeoutInterval = postProcessingTimeoutSeconds(for: endpoint)
         let model = endpoint.selectedModelID
 
         let normalizedVocabulary = normalizedVocabularyText(customVocabulary)
@@ -1184,7 +1206,7 @@ Model: \(model)
 
         request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
 
-        let (data, response) = try await transport(request)
+        let (data, response) = try await performTransport(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw PostProcessingError.invalidResponse("No HTTP response")
         }

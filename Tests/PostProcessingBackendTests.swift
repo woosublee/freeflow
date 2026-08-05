@@ -9,6 +9,11 @@ struct PostProcessingBackendTests {
         try await testCloudRequestOmitsLocalCompatibilityKey()
         try await testLocalFailureDoesNotInvokeCloudFallbackOrSetCooldown()
         try await testLocalCommandTransformUsesEndpointWithoutCloudFallback()
+        try await testBackendDefaultsUseLocal120AndCloud20()
+        try await testExplicitTimeoutOverrideAppliesToBothBackends()
+        try await testInvalidTimeoutOverrideUsesBackendDefaults()
+        try await testCleanupConvertsRealURLTimeout()
+        try await testCommandTransformConvertsRealURLTimeout()
         try await testSequentialChunksUsePerRequestTimeout()
         try await testCommandFallbackUsesPerRequestTimeout()
         try await testOversizedLocalCommandDoesNotReachTransport()
@@ -118,6 +123,174 @@ struct PostProcessingBackendTests {
             label: "command",
             expectedCompletionCeiling: 4_096
         )
+    }
+
+    private static func testBackendDefaultsUseLocal120AndCloud20() async throws {
+        try await withPostProcessingTimeoutOverride(nil) {
+            let localRecorder = PostProcessingRequestRecorder()
+            let localService = makeLocalService { request in
+                localRecorder.record(request)
+                return try successResponse(
+                    request: request,
+                    content: "Cleaned local result."
+                )
+            }
+            _ = try await localService.postProcess(
+                transcript: "clean this",
+                context: testContext,
+                customVocabulary: ""
+            )
+
+            let cloudRecorder = PostProcessingRequestRecorder()
+            let cloudService = makeCloudService { request in
+                cloudRecorder.record(request)
+                return try successResponse(
+                    request: request,
+                    content: "Cleaned cloud result."
+                )
+            }
+            _ = try await cloudService.postProcess(
+                transcript: "clean this",
+                context: testContext,
+                customVocabulary: ""
+            )
+
+            let localRequest = try localRecorder.request()
+            let cloudRequest = try cloudRecorder.request()
+            try expect(
+                localRequest.timeoutInterval == 120,
+                "Local cleanup defaults to 120 seconds"
+            )
+            try expect(
+                cloudRequest.timeoutInterval == 20,
+                "Cloud cleanup remains at 20 seconds"
+            )
+        }
+    }
+
+    private static func testExplicitTimeoutOverrideAppliesToBothBackends() async throws {
+        try await withPostProcessingTimeoutOverride(45) {
+            let localRecorder = PostProcessingRequestRecorder()
+            let localService = makeLocalService { request in
+                localRecorder.record(request)
+                return try successResponse(
+                    request: request,
+                    content: "Cleaned local result."
+                )
+            }
+            _ = try await localService.postProcess(
+                transcript: "clean this",
+                context: testContext,
+                customVocabulary: ""
+            )
+
+            let cloudRecorder = PostProcessingRequestRecorder()
+            let cloudService = makeCloudService { request in
+                cloudRecorder.record(request)
+                return try successResponse(
+                    request: request,
+                    content: "Cleaned cloud result."
+                )
+            }
+            _ = try await cloudService.postProcess(
+                transcript: "clean this",
+                context: testContext,
+                customVocabulary: ""
+            )
+
+            let localRequest = try localRecorder.request()
+            let cloudRequest = try cloudRecorder.request()
+            try expect(
+                localRequest.timeoutInterval == 45,
+                "Local uses explicit override"
+            )
+            try expect(
+                cloudRequest.timeoutInterval == 45,
+                "Cloud uses explicit override"
+            )
+        }
+    }
+
+    private static func testInvalidTimeoutOverrideUsesBackendDefaults() async throws {
+        for invalidValue: Double in [0, -1, .infinity, .nan] {
+            try await withPostProcessingTimeoutOverride(invalidValue) {
+                let localRecorder = PostProcessingRequestRecorder()
+                let service = makeLocalService { request in
+                    localRecorder.record(request)
+                    return try successResponse(
+                        request: request,
+                        content: "Cleaned local result."
+                    )
+                }
+                _ = try await service.postProcess(
+                    transcript: "clean this",
+                    context: testContext,
+                    customVocabulary: ""
+                )
+                let request = try localRecorder.request()
+                try expect(
+                    request.timeoutInterval == 120,
+                    "Invalid override uses Local default"
+                )
+            }
+        }
+    }
+
+    private static func testCleanupConvertsRealURLTimeout() async throws {
+        try await withPostProcessingTimeoutOverride(nil) {
+            let service = makeLocalService { _ in
+                throw URLError(.timedOut)
+            }
+            do {
+                _ = try await service.postProcess(
+                    transcript: "raw transcript",
+                    context: testContext,
+                    customVocabulary: ""
+                )
+                throw PostProcessingBackendTestFailure(
+                    "Expected Local cleanup timeout"
+                )
+            } catch let error as PostProcessingError {
+                guard case .requestTimedOut(let seconds) = error else {
+                    throw PostProcessingBackendTestFailure(
+                        "Expected requestTimedOut, got \(error)"
+                    )
+                }
+                try expect(
+                    seconds == 120,
+                    "Local timeout reports the effective request timeout"
+                )
+            }
+        }
+    }
+
+    private static func testCommandTransformConvertsRealURLTimeout() async throws {
+        try await withPostProcessingTimeoutOverride(nil) {
+            let service = makeCloudService { _ in
+                throw URLError(.timedOut)
+            }
+            do {
+                _ = try await service.commandTransform(
+                    selectedText: "Original text",
+                    voiceCommand: "Make it concise",
+                    context: testContext,
+                    customVocabulary: ""
+                )
+                throw PostProcessingBackendTestFailure(
+                    "Expected Cloud command timeout"
+                )
+            } catch let error as PostProcessingError {
+                guard case .requestTimedOut(let seconds) = error else {
+                    throw PostProcessingBackendTestFailure(
+                        "Expected requestTimedOut, got \(error)"
+                    )
+                }
+                try expect(
+                    seconds == 20,
+                    "Cloud timeout reports the effective request timeout"
+                )
+            }
+        }
     }
 
     private static func testSequentialChunksUsePerRequestTimeout() async throws {
@@ -390,6 +563,42 @@ struct PostProcessingBackendTests {
             issue.record.recoveryAction == .openProviderSettings,
             "invalid cloud URL opens provider settings"
         )
+    }
+
+    private static func makeCloudService(
+        transport: @escaping PostProcessingService.Transport
+    ) -> PostProcessingService {
+        PostProcessingService(
+            backendExecutor: AIProcessingBackendExecutor(
+                choice: .cloud(modelID: "primary/model"),
+                cloudBaseURL: "https://api.example.com/openai/v1",
+                cloudAPIKey: "cloud-secret"
+            ),
+            cloudFallbackModelID: nil,
+            instructionExecutionGuardEnabled: false,
+            transport: transport
+        )
+    }
+
+    private static func withPostProcessingTimeoutOverride(
+        _ value: Double?,
+        operation: () async throws -> Void
+    ) async throws {
+        let key = "post_processing_timeout_seconds"
+        let previous = UserDefaults.standard.object(forKey: key)
+        if let value {
+            UserDefaults.standard.set(value, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+        defer {
+            if let previous {
+                UserDefaults.standard.set(previous, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+        try await operation()
     }
 
     private static func makeLocalService(
