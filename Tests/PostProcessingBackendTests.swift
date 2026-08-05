@@ -9,6 +9,13 @@ struct PostProcessingBackendTests {
         try await testCloudRequestOmitsLocalCompatibilityKey()
         try await testLocalFailureDoesNotInvokeCloudFallbackOrSetCooldown()
         try await testLocalCommandTransformUsesEndpointWithoutCloudFallback()
+        try await testBackendDefaultsUseLocal120AndCloud20()
+        try await testExplicitTimeoutOverrideAppliesToBothBackends()
+        try await testInvalidTimeoutOverrideUsesBackendDefaults()
+        try await testCleanupConvertsRealURLTimeout()
+        try await testCommandTransformConvertsRealURLTimeout()
+        try await testFallbackTimeoutReportsFallbackModel()
+        try await testTimeoutIssueDoesNotExposeRequestSourceData()
         try await testSequentialChunksUsePerRequestTimeout()
         try await testCommandFallbackUsesPerRequestTimeout()
         try await testOversizedLocalCommandDoesNotReachTransport()
@@ -120,114 +127,402 @@ struct PostProcessingBackendTests {
         )
     }
 
-    private static func testSequentialChunksUsePerRequestTimeout() async throws {
-        let timeoutKey = "post_processing_timeout_seconds"
-        let previousTimeout = UserDefaults.standard.object(forKey: timeoutKey)
-        UserDefaults.standard.set(0.03, forKey: timeoutKey)
-        defer {
-            if let previousTimeout {
-                UserDefaults.standard.set(previousTimeout, forKey: timeoutKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: timeoutKey)
-            }
-        }
-
-        let recorder = PostProcessingRequestRecorder()
-        let service = PostProcessingService(
-            backendExecutor: AIProcessingBackendExecutor(
-                choice: .cloud(modelID: "primary/model"),
-                cloudBaseURL: "https://api.example.com/openai/v1",
-                cloudAPIKey: "cloud-secret"
-            ),
-            cloudFallbackModelID: nil,
-            instructionExecutionGuardEnabled: false,
-            transport: { request in
-                recorder.record(request)
-                try await Task.sleep(nanoseconds: 20_000_000)
+    private static func testBackendDefaultsUseLocal120AndCloud20() async throws {
+        try await withPostProcessingTimeoutOverride(nil) {
+            let localRecorder = PostProcessingRequestRecorder()
+            let localService = makeLocalService { request in
+                localRecorder.record(request)
                 return try successResponse(
                     request: request,
-                    content: try transcriptFromPostProcessingRequest(request)
+                    content: "Cleaned local result."
                 )
             }
-        )
-        let transcript = String(repeating: "Alpha ", count: 5_000)
-        let start = Date()
+            _ = try await localService.postProcess(
+                transcript: "clean this",
+                context: testContext,
+                customVocabulary: ""
+            )
 
-        let result = try await service.postProcess(
-            transcript: transcript,
-            context: testContext,
-            customVocabulary: ""
-        )
-        let elapsed = Date().timeIntervalSince(start)
-        let requests = recorder.capturedRequests()
+            let cloudRecorder = PostProcessingRequestRecorder()
+            let cloudService = makeCloudService { request in
+                cloudRecorder.record(request)
+                return try successResponse(
+                    request: request,
+                    content: "Cleaned cloud result."
+                )
+            }
+            _ = try await cloudService.postProcess(
+                transcript: "clean this",
+                context: testContext,
+                customVocabulary: ""
+            )
 
-        try expect(!result.transcript.isEmpty, "delayed chunks produce a combined result")
-        try expect(requests.count > 1, "transcript is processed as sequential chunks")
-        try expect(elapsed > 0.03, "total chunk processing exceeds one request timeout")
-        for request in requests {
+            let localRequest = try localRecorder.request()
+            let cloudRequest = try cloudRecorder.request()
             try expect(
-                abs(request.timeoutInterval - 0.03) < 0.001,
-                "each chunk retains the per-request timeout"
+                localRequest.timeoutInterval == 120,
+                "Local cleanup defaults to 120 seconds"
+            )
+            try expect(
+                cloudRequest.timeoutInterval == 20,
+                "Cloud cleanup remains at 20 seconds"
             )
         }
     }
 
-    private static func testCommandFallbackUsesPerRequestTimeout() async throws {
-        let timeoutKey = "post_processing_timeout_seconds"
-        let previousTimeout = UserDefaults.standard.object(forKey: timeoutKey)
-        UserDefaults.standard.set(0.03, forKey: timeoutKey)
-        defer {
-            if let previousTimeout {
-                UserDefaults.standard.set(previousTimeout, forKey: timeoutKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: timeoutKey)
+    private static func testExplicitTimeoutOverrideAppliesToBothBackends() async throws {
+        try await withPostProcessingTimeoutOverride(45) {
+            let localRecorder = PostProcessingRequestRecorder()
+            let localService = makeLocalService { request in
+                localRecorder.record(request)
+                return try successResponse(
+                    request: request,
+                    content: "Cleaned local result."
+                )
+            }
+            _ = try await localService.postProcess(
+                transcript: "clean this",
+                context: testContext,
+                customVocabulary: ""
+            )
+
+            let cloudRecorder = PostProcessingRequestRecorder()
+            let cloudService = makeCloudService { request in
+                cloudRecorder.record(request)
+                return try successResponse(
+                    request: request,
+                    content: "Cleaned cloud result."
+                )
+            }
+            _ = try await cloudService.postProcess(
+                transcript: "clean this",
+                context: testContext,
+                customVocabulary: ""
+            )
+
+            let localRequest = try localRecorder.request()
+            let cloudRequest = try cloudRecorder.request()
+            try expect(
+                localRequest.timeoutInterval == 45,
+                "Local uses explicit override"
+            )
+            try expect(
+                cloudRequest.timeoutInterval == 45,
+                "Cloud uses explicit override"
+            )
+        }
+    }
+
+    private static func testInvalidTimeoutOverrideUsesBackendDefaults() async throws {
+        for invalidValue: Double in [0, -1, .infinity, .nan] {
+            try await withPostProcessingTimeoutOverride(invalidValue) {
+                let localRecorder = PostProcessingRequestRecorder()
+                let service = makeLocalService { request in
+                    localRecorder.record(request)
+                    return try successResponse(
+                        request: request,
+                        content: "Cleaned local result."
+                    )
+                }
+                _ = try await service.postProcess(
+                    transcript: "clean this",
+                    context: testContext,
+                    customVocabulary: ""
+                )
+                let request = try localRecorder.request()
+                try expect(
+                    request.timeoutInterval == 120,
+                    "Invalid override uses Local default"
+                )
             }
         }
+    }
 
-        let recorder = PostProcessingRequestRecorder()
+    private static func testCleanupConvertsRealURLTimeout() async throws {
+        try await withPostProcessingTimeoutOverride(nil) {
+            let service = makeLocalService { _ in
+                throw URLError(.timedOut)
+            }
+            do {
+                _ = try await service.postProcess(
+                    transcript: "raw transcript",
+                    context: testContext,
+                    customVocabulary: ""
+                )
+                throw PostProcessingBackendTestFailure(
+                    "Expected Local cleanup timeout"
+                )
+            } catch let error as PostProcessingError {
+                guard case .requestTimedOut(let seconds, let modelID) = error else {
+                    throw PostProcessingBackendTestFailure(
+                        "Expected requestTimedOut, got \(error)"
+                    )
+                }
+                try expect(
+                    seconds == 120,
+                    "Local timeout reports the effective request timeout"
+                )
+                try expect(
+                    modelID == LocalAIModelCatalog.quality.id,
+                    "Local timeout reports the endpoint model"
+                )
+            }
+        }
+    }
+
+    private static func testCommandTransformConvertsRealURLTimeout() async throws {
+        try await withPostProcessingTimeoutOverride(nil) {
+            let service = makeCloudService { _ in
+                throw URLError(.timedOut)
+            }
+            do {
+                _ = try await service.commandTransform(
+                    selectedText: "Original text",
+                    voiceCommand: "Make it concise",
+                    context: testContext,
+                    customVocabulary: ""
+                )
+                throw PostProcessingBackendTestFailure(
+                    "Expected Cloud command timeout"
+                )
+            } catch let error as PostProcessingError {
+                guard case .requestTimedOut(let seconds, let modelID) = error else {
+                    throw PostProcessingBackendTestFailure(
+                        "Expected requestTimedOut, got \(error)"
+                    )
+                }
+                try expect(
+                    seconds == 20,
+                    "Cloud timeout reports the effective request timeout"
+                )
+                try expect(
+                    modelID == "primary/model",
+                    "Cloud timeout reports the endpoint model"
+                )
+            }
+        }
+    }
+
+    private static func testFallbackTimeoutReportsFallbackModel() async throws {
         let service = PostProcessingService(
             backendExecutor: AIProcessingBackendExecutor(
                 choice: .cloud(modelID: "primary/model"),
-                cloudBaseURL: "https://api.example.com/openai/v1",
+                cloudBaseURL: "https://api.example.com/openai/v1/\(UUID().uuidString)",
                 cloudAPIKey: "cloud-secret"
             ),
             cloudFallbackModelID: "fallback/model",
             instructionExecutionGuardEnabled: false,
             transport: { request in
-                recorder.record(request)
-                try await Task.sleep(nanoseconds: 20_000_000)
                 let body = try requestBody(request)
                 if body["model"] as? String == "primary/model" {
                     return rateLimitedResponse(request: request)
                 }
-                return try successResponse(
-                    request: request,
-                    content: "Cleaned fallback result."
+                throw URLError(.timedOut)
+            }
+        )
+
+        do {
+            _ = try await service.postProcess(
+                transcript: "raw transcript",
+                context: testContext,
+                customVocabulary: ""
+            )
+            throw PostProcessingBackendTestFailure(
+                "Expected fallback timeout"
+            )
+        } catch let failure as PostProcessingBackendTestFailure {
+            throw failure
+        } catch {
+            let issue = service.userIssue(for: error)
+            try expect(
+                issue.record.code == .requestTimedOut,
+                "fallback timeout keeps the timeout issue code"
+            )
+            try expect(
+                issue.record.context.modelID == "fallback/model",
+                "fallback timeout reports the model that timed out"
+            )
+        }
+    }
+
+    private static func testTimeoutIssueDoesNotExposeRequestSourceData() async throws {
+        let transcriptSentinel = "TRANSCRIPT_SENTINEL_7F1A"
+        let promptSentinel = "PROMPT_SENTINEL_8B2C"
+        let credentialSentinel = "sk-CREDENTIAL_SENTINEL_9D3E"
+        let errorSentinel = "ERROR_SENTINEL_/Users/private_4A5F"
+        let service = PostProcessingService(
+            backendExecutor: AIProcessingBackendExecutor(
+                choice: .cloud(modelID: "provider/model"),
+                cloudBaseURL: "https://api.example.com/openai/v1",
+                cloudAPIKey: credentialSentinel
+            ),
+            cloudFallbackModelID: nil,
+            instructionExecutionGuardEnabled: false,
+            transport: { request in
+                guard request.value(forHTTPHeaderField: "Authorization")
+                        == "Bearer \(credentialSentinel)" else {
+                    throw PostProcessingBackendTestFailure(
+                        "Expected credential sentinel in request header"
+                    )
+                }
+                guard let body = request.httpBody,
+                      let bodyText = String(data: body, encoding: .utf8),
+                      bodyText.contains(transcriptSentinel),
+                      bodyText.contains(promptSentinel) else {
+                    throw PostProcessingBackendTestFailure(
+                        "Expected transcript and prompt sentinels in request body"
+                    )
+                }
+                throw URLError(
+                    .timedOut,
+                    userInfo: [NSLocalizedDescriptionKey: errorSentinel]
                 )
             }
         )
-        let start = Date()
 
-        let result = try await service.commandTransform(
-            selectedText: "Original text",
-            voiceCommand: "Make it concise",
-            context: testContext,
-            customVocabulary: ""
-        )
-        let elapsed = Date().timeIntervalSince(start)
+        let issue: QuillUserIssueError
+        do {
+            _ = try await service.postProcess(
+                transcript: transcriptSentinel,
+                context: testContext,
+                customVocabulary: "",
+                customSystemPrompt: promptSentinel
+            )
+            throw PostProcessingBackendTestFailure(
+                "Expected timeout while testing diagnostic privacy"
+            )
+        } catch let failure as PostProcessingBackendTestFailure {
+            throw failure
+        } catch {
+            issue = service.userIssue(for: error)
+        }
 
-        try expect(
-            result.transcript == "Cleaned fallback result.",
-            "command fallback completes after a rate limit"
-        )
-        try expect(
-            recorder.count() == 2,
-            "command fallback uses two independently timed requests"
-        )
-        try expect(
-            elapsed > 0.03,
-            "command fallback can exceed a single request timeout"
-        )
+        let encodedRecord = try JSONEncoder().encode(issue.record)
+        guard let recordText = String(data: encodedRecord, encoding: .utf8) else {
+            throw PostProcessingBackendTestFailure(
+                "Expected encoded issue record"
+            )
+        }
+        let presentation = issue.record.presentation(language: "en")
+        let visibleText = ([
+            presentation.title,
+            presentation.body,
+            presentation.suggestion,
+            presentation.compactMessage
+        ] + presentation.detailsRows.flatMap { [$0.label, $0.value] })
+            .joined(separator: " ")
+
+        for sentinel in [
+            transcriptSentinel,
+            promptSentinel,
+            credentialSentinel,
+            errorSentinel
+        ] {
+            try expect(
+                !recordText.contains(sentinel),
+                "timeout record excludes \(sentinel)"
+            )
+            try expect(
+                !issue.privateDiagnostic.contains(sentinel),
+                "timeout diagnostic excludes \(sentinel)"
+            )
+            try expect(
+                !visibleText.contains(sentinel),
+                "timeout presentation excludes \(sentinel)"
+            )
+        }
+    }
+
+    private static func testSequentialChunksUsePerRequestTimeout() async throws {
+        try await withPostProcessingTimeoutOverride(0.03) {
+            let recorder = PostProcessingRequestRecorder()
+            let service = PostProcessingService(
+                backendExecutor: AIProcessingBackendExecutor(
+                    choice: .cloud(modelID: "primary/model"),
+                    cloudBaseURL: "https://api.example.com/openai/v1",
+                    cloudAPIKey: "cloud-secret"
+                ),
+                cloudFallbackModelID: nil,
+                instructionExecutionGuardEnabled: false,
+                transport: { request in
+                    recorder.record(request)
+                    try await Task.sleep(nanoseconds: 20_000_000)
+                    return try successResponse(
+                        request: request,
+                        content: try transcriptFromPostProcessingRequest(request)
+                    )
+                }
+            )
+            let transcript = String(repeating: "Alpha ", count: 5_000)
+            let start = Date()
+
+            let result = try await service.postProcess(
+                transcript: transcript,
+                context: testContext,
+                customVocabulary: ""
+            )
+            let elapsed = Date().timeIntervalSince(start)
+            let requests = recorder.capturedRequests()
+
+            try expect(!result.transcript.isEmpty, "delayed chunks produce a combined result")
+            try expect(requests.count > 1, "transcript is processed as sequential chunks")
+            try expect(elapsed > 0.03, "total chunk processing exceeds one request timeout")
+            for request in requests {
+                try expect(
+                    abs(request.timeoutInterval - 0.03) < 0.001,
+                    "each chunk retains the per-request timeout"
+                )
+            }
+        }
+    }
+
+    private static func testCommandFallbackUsesPerRequestTimeout() async throws {
+        try await withPostProcessingTimeoutOverride(0.03) {
+            let recorder = PostProcessingRequestRecorder()
+            let service = PostProcessingService(
+                backendExecutor: AIProcessingBackendExecutor(
+                    choice: .cloud(modelID: "primary/model"),
+                    cloudBaseURL: "https://api.example.com/openai/v1",
+                    cloudAPIKey: "cloud-secret"
+                ),
+                cloudFallbackModelID: "fallback/model",
+                instructionExecutionGuardEnabled: false,
+                transport: { request in
+                    recorder.record(request)
+                    try await Task.sleep(nanoseconds: 20_000_000)
+                    let body = try requestBody(request)
+                    if body["model"] as? String == "primary/model" {
+                        return rateLimitedResponse(request: request)
+                    }
+                    return try successResponse(
+                        request: request,
+                        content: "Cleaned fallback result."
+                    )
+                }
+            )
+            let start = Date()
+
+            let result = try await service.commandTransform(
+                selectedText: "Original text",
+                voiceCommand: "Make it concise",
+                context: testContext,
+                customVocabulary: ""
+            )
+            let elapsed = Date().timeIntervalSince(start)
+
+            try expect(
+                result.transcript == "Cleaned fallback result.",
+                "command fallback completes after a rate limit"
+            )
+            try expect(
+                recorder.count() == 2,
+                "command fallback uses two independently timed requests"
+            )
+            try expect(
+                elapsed > 0.03,
+                "command fallback can exceed a single request timeout"
+            )
+        }
     }
 
     private static func testOversizedLocalCommandDoesNotReachTransport() async throws {
@@ -390,6 +685,42 @@ struct PostProcessingBackendTests {
             issue.record.recoveryAction == .openProviderSettings,
             "invalid cloud URL opens provider settings"
         )
+    }
+
+    private static func makeCloudService(
+        transport: @escaping PostProcessingService.Transport
+    ) -> PostProcessingService {
+        PostProcessingService(
+            backendExecutor: AIProcessingBackendExecutor(
+                choice: .cloud(modelID: "primary/model"),
+                cloudBaseURL: "https://api.example.com/openai/v1",
+                cloudAPIKey: "cloud-secret"
+            ),
+            cloudFallbackModelID: nil,
+            instructionExecutionGuardEnabled: false,
+            transport: transport
+        )
+    }
+
+    private static func withPostProcessingTimeoutOverride(
+        _ value: Double?,
+        operation: () async throws -> Void
+    ) async throws {
+        let key = "post_processing_timeout_seconds"
+        let previous = UserDefaults.standard.object(forKey: key)
+        if let value {
+            UserDefaults.standard.set(value, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+        defer {
+            if let previous {
+                UserDefaults.standard.set(previous, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+        try await operation()
     }
 
     private static func makeLocalService(

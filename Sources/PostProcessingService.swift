@@ -6,7 +6,7 @@ enum PostProcessingError: LocalizedError {
     case invalidResponse(String)
     case invalidInput(String)
     case emptyOutput
-    case requestTimedOut(TimeInterval)
+    case requestTimedOut(TimeInterval, modelID: String? = nil)
     case suspectedInstructionExecution
     case outputRejected(AIValidationFailure)
 
@@ -25,7 +25,7 @@ enum PostProcessingError: LocalizedError {
             return "Invalid post-processing input: \(details)"
         case .emptyOutput:
             return "Post-processing returned empty output"
-        case .requestTimedOut(let seconds):
+        case .requestTimedOut(let seconds, _):
             return "Post-processing timed out after \(Int(seconds))s"
         case .suspectedInstructionExecution:
             return "Post-processing output looked like it answered the transcript instead of cleaning it"
@@ -34,10 +34,18 @@ enum PostProcessingError: LocalizedError {
         }
     }
 
+    func effectiveModelID(fallback: String) -> String {
+        if case .requestTimedOut(_, let modelID) = self {
+            return modelID ?? fallback
+        }
+        return fallback
+    }
+
     func userIssue(
         providerHost: String?,
         modelID: String,
-        localBackend: String? = nil
+        localBackend: String? = nil,
+        operation: QuillUserIssueOperation = .postProcessing
     ) -> QuillUserIssueError {
         let code: QuillUserIssueCode
         switch self {
@@ -56,7 +64,9 @@ enum PostProcessingError: LocalizedError {
             code = .postProcessingRateLimited
         case .suspectedInstructionExecution, .outputRejected:
             code = .postProcessingGuardFallback
-        case .invalidResponse, .invalidInput, .emptyOutput, .requestTimedOut:
+        case .requestTimedOut:
+            code = .requestTimedOut
+        case .invalidResponse, .invalidInput, .emptyOutput:
             code = .postProcessingFailed
         }
         let statusCode: Int?
@@ -72,8 +82,9 @@ enum PostProcessingError: LocalizedError {
                 context: QuillUserIssueContext(
                     httpStatus: statusCode,
                     providerHost: providerHost,
-                    modelID: modelID,
-                    localBackend: localBackend
+                    modelID: effectiveModelID(fallback: modelID),
+                    localBackend: localBackend,
+                    operation: operation
                 )
             ),
             privateDiagnostic: localizedDescription
@@ -333,10 +344,8 @@ Behavior:
     private let defaultFallbackModel = AppState.defaultPostProcessingFallbackModel
     private let defaultModelReasoningEffort = "low"
     private let postProcessingMaxCompletionTokens = 4096
-    private var postProcessingTimeoutSeconds: TimeInterval {
-        let override = UserDefaults.standard.double(forKey: "post_processing_timeout_seconds")
-        return override > 0 ? override : 20
-    }
+    private static let cloudPostProcessingTimeoutSeconds: TimeInterval = 20
+    private static let localPostProcessingTimeoutSeconds: TimeInterval = 120
     private var isLocalBackend: Bool { backendExecutor.choice.isLocal }
     private var selectedModelID: String { backendExecutor.choice.modelID }
     private var cloudBaseURL: String { backendExecutor.cloudBaseURL }
@@ -381,7 +390,36 @@ Behavior:
         self.transport = transport
     }
 
-    func userIssue(for error: Error) -> QuillUserIssueError {
+    private func postProcessingTimeoutSeconds(
+        for endpoint: AIProcessingEndpoint
+    ) -> TimeInterval {
+        let override = UserDefaults.standard.double(forKey: "post_processing_timeout_seconds")
+        if override.isFinite, override > 0 {
+            return override
+        }
+        return endpoint.kind == .local
+            ? Self.localPostProcessingTimeoutSeconds
+            : Self.cloudPostProcessingTimeoutSeconds
+    }
+
+    private func performTransport(
+        for request: URLRequest,
+        endpoint: AIProcessingEndpoint
+    ) async throws -> (Data, URLResponse) {
+        do {
+            return try await transport(request)
+        } catch let error as URLError where error.code == .timedOut {
+            throw PostProcessingError.requestTimedOut(
+                request.timeoutInterval,
+                modelID: endpoint.selectedModelID
+            )
+        }
+    }
+
+    func userIssue(
+        for error: Error,
+        operation: QuillUserIssueOperation = .postProcessing
+    ) -> QuillUserIssueError {
         if let issue = error as? QuillUserIssueError {
             return issue
         }
@@ -436,7 +474,8 @@ Behavior:
             return postProcessingError.userIssue(
                 providerHost: providerHost,
                 modelID: resolvedPrimaryModel(),
-                localBackend: isLocalBackend ? "Local AI" : nil
+                localBackend: isLocalBackend ? "Local AI" : nil,
+                operation: operation
             )
         }
         let nsError = error as NSError
@@ -446,7 +485,8 @@ Behavior:
                 severity: .warning,
                 context: QuillUserIssueContext(
                     providerHost: providerHost,
-                    modelID: resolvedPrimaryModel()
+                    modelID: resolvedPrimaryModel(),
+                    operation: operation
                 )
             ),
             privateDiagnostic: "\(nsError.domain) \(nsError.code)"
@@ -876,7 +916,7 @@ Behavior:
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = postProcessingTimeoutSeconds
+        request.timeoutInterval = postProcessingTimeoutSeconds(for: endpoint)
         let model = endpoint.selectedModelID
 
         let systemPrompt = postProcessingSystemPrompt(
@@ -938,7 +978,10 @@ Model: \(model)
 
         request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
 
-        let (data, response) = try await transport(request)
+        let (data, response) = try await performTransport(
+            for: request,
+            endpoint: endpoint
+        )
         guard let httpResponse = response as? HTTPURLResponse else {
             throw PostProcessingError.invalidResponse("No HTTP response")
         }
@@ -1076,7 +1119,7 @@ Model: \(model)
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = postProcessingTimeoutSeconds
+        request.timeoutInterval = postProcessingTimeoutSeconds(for: endpoint)
         let model = endpoint.selectedModelID
 
         let normalizedVocabulary = normalizedVocabularyText(customVocabulary)
@@ -1184,7 +1227,10 @@ Model: \(model)
 
         request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
 
-        let (data, response) = try await transport(request)
+        let (data, response) = try await performTransport(
+            for: request,
+            endpoint: endpoint
+        )
         guard let httpResponse = response as? HTTPURLResponse else {
             throw PostProcessingError.invalidResponse("No HTTP response")
         }

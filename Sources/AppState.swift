@@ -145,12 +145,8 @@ private struct AudioImportTaskConfiguration {
     let outputLanguage: String
     let postProcessingEnabled: Bool
     let pressEnterCommandEnabled: Bool
-    let postProcessingAPIKey: String
-    let postProcessingBaseURL: String
-    let postProcessingBackendChoice: AIProcessingBackendChoice
-    let postProcessingFallbackModel: String
-    let instructionExecutionGuardEnabled: Bool
-    let localAIServerManager: LocalAIServerManager
+    let cloudDependencies: CloudTranscriptionDependencies
+    let postProcessingService: PostProcessingService
 
     init(
         transcriptionConfiguration: AudioImportTranscriptionConfiguration,
@@ -163,12 +159,8 @@ private struct AudioImportTaskConfiguration {
         outputLanguage: String,
         postProcessingEnabled: Bool,
         pressEnterCommandEnabled: Bool,
-        postProcessingAPIKey: String,
-        postProcessingBaseURL: String,
-        postProcessingBackendChoice: AIProcessingBackendChoice,
-        postProcessingFallbackModel: String,
-        instructionExecutionGuardEnabled: Bool,
-        localAIServerManager: LocalAIServerManager
+        cloudDependencies: CloudTranscriptionDependencies,
+        postProcessingService: PostProcessingService
     ) {
         self.mode = transcriptionConfiguration.mode
         self.useLocalTranscription = transcriptionConfiguration.useLocalTranscription
@@ -184,12 +176,8 @@ private struct AudioImportTaskConfiguration {
         self.outputLanguage = outputLanguage
         self.postProcessingEnabled = postProcessingEnabled
         self.pressEnterCommandEnabled = pressEnterCommandEnabled
-        self.postProcessingAPIKey = postProcessingAPIKey
-        self.postProcessingBaseURL = postProcessingBaseURL
-        self.postProcessingBackendChoice = postProcessingBackendChoice
-        self.postProcessingFallbackModel = postProcessingFallbackModel
-        self.instructionExecutionGuardEnabled = instructionExecutionGuardEnabled
-        self.localAIServerManager = localAIServerManager
+        self.cloudDependencies = cloudDependencies
+        self.postProcessingService = postProcessingService
     }
 
     var systemPrompt: String {
@@ -197,14 +185,7 @@ private struct AudioImportTaskConfiguration {
     }
 
     func makePostProcessingService() -> PostProcessingService {
-        AppState.makePostProcessingService(
-            choice: postProcessingBackendChoice,
-            apiKey: postProcessingAPIKey,
-            baseURL: postProcessingBaseURL,
-            cloudFallbackModelID: postProcessingFallbackModel,
-            instructionExecutionGuardEnabled: instructionExecutionGuardEnabled,
-            localServerManager: localAIServerManager
-        )
+        postProcessingService
     }
 
     func makeTranscriptionService(
@@ -219,6 +200,7 @@ private struct AudioImportTaskConfiguration {
             transcriptionLanguage: transcriptionLanguage,
             localTranscriptionModel: localTranscriptionModel,
             transcriptionModel: transcriptionModel,
+            cloudDependencies: cloudDependencies,
             cloudExecutionContext: cloudExecutionContext
         )
     }
@@ -411,6 +393,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         () -> CloudTranscriptionDependencies = {
             .live
         }
+    static var audioImportCloudTranscriptionDependenciesFactory:
+        () -> CloudTranscriptionDependencies = {
+            .live
+        }
+    static var postProcessingTransport: PostProcessingService.Transport = { request in
+        try await LLMAPITransport.data(for: request)
+    }
 
     static var googleCalendarTokenLoader: (Bool) -> GoogleCalendarOAuthToken? = { allowsAuthenticationUI in
         GoogleCalendarTokenStore.load(allowsAuthenticationUI: allowsAuthenticationUI)
@@ -3099,8 +3088,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
         scheduleNoteBrowserTranscriptionModeNormalizationForSelectedInput()
         self.precomputeMacros()
         if let cloudReconciliation {
+            let cloudDependenciesFactory = Self
+                .retryCloudTranscriptionDependenciesFactory
+            let postProcessingService = makePostProcessingService()
             Task { @MainActor [weak self] in
-                self?.scheduleCloudTranscriptionAutoResume(cloudReconciliation)
+                self?.scheduleCloudTranscriptionAutoResume(
+                    cloudReconciliation,
+                    cloudDependenciesFactory: cloudDependenciesFactory,
+                    postProcessingService: postProcessingService
+                )
             }
         }
 
@@ -4493,7 +4489,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 localServerManager: localServerManager
             ),
             cloudFallbackModelID: choice.isLocal ? nil : cloudFallbackModelID,
-            instructionExecutionGuardEnabled: instructionExecutionGuardEnabled
+            instructionExecutionGuardEnabled: instructionExecutionGuardEnabled,
+            transport: postProcessingTransport
         )
     }
 
@@ -7318,12 +7315,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             outputLanguage: outputLanguage,
             postProcessingEnabled: !disablePostProcessing,
             pressEnterCommandEnabled: isPressEnterVoiceCommandEnabled,
-            postProcessingAPIKey: apiKey,
-            postProcessingBaseURL: apiBaseURL,
-            postProcessingBackendChoice: postProcessingBackendChoice,
-            postProcessingFallbackModel: postProcessingFallbackModel,
-            instructionExecutionGuardEnabled: instructionExecutionGuardEnabled,
-            localAIServerManager: localAIServerManager
+            cloudDependencies: Self
+                .audioImportCloudTranscriptionDependenciesFactory(),
+            postProcessingService: makePostProcessingService()
         )
         let jobID = UUID()
         let noteID = UUID()
@@ -7476,7 +7470,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         transcriptionLanguageCodeOverride: configuration.transcriptionLanguage.code,
                         spokenLanguage: transcription.spokenLanguage,
                         customVocabularyOverride: configuration.customVocabulary,
-                        customSystemPromptOverride: configuration.customSystemPrompt
+                        customSystemPromptOverride: configuration.customSystemPrompt,
+                        aiProcessingOutcome: result.aiProcessingOutcome
                     )
                     self.completeCloudTranscriptionHistory(
                         historyID: noteID,
@@ -7618,6 +7613,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         incrementNoteRetryGeneration(for: item.id)
 
         let postProcessingService = makePostProcessingService()
+        let cloudDependencies = Self
+            .retryCloudTranscriptionDependenciesFactory()
 
         let task = Task { [weak self] in
             guard let self else { return }
@@ -7628,7 +7625,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 let completion = snapshot.execution.completion
                 let transcriptionService = try snapshot.execution
                     .makeTranscriptionService(
-                        cloudDependencies: Self.retryCloudTranscriptionDependenciesFactory(),
+                        cloudDependencies: cloudDependencies,
                         cloudExecutionContext: snapshot.cloudExecutionContext
                     )
                 let transcription = try await transcriptionService.transcribe(fileURL: snapshot.audioURL)
@@ -7664,6 +7661,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             parsedTranscript: parsedTranscript,
                             isRetry: true
                         ),
+                    aiProcessingOutcome: result.aiProcessingOutcome
+                        .pipelineHistoryStatus,
                     debugStatus: "Retried",
                     transcriptFileName: transcriptFileName,
                     spokenLanguage: transcription.spokenLanguage
@@ -7685,6 +7684,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     postProcessedTranscript: snapshot.item.postProcessedTranscript,
                     postProcessingPrompt: snapshot.item.postProcessingPrompt,
                     postProcessingStatus: issue.persistedStatus,
+                    aiProcessingOutcome: snapshot.item.aiProcessingOutcome,
                     debugStatus: "Retry failed",
                     transcriptFileName: snapshot.item.transcriptFileName
                 )
@@ -7869,6 +7869,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         postProcessedTranscript: String,
         postProcessingPrompt: String?,
         postProcessingStatus: String,
+        aiProcessingOutcome: String,
         debugStatus: String,
         transcriptFileName: String?,
         spokenLanguage: SpokenLanguageResolution? = nil
@@ -7894,6 +7895,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             contextScreenshotDataURL: snapshot.item.contextScreenshotDataURL,
             contextScreenshotStatus: snapshot.item.contextScreenshotStatus,
             postProcessingStatus: postProcessingStatus,
+            aiProcessingOutcome: aiProcessingOutcome,
             debugStatus: debugStatus,
             customVocabulary: snapshot.customVocabulary,
             customSystemPrompt: snapshot.customSystemPrompt,
@@ -9921,6 +9923,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }?.original
     }
 
+    static func aiProcessingFailureReason(
+        for error: Error,
+        fallback: String
+    ) -> String {
+        if case .requestTimedOut = error as? PostProcessingError {
+            return "request-timed-out"
+        }
+        return fallback
+    }
+
     private enum TranscriptProcessingOutcome {
         case skippedEmptyRawTranscript
         case voiceMacro(command: String)
@@ -9997,7 +10009,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     : .commandModeSucceeded(invocation: invocation)
                 return (result.transcript, outcome, result.prompt, nil, .succeeded)
             } catch {
-                let issue = postProcessingService.userIssue(for: error)
+                let issue = postProcessingService.userIssue(
+                    for: error,
+                    operation: .commandTransform
+                )
                 os_log(
                     .error,
                     log: recordingLog,
@@ -10009,7 +10024,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     .commandModeFailedFallback(invocation: invocation),
                     "",
                     issue.record,
-                    .failed(reason: "command-transform-failed")
+                    .failed(
+                        reason: Self.aiProcessingFailureReason(
+                            for: error,
+                            fallback: "command-transform-failed"
+                        )
+                    )
                 )
             }
         }
@@ -10052,15 +10072,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     .rawFallback(reason: reason)
                 )
             }
-            let failureReason: String
-            switch error as? PostProcessingError {
-            case .some(.requestTimedOut):
-                failureReason = "request-timed-out"
-            case .some(.emptyOutput):
-                failureReason = "empty-output"
-            default:
-                failureReason = "post-processing-failed"
+            let fallbackReason: String
+            if case .emptyOutput = error as? PostProcessingError {
+                fallbackReason = "empty-output"
+            } else {
+                fallbackReason = "post-processing-failed"
             }
+            let failureReason = Self.aiProcessingFailureReason(
+                for: error,
+                fallback: fallbackReason
+            )
             return (
                 trimmedRawTranscript,
                 .postProcessingFailedFallback,
@@ -10908,7 +10929,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func scheduleCloudTranscriptionAutoResume(
-        _ reconciliation: CloudTranscriptionReconciliation
+        _ reconciliation: CloudTranscriptionReconciliation,
+        cloudDependenciesFactory: @escaping () -> CloudTranscriptionDependencies,
+        postProcessingService: PostProcessingService
     ) {
         guard hasTranscriptionAPIKey else { return }
 
@@ -10946,6 +10969,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 self.resumeCloudTranscriptionAfterLaunch(
                     record,
                     runtime: runtime,
+                    cloudDependencies: cloudDependenciesFactory(),
+                    postProcessingService: postProcessingService,
                     completionDelivery: .historyOnly
                 )
             }
@@ -10956,6 +10981,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func resumeCloudTranscriptionAfterLaunch(
         _ record: CloudTranscriptionJobRecord,
         runtime: CloudTranscriptionExecutionSnapshot,
+        cloudDependencies: CloudTranscriptionDependencies,
+        postProcessingService: PostProcessingService,
         completionDelivery: TranscriptionCompletionDeliveryPolicy
     ) {
         guard completionDelivery == .historyOnly,
@@ -10981,7 +11008,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
             session: session,
             completion: completion
         )
-        let postProcessingService = makePostProcessingService()
         let task = Task { [weak self] in
             guard let self else { return }
             do {
@@ -10989,6 +11015,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     runtime,
                     completion
                 ).makeTranscriptionService(
+                    cloudDependencies: cloudDependencies,
                     cloudExecutionContext: context
                 )
                 let transcription = try await service.transcribe(
@@ -11071,6 +11098,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             parsedTranscript: parsed,
                             isRetry: true
                         ),
+                    aiProcessingOutcome: result.aiProcessingOutcome
+                        .pipelineHistoryStatus,
                     debugStatus: "Resumed after relaunch",
                     transcriptFileName: item.transcriptFileName,
                     spokenLanguage: transcription.spokenLanguage

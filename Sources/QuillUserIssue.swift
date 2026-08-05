@@ -81,6 +81,11 @@ enum ProviderDiagnosticCode {
     }
 }
 
+enum QuillUserIssueOperation: String, Codable, Equatable, Sendable {
+    case postProcessing
+    case commandTransform
+}
+
 struct QuillUserIssueContext: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case httpStatus
@@ -91,6 +96,7 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
         case processExitCode
         case retryExhausted
         case meetingSummaryFailureSubtype
+        case operation
     }
 
     let httpStatus: Int?
@@ -101,6 +107,7 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
     let processExitCode: Int32?
     let retryExhausted: Bool?
     let meetingSummaryFailureSubtype: MeetingSummaryFailureSubtype?
+    let operation: QuillUserIssueOperation?
 
     init(
         httpStatus: Int? = nil,
@@ -110,7 +117,8 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
         localBackend: String? = nil,
         processExitCode: Int32? = nil,
         retryExhausted: Bool? = nil,
-        meetingSummaryFailureSubtype: MeetingSummaryFailureSubtype? = nil
+        meetingSummaryFailureSubtype: MeetingSummaryFailureSubtype? = nil,
+        operation: QuillUserIssueOperation? = nil
     ) {
         self.httpStatus = httpStatus
         self.providerHost = providerHost
@@ -120,6 +128,7 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
         self.processExitCode = processExitCode
         self.retryExhausted = retryExhausted
         self.meetingSummaryFailureSubtype = meetingSummaryFailureSubtype
+        self.operation = operation
     }
 
     init(from decoder: Decoder) throws {
@@ -135,6 +144,10 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
             meetingSummaryFailureSubtype: try? container.decodeIfPresent(
                 MeetingSummaryFailureSubtype.self,
                 forKey: .meetingSummaryFailureSubtype
+            ),
+            operation: try? container.decodeIfPresent(
+                QuillUserIssueOperation.self,
+                forKey: .operation
             )
         )
     }
@@ -250,7 +263,7 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
         language: String = preferredLocalizedStringLanguage(),
         bundle: Bundle = .main
     ) -> QuillUserIssuePresentation {
-        let copy = code.copy
+        let copy = code.copy(for: context.operation)
         let title = localizedCatalogString(
             copy.titleKey,
             language: language,
@@ -511,7 +524,9 @@ private extension QuillUserIssueCode {
         }
     }
 
-    var copy: QuillUserIssueCopy {
+    func copy(
+        for operation: QuillUserIssueOperation?
+    ) -> QuillUserIssueCopy {
         switch self {
         case .networkUnavailable:
             return QuillUserIssueCopy(
@@ -520,11 +535,26 @@ private extension QuillUserIssueCode {
                 suggestionKey: "Check your internet connection, then try again."
             )
         case .requestTimedOut:
-            return QuillUserIssueCopy(
-                titleKey: "Transcription timed out",
-                bodyKey: "The transcription service did not respond in time.",
-                suggestionKey: "Try again. If this keeps happening, check the provider status or choose another configured model."
-            )
+            switch operation {
+            case .postProcessing:
+                return QuillUserIssueCopy(
+                    titleKey: "Transcript cleanup timed out",
+                    bodyKey: "Quill kept the original transcript because cleanup did not finish in time.",
+                    suggestionKey: "Use the original transcript or try cleanup again later."
+                )
+            case .commandTransform:
+                return QuillUserIssueCopy(
+                    titleKey: "Text edit timed out",
+                    bodyKey: "Quill kept the selected text because the edit did not finish in time.",
+                    suggestionKey: "Use the selected text or try the edit again later."
+                )
+            case nil:
+                return QuillUserIssueCopy(
+                    titleKey: "Transcription timed out",
+                    bodyKey: "The transcription service did not respond in time.",
+                    suggestionKey: "Try again. If this keeps happening, check the provider status or choose another configured model."
+                )
+            }
         case .rateLimited:
             return QuillUserIssueCopy(
                 titleKey: "Transcription is temporarily limited",
