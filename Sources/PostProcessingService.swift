@@ -6,7 +6,7 @@ enum PostProcessingError: LocalizedError {
     case invalidResponse(String)
     case invalidInput(String)
     case emptyOutput
-    case requestTimedOut(TimeInterval)
+    case requestTimedOut(TimeInterval, modelID: String? = nil)
     case suspectedInstructionExecution
     case outputRejected(AIValidationFailure)
 
@@ -25,13 +25,20 @@ enum PostProcessingError: LocalizedError {
             return "Invalid post-processing input: \(details)"
         case .emptyOutput:
             return "Post-processing returned empty output"
-        case .requestTimedOut(let seconds):
+        case .requestTimedOut(let seconds, _):
             return "Post-processing timed out after \(Int(seconds))s"
         case .suspectedInstructionExecution:
             return "Post-processing output looked like it answered the transcript instead of cleaning it"
         case .outputRejected(let failure):
             return "Post-processing output rejected: \(String(describing: failure))"
         }
+    }
+
+    func effectiveModelID(fallback: String) -> String {
+        if case .requestTimedOut(_, let modelID) = self {
+            return modelID ?? fallback
+        }
+        return fallback
     }
 
     func userIssue(
@@ -75,7 +82,7 @@ enum PostProcessingError: LocalizedError {
                 context: QuillUserIssueContext(
                     httpStatus: statusCode,
                     providerHost: providerHost,
-                    modelID: modelID,
+                    modelID: effectiveModelID(fallback: modelID),
                     localBackend: localBackend,
                     operation: operation
                 )
@@ -396,12 +403,16 @@ Behavior:
     }
 
     private func performTransport(
-        for request: URLRequest
+        for request: URLRequest,
+        endpoint: AIProcessingEndpoint
     ) async throws -> (Data, URLResponse) {
         do {
             return try await transport(request)
         } catch let error as URLError where error.code == .timedOut {
-            throw PostProcessingError.requestTimedOut(request.timeoutInterval)
+            throw PostProcessingError.requestTimedOut(
+                request.timeoutInterval,
+                modelID: endpoint.selectedModelID
+            )
         }
     }
 
@@ -967,7 +978,10 @@ Model: \(model)
 
         request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
 
-        let (data, response) = try await performTransport(for: request)
+        let (data, response) = try await performTransport(
+            for: request,
+            endpoint: endpoint
+        )
         guard let httpResponse = response as? HTTPURLResponse else {
             throw PostProcessingError.invalidResponse("No HTTP response")
         }
@@ -1213,7 +1227,10 @@ Model: \(model)
 
         request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
 
-        let (data, response) = try await performTransport(for: request)
+        let (data, response) = try await performTransport(
+            for: request,
+            endpoint: endpoint
+        )
         guard let httpResponse = response as? HTTPURLResponse else {
             throw PostProcessingError.invalidResponse("No HTTP response")
         }

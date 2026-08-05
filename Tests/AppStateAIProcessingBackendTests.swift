@@ -2392,17 +2392,29 @@ struct AppStateAIProcessingBackendTests {
     }
 
     private static func testCloudResumeCapturesPostProcessingServiceBeforeTaskStarts() throws {
+        let source = try appStateSource()
+        let scheduling = sourceBlock(
+            in: source,
+            from: "if let cloudReconciliation {",
+            to: "speechRecognitionAuthorizationStatus ="
+        )
+        let serviceSnapshot = requiredRange(
+            of: "let postProcessingService = makePostProcessingService()",
+            in: scheduling
+        )
+        let schedulingTask = requiredRange(
+            of: "Task { @MainActor",
+            in: scheduling
+        )
+        assert(serviceSnapshot.lowerBound < schedulingTask.lowerBound)
+
         let body = sourceBlock(
-            in: try appStateSource(),
+            in: source,
             from: "private func resumeCloudTranscriptionAfterLaunch(",
             to: "private func installCloudTranscriptionTask("
         )
-        let snapshot = requiredRange(
-            of: "let postProcessingService = makePostProcessingService()",
-            in: body
-        )
+        assert(body.contains("postProcessingService: PostProcessingService"))
         let task = requiredRange(of: "let task = Task", in: body)
-        assert(snapshot.lowerBound < task.lowerBound)
         let taskBody = String(body[task.lowerBound...])
         assert(!taskBody.contains("makePostProcessingService()"))
         assert(taskBody.contains("postProcessingService: postProcessingService"))

@@ -145,7 +145,7 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
                 MeetingSummaryFailureSubtype.self,
                 forKey: .meetingSummaryFailureSubtype
             ),
-            operation: try container.decodeIfPresent(
+            operation: try? container.decodeIfPresent(
                 QuillUserIssueOperation.self,
                 forKey: .operation
             )
@@ -263,24 +263,7 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
         language: String = preferredLocalizedStringLanguage(),
         bundle: Bundle = .main
     ) -> QuillUserIssuePresentation {
-        let copy: QuillUserIssueCopy
-        if code == .requestTimedOut,
-           context.operation == .postProcessing {
-            copy = QuillUserIssueCopy(
-                titleKey: "Transcript cleanup timed out",
-                bodyKey: "Quill kept the original transcript because cleanup did not finish in time.",
-                suggestionKey: "Use the original transcript or try cleanup again later."
-            )
-        } else if code == .requestTimedOut,
-                  context.operation == .commandTransform {
-            copy = QuillUserIssueCopy(
-                titleKey: "Text edit timed out",
-                bodyKey: "Quill kept the selected text because the edit did not finish in time.",
-                suggestionKey: "Use the selected text or try the edit again later."
-            )
-        } else {
-            copy = code.copy
-        }
+        let copy = code.copy(for: context.operation)
         let title = localizedCatalogString(
             copy.titleKey,
             language: language,
@@ -541,7 +524,9 @@ private extension QuillUserIssueCode {
         }
     }
 
-    var copy: QuillUserIssueCopy {
+    func copy(
+        for operation: QuillUserIssueOperation?
+    ) -> QuillUserIssueCopy {
         switch self {
         case .networkUnavailable:
             return QuillUserIssueCopy(
@@ -550,11 +535,26 @@ private extension QuillUserIssueCode {
                 suggestionKey: "Check your internet connection, then try again."
             )
         case .requestTimedOut:
-            return QuillUserIssueCopy(
-                titleKey: "Transcription timed out",
-                bodyKey: "The transcription service did not respond in time.",
-                suggestionKey: "Try again. If this keeps happening, check the provider status or choose another configured model."
-            )
+            switch operation {
+            case .postProcessing:
+                return QuillUserIssueCopy(
+                    titleKey: "Transcript cleanup timed out",
+                    bodyKey: "Quill kept the original transcript because cleanup did not finish in time.",
+                    suggestionKey: "Use the original transcript or try cleanup again later."
+                )
+            case .commandTransform:
+                return QuillUserIssueCopy(
+                    titleKey: "Text edit timed out",
+                    bodyKey: "Quill kept the selected text because the edit did not finish in time.",
+                    suggestionKey: "Use the selected text or try the edit again later."
+                )
+            case nil:
+                return QuillUserIssueCopy(
+                    titleKey: "Transcription timed out",
+                    bodyKey: "The transcription service did not respond in time.",
+                    suggestionKey: "Try again. If this keeps happening, check the provider status or choose another configured model."
+                )
+            }
         case .rateLimited:
             return QuillUserIssueCopy(
                 titleKey: "Transcription is temporarily limited",

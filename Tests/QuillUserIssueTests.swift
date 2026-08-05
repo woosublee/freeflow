@@ -7,6 +7,7 @@ struct QuillUserIssueTests {
         try testEveryCodeHasCompleteEnglishAndKoreanPresentation(bundle: bundle)
         try testSeverityAndRecoveryActions()
         try testVersionedPersistenceRoundTripAndRejection()
+        try testUnknownFutureOperationPreservesPersistedIssue(bundle: bundle)
         try testPersistedPayloadExcludesPrivateDiagnostics()
         try testLocalIssueUsesBoundedDiagnosticCategoryAndExcerpt()
         try testMissingProviderAPIKeyFactory()
@@ -250,6 +251,29 @@ struct QuillUserIssueTests {
         try expectThrows(.invalidPrefix) {
             _ = try QuillUserIssueRecord.decodePersistedStatus("Error: legacy raw detail")
         }
+    }
+
+    private static func testUnknownFutureOperationPreservesPersistedIssue(
+        bundle: Bundle
+    ) throws {
+        let payload = #"{"schemaVersion":1,"code":"request-timed-out","severity":"warning","context":{"modelID":"future/model","operation":"futureOperation"}}"#
+        let encodedPayload = Data(payload.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let status = QuillUserIssueRecord.persistedStatusPrefix + encodedPayload
+
+        let record = try QuillUserIssueRecord.decodePersistedStatus(status)
+
+        try expect(record.code == .requestTimedOut, "future operation preserves issue code")
+        try expect(record.severity == .warning, "future operation preserves issue severity")
+        try expect(record.context.modelID == "future/model", "future operation preserves safe context")
+        try expect(record.context.operation == nil, "future operation decodes as an unknown optional classifier")
+        try expect(
+            record.presentation(language: "en", bundle: bundle).title
+                == "Transcription timed out",
+            "future operation falls back to generic timeout copy"
+        )
     }
 
     private static func testPersistedPayloadExcludesPrivateDiagnostics() throws {

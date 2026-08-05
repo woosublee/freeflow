@@ -143,7 +143,7 @@ struct AppStateTranscriptionConfigurationTests {
         try testAudioOnlyRetryCreatesTranscriptFileAndPreservesMetadata()
         try testHistoryReconstructionPreservesMeetingSummaryMetadata()
         try testSuccessfulTranscriptionHistoryReceivesSpokenLanguage()
-        try testResumedRetryPassesAIProcessingOutcome()
+        try await testResumedRetryPersistsAIProcessingOutcome()
         try testHistoryDeletionForgetsSummaryGenerationStateAfterPersistence()
         try testRealtimeConfiguredLanguageUsesOneRequestAndResolutionValue()
         try testAudioOnlyRetryDeletesNewTranscriptFileWhenStale()
@@ -2683,6 +2683,7 @@ struct AppStateTranscriptionConfigurationTests {
         try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
             resetDefaults()
             let rawTranscript = "가져온 원본 전사문"
+            let replacementTranscript = "뒤늦게 설치된 다른 전사문"
             let store = AppState.makeDefaultPipelineHistoryStore()
             AppState.pipelineHistoryStoreFactory = { store }
             let sourceURL = rootDirectory.appendingPathComponent(
@@ -2717,18 +2718,36 @@ struct AppStateTranscriptionConfigurationTests {
                     sourceURL,
                     choice: .apiStandard(modelID: "whisper-large-v3")
                 )
+                AppState.audioImportCloudTranscriptionDependenciesFactory = {
+                    successfulCloudDependencies(
+                        transcript: replacementTranscript
+                    )
+                }
+                AppState.postProcessingTransport = { request in
+                    let data = try JSONSerialization.data(withJSONObject: [
+                        "choices": [[
+                            "message": ["content": replacementTranscript]
+                        ]]
+                    ])
+                    return (
+                        data,
+                        HTTPURLResponse(
+                            url: request.url!,
+                            statusCode: 200,
+                            httpVersion: nil,
+                            headerFields: nil
+                        )!
+                    )
+                }
             }
 
             await waitUntil {
                 appState.pipelineHistory.contains {
-                    $0.rawTranscript == rawTranscript
-                        && $0.postProcessingStatus.hasPrefix(
-                            QuillUserIssueRecord.persistedStatusPrefix
-                        )
+                    !$0.rawTranscript.isEmpty
                 }
             }
             guard let item = appState.pipelineHistory.first(where: {
-                $0.rawTranscript == rawTranscript
+                !$0.rawTranscript.isEmpty
             }) else {
                 throw AppStateTranscriptionConfigurationTestError
                     .missingHistoryItem
@@ -2752,6 +2771,7 @@ struct AppStateTranscriptionConfigurationTests {
         try await AppStateTestStorage.withIsolatedStorage { _ in
             resetDefaults()
             let rawTranscript = "재시도 원본 전사문"
+            let replacementTranscript = "뒤늦게 설치된 재시도 전사문"
             let store = AppState.makeDefaultPipelineHistoryStore()
             AppState.pipelineHistoryStoreFactory = { store }
             let fileName = "retry-timeout-\(UUID().uuidString).wav"
@@ -2795,6 +2815,11 @@ struct AppStateTranscriptionConfigurationTests {
                         == .ready
                 )
                 appState.retryTranscription(item: originalItem)
+                AppState.retryCloudTranscriptionDependenciesFactory = {
+                    successfulCloudDependencies(
+                        transcript: replacementTranscript
+                    )
+                }
                 precondition(
                     appState.retryingItemIDs.contains(originalItem.id)
                 )
@@ -2988,25 +3013,128 @@ struct AppStateTranscriptionConfigurationTests {
         precondition(history.contains("spokenLanguageResolution: effectiveSpokenLanguage?.source"))
     }
 
-    private static func testResumedRetryPassesAIProcessingOutcome() throws {
-        let source = try String(
-            contentsOfFile: "Sources/AppState.swift",
-            encoding: .utf8
-        )
-        let resumedCloud = sourceBlock(
-            in: source,
-            from: "private func resumeCloudTranscriptionAfterLaunch(",
-            to: "\n    @MainActor\n    private func installCloudTranscriptionTask"
-        )
+    private static func testResumedRetryPersistsAIProcessingOutcome() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
+            resetDefaults()
+            let rawTranscript = "재실행 후 복구된 원본 전사문"
+            let historyID = UUID()
+            let fileName = "\(historyID.uuidString).wav"
+            let audioURL = AppState.audioStorageDirectory()
+                .appendingPathComponent(fileName)
+            try writeTestWAV(at: audioURL)
 
-        precondition(
-            resumedCloud.contains(
-                "aiProcessingOutcome: result.aiProcessingOutcome"
+            let store = AppState.makeDefaultPipelineHistoryStore()
+            AppState.pipelineHistoryStoreFactory = { store }
+            let originalItem = PipelineHistoryItem(
+                id: historyID,
+                timestamp: Date(timeIntervalSince1970: 1),
+                rawTranscript: "",
+                postProcessedTranscript: "",
+                postProcessingPrompt: nil,
+                contextSummary: "",
+                contextScreenshotDataURL: nil,
+                contextScreenshotStatus: "No screenshot",
+                postProcessingStatus: PipelineHistoryItem
+                    .cloudTranscribingStatus,
+                aiProcessingOutcome: "succeeded",
+                debugStatus: "Cloud transcription in progress",
+                customVocabulary: "",
+                audioFileName: fileName,
+                usedLocalTranscription: false,
+                usedContextCapture: false,
+                usedPostProcessing: true,
+                transcriptionLanguageCode: "ko"
             )
-        )
-        precondition(
-            resumedCloud.contains(".pipelineHistoryStatus")
-        )
+            _ = try store.append(originalItem, maxCount: 10)
+
+            let jobStore = CloudTranscriptionJobStore(
+                jobsDirectory: rootDirectory
+                    .appendingPathComponent(
+                        "cloud-transcription/jobs",
+                        isDirectory: true
+                    ),
+                temporaryRoot: rootDirectory
+                    .appendingPathComponent(
+                        "cloud-transcription/tmp",
+                        isDirectory: true
+                    )
+            )
+            let record = try makeResumableCloudRecord(
+                historyID: historyID,
+                audioURL: audioURL
+            )
+            let session = jobStore.beginSession(historyID: historyID)
+            try jobStore.create(record, session: session)
+            jobStore.invalidateSession(historyID: historyID)
+
+            let defaults = UserDefaults.standard
+            defaults.set(true, forKey: "hasCompletedSetup")
+            defaults.set(true, forKey: "transcription_enabled")
+            defaults.set(false, forKey: "use_local_transcription")
+            defaults.set(false, forKey: "disable_post_processing")
+            defaults.set("whisper-large-v3", forKey: "transcription_model")
+            defaults.set("ko", forKey: "transcription_language")
+            AIProcessingBackendChoiceStore.save(
+                .cloud(modelID: "provider/model"),
+                defaults: defaults,
+                key: "post_processing_backend_choice"
+            )
+            AppSettingsStorage.save(
+                "post-processing-key",
+                account: "groq_api_key"
+            )
+            AppSettingsStorage.save(
+                "transcription-key",
+                account: "transcription_api_key"
+            )
+            AppSettingsStorage.save(
+                "http://127.0.0.1:1",
+                account: "api_base_url"
+            )
+            AppSettingsStorage.save(
+                "http://127.0.0.1:1",
+                account: "transcription_api_url"
+            )
+
+            let originalRetryDependencies =
+                AppState.retryCloudTranscriptionDependenciesFactory
+            let originalTransport = AppState.postProcessingTransport
+            defer {
+                AppState.retryCloudTranscriptionDependenciesFactory =
+                    originalRetryDependencies
+                AppState.postProcessingTransport = originalTransport
+            }
+            AppState.retryCloudTranscriptionDependenciesFactory = {
+                successfulCloudDependencies(transcript: rawTranscript)
+            }
+            AppState.postProcessingTransport = { _ in
+                throw URLError(.timedOut)
+            }
+
+            let appState = await MainActor.run { AppState() }
+            await waitUntil(timeoutNanoseconds: 3_000_000_000) {
+                store.loadAllHistory().contains {
+                    $0.id == historyID
+                        && $0.debugStatus == "Resumed after relaunch"
+                }
+            }
+
+            let inMemory = try requireHistoryItem(
+                withID: historyID,
+                in: appState.pipelineHistory
+            )
+            let persisted = try requireHistoryItem(
+                withID: historyID,
+                in: store.loadAllHistory()
+            )
+            for item in [inMemory, persisted] {
+                try assertTimeoutFallbackHistory(
+                    item,
+                    rawTranscript: rawTranscript
+                )
+                precondition(item.debugStatus == "Resumed after relaunch")
+            }
+        }
     }
 
     private static func testHistoryDeletionForgetsSummaryGenerationStateAfterPersistence() throws {
@@ -3101,6 +3229,60 @@ struct AppStateTranscriptionConfigurationTests {
             assert(cleanup.contains("let transcriptFileName = updatedItem.transcriptFileName"))
             assert(cleanup.contains("Self.deleteTranscriptFile(transcriptFileName)"))
         }
+    }
+
+    private static func makeResumableCloudRecord(
+        historyID: UUID,
+        audioURL: URL
+    ) throws -> CloudTranscriptionJobRecord {
+        let layout = try CanonicalPCM16WAV.validateFile(at: audioURL)
+        let source = try CloudTranscriptionSourceIdentityBuilder.make(
+            fileURL: audioURL,
+            layout: layout
+        )
+        let multipart = CloudTranscriptionMultipartLayout(
+            model: "whisper-large-v3",
+            responseFormat: "verbose_json",
+            language: "ko"
+        )
+        let plan = try CloudTranscriptionChunkPlanner().plan(
+            fileURL: audioURL,
+            source: source,
+            wavLayout: layout,
+            multipart: multipart,
+            encodedUploadCeilingBytes: 20_000_000
+        )
+        let runtime = try CloudTranscriptionExecutionSnapshot(
+            baseURL: "http://127.0.0.1:1",
+            apiKey: "transcription-key",
+            model: "whisper-large-v3",
+            language: "ko",
+            encodedUploadCeilingBytes: 20_000_000
+        )
+        return CloudTranscriptionJobRecord(
+            schemaVersion: CloudTranscriptionJobRecord.currentSchemaVersion,
+            historyID: historyID,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 2),
+            phase: .interrupted,
+            identity: CloudTranscriptionJobIdentity(
+                providerID: runtime.providerID,
+                model: runtime.model,
+                language: runtime.language,
+                responseFormat: runtime.responseFormat,
+                source: source,
+                planID: plan.planID
+            ),
+            plan: plan,
+            completedChunks: [],
+            firstIncompleteChunkIndex: 0,
+            lastFailure: nil,
+            completionPolicy: CloudTranscriptionCompletionPolicy(
+                postProcessingEnabled: true,
+                outputLanguage: "",
+                pressEnterCommandEnabled: false
+            )
+        )
     }
 
     private static func writeTestWAV(at url: URL) throws {
