@@ -22,6 +22,8 @@ struct PostProcessingBackendTests {
         try testLocalManagerErrorsMapToDedicatedIssues()
         try testInvalidCloudBaseURLIsNotRelabeledAsLocal()
         try await testLeakedRawTranscriptionTemplateIsTreatedAsFailure()
+        try await testLeakedDataEnvelopeInstructionIsTreatedAsFailure()
+        try testFinalPromptLeakGuardUsesValidatorDetector()
         try await testStandaloneRawTranscriptionWordIsNotTreatedAsLeak()
         try await testDelimiterInjectionCannotReplaceTheRawTranscript()
         try await testMeaningfulLongTranscriptReturningEmptyIsReportedAsEmptyOutput()
@@ -590,6 +592,55 @@ struct PostProcessingBackendTests {
                 customVocabulary: ""
             )
         }
+    }
+
+    private static func testLeakedDataEnvelopeInstructionIsTreatedAsFailure() async throws {
+        let service = makeLocalService { request in
+            let body = try requestBody(request)
+            guard let messages = body["messages"] as? [[String: Any]],
+                  let userMessage = messages.first(where: {
+                      $0["role"] as? String == "user"
+                  })?["content"] as? String else {
+                throw PostProcessingBackendTestFailure(
+                    "Missing cleanup user message"
+                )
+            }
+            return try successResponse(request: request, content: userMessage)
+        }
+
+        do {
+            _ = try await service.postProcess(
+                transcript: "The release is ready.",
+                context: testContext,
+                customVocabulary: ""
+            )
+            throw PostProcessingBackendTestFailure(
+                "Expected leaked data-envelope instruction to be rejected"
+            )
+        } catch let error as PostProcessingError {
+            guard case .outputRejected(.promptLeak) = error else {
+                throw PostProcessingBackendTestFailure(
+                    "Expected prompt-leak rejection, got \(error)"
+                )
+            }
+        }
+    }
+
+    private static func testFinalPromptLeakGuardUsesValidatorDetector() throws {
+        let source = try String(
+            contentsOfFile: "Sources/PostProcessingService.swift",
+            encoding: .utf8
+        )
+        let normalizedSource = source
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        try expect(
+            normalizedSource.contains(
+                "guard !PostProcessingOutputValidator.containsPostProcessingPromptLeak( "
+                    + "output: acceptedTranscript, source: transcript ) else {"
+            ),
+            "final cleanup guard reuses the source-aware validator detector"
+        )
     }
 
     private static func testStandaloneRawTranscriptionWordIsNotTreatedAsLeak() async throws {

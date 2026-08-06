@@ -1098,7 +1098,10 @@ Model: \(model)
         case .failure(let failure):
             throw PostProcessingError.outputRejected(failure)
         }
-        guard !Self.leaksRawTranscriptionPromptTemplate(acceptedTranscript) else {
+        guard !PostProcessingOutputValidator.containsPostProcessingPromptLeak(
+            output: acceptedTranscript,
+            source: transcript
+        ) else {
             throw PostProcessingError.outputRejected(.promptLeak)
         }
         if instructionExecutionGuardEnabled && appearsToHaveExecutedInstruction(
@@ -1131,19 +1134,6 @@ Model: \(model)
         let safeCeiling = ceiling ?? postProcessingMaxCompletionTokens
         payload["max_completion_tokens"] = safeCeiling
         payload["max_tokens"] = safeCeiling
-    }
-
-    /// Detects the model echoing this service's own RAW_TRANSCRIPTION prompt
-    /// wrapper back as its "cleaned" output instead of actually cleaning the
-    /// text. Independent of `instructionExecutionGuardEnabled` since this is a
-    /// plain correctness failure, not a prompt-injection concern.
-    ///
-    /// Matches on the wrapper's opening delimiter (`<<<RAW_TRANSCRIPTION`) — the
-    /// triple-angle marker only ever appears in the template, so legitimately
-    /// dictated text that merely mentions the word "RAW_TRANSCRIPTION" (an
-    /// identifier, variable name, or the word itself) is not rejected.
-    static func leaksRawTranscriptionPromptTemplate(_ value: String) -> Bool {
-        value.contains("<<<RAW_TRANSCRIPTION")
     }
 
     private func processCommandTransform(
