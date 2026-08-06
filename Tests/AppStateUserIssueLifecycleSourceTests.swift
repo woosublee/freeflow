@@ -64,8 +64,19 @@ struct AppStateUserIssueLifecycleSourceTests {
             to: "@MainActor\n    private func installCloudTranscriptionTask"
         )
         try expect(
-            resumedRetry.contains("retryingItemIDs.insert(record.historyID)"),
-            "resumed cloud retry suppresses its previous warning while it runs"
+            resumedRetry.contains("retryingItemIDs.insert(item.id)"),
+            "resumed cloud retry uses the Note Browser item identifier"
+        )
+        guard let resumedUpdate = resumedRetry.range(
+            of: "try pipelineHistoryStore.update(updated)"
+        ), let resumedIncrement = resumedRetry.range(
+            of: "incrementNoteRetryGeneration(for: item.id)"
+        ) else {
+            throw TestFailure("resumed retry persists a replacement before invalidating warning dismissal")
+        }
+        try expect(
+            resumedUpdate.lowerBound < resumedIncrement.lowerBound,
+            "resumed retry keeps an old dismissal when saving the replacement fails"
         )
         let finishCloudJob = block(
             source,

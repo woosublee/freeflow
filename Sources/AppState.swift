@@ -10995,7 +10995,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let audioURL = Self.audioStorageDirectory().appendingPathComponent(
             audioFileName
         )
-        retryingItemIDs.insert(record.historyID)
+        retryingItemIDs.insert(item.id)
         let session = cloudTranscriptionJobStore.beginSession(
             historyID: record.historyID
         )
@@ -11106,6 +11106,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     spokenLanguage: transcription.spokenLanguage
                 )
                 try pipelineHistoryStore.update(updated)
+                incrementNoteRetryGeneration(for: item.id)
                 pipelineHistory = pipelineHistoryStore.loadAllHistory()
                 completeCloudTranscriptionHistory(
                     historyID: record.historyID,
