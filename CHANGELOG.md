@@ -8,6 +8,12 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.37] - 2026-08-06
+
+### Fixed
+
+- Rejected complete, partial, or reformatted transcript-cleanup prompt echoes and kept the original transcript instead of saving an incomplete model response.
+
 ## [0.1.36] - 2026-08-06
 
 ### Improved
