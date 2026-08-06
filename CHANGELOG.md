@@ -8,6 +8,17 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.36] - 2026-08-06
+
+### Improved
+
+- Made transcript cleanup warnings explain the safe, specific cause—including model output, response, context-limit, request, and timeout failures—and expose the selected model and effective timeout in Details.
+
+### Fixed
+
+- Kept dismissed cleanup warnings hidden during retranscription, including resumed Cloud retries, and showed a new warning only after its retry result was saved.
+- Preserved original transcript fallbacks while correctly classifying malformed cleanup responses, empty model results, provider context limits, HTTP timeouts, and fractional timeout overrides.
+
 ## [0.1.35] - 2026-08-05
 
 ### Improved
