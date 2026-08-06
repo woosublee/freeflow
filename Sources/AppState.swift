@@ -7610,7 +7610,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
 
         retryingItemIDs.insert(item.id)
-        incrementNoteRetryGeneration(for: item.id)
 
         let postProcessingService = makePostProcessingService()
         let cloudDependencies = Self
@@ -7706,6 +7705,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 }
                 do {
                     try self.pipelineHistoryStore.update(updatedItem, requiresDurableStore: true)
+                    self.incrementNoteRetryGeneration(for: snapshot.item.id)
                     self.pipelineHistory = self.pipelineHistoryStore.loadAllHistory()
                     if retrySucceeded {
                         self.invalidateMeetingSummaryGeneration(for: snapshot.item.id)
@@ -10995,6 +10995,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let audioURL = Self.audioStorageDirectory().appendingPathComponent(
             audioFileName
         )
+        retryingItemIDs.insert(record.historyID)
         let session = cloudTranscriptionJobStore.beginSession(
             historyID: record.historyID
         )
@@ -11394,6 +11395,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
         cloudTranscriptionJobStore.invalidateSession(historyID: historyID)
         cloudTranscriptionProgressByHistoryID.removeValue(forKey: historyID)
+        retryingItemIDs.remove(historyID)
     }
 
     // 라이브 전사 시작 시 Note Browser에 즉시 표시될 예비 노트 생성

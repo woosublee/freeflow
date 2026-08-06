@@ -6,6 +6,8 @@ import Foundation
 struct PostProcessingUserIssueTests {
     static func main() throws {
         try testPostProcessingErrorsMapToWarningRecords()
+        try testPostProcessingFailureReasonsStayStructured()
+        try testProviderContextLimitAndHTTPTimeoutUseAccurateIssues()
         try testCommandTimeoutUsesEditSpecificCopy()
         try testRawFallbackOutcomeIsPersistedWithTheOriginalTranscript()
         try testRequestFailuresKeepOnlyAllowlistedProviderCode()
@@ -62,6 +64,97 @@ struct PostProcessingUserIssueTests {
                 )
             }
         }
+    }
+
+    private static func testPostProcessingFailureReasonsStayStructured() throws {
+        let cases: [(PostProcessingError, PostProcessingFailureReason, TimeInterval?)] = [
+            (.requestTimedOut(120, modelID: "local-qwen"), .requestTimedOut, 120),
+            (.contextBudgetExceeded, .contextBudgetExceeded, nil),
+            (.emptyOutput, .emptyOutput, nil),
+            (.invalidResponse("missing content"), .invalidResponse, nil),
+            (.requestFailed(statusCode: 500, providerCode: "server_error"), .serviceRequestFailed, nil)
+        ]
+
+        for (error, expectedReason, expectedTimeout) in cases {
+            let issue = error.userIssue(
+                providerHost: "api.example.com",
+                modelID: "provider/model"
+            )
+            try expect(
+                issue.record.context.postProcessingFailureReason == expectedReason,
+                "\(error) uses a bounded post-processing failure reason"
+            )
+            try expect(
+                issue.record.context.requestTimeoutSeconds == expectedTimeout,
+                "\(error) keeps only its effective timeout"
+            )
+        }
+
+        let timedOut = PostProcessingError.requestTimedOut(
+            120,
+            modelID: "local-qwen"
+        ).userIssue(
+            providerHost: nil,
+            modelID: "provider/model"
+        )
+        try expect(
+            timedOut.record.context.modelID == "local-qwen",
+            "timeout retains the model that timed out"
+        )
+
+        let requestFailed = PostProcessingError.requestFailed(
+            statusCode: 500,
+            providerCode: "server_error"
+        ).userIssue(
+            providerHost: "api.example.com",
+            modelID: "provider/model"
+        )
+        try expect(
+            requestFailed.record.context.providerCode == "server_error",
+            "request failure keeps only the allowlisted provider code"
+        )
+    }
+
+    private static func testProviderContextLimitAndHTTPTimeoutUseAccurateIssues() throws {
+        let contextLimit = PostProcessingError.requestFailed(
+            statusCode: 400,
+            providerCode: "context_length_exceeded"
+        ).userIssue(
+            providerHost: "api.example.com",
+            modelID: "provider/model"
+        )
+        try expect(
+            contextLimit.record.code == .postProcessingFailed,
+            "provider context limit is not misclassified as provider setup"
+        )
+        try expect(
+            contextLimit.record.context.postProcessingFailureReason == .contextBudgetExceeded,
+            "provider context limit identifies the cleanup context limit"
+        )
+        try expect(
+            contextLimit.record.recoveryAction == .none,
+            "provider context limit does not offer a futile retry"
+        )
+
+        let serverTimeout = PostProcessingError.requestFailed(
+            statusCode: 408,
+            providerCode: nil
+        ).userIssue(
+            providerHost: "api.example.com",
+            modelID: "provider/model"
+        )
+        try expect(
+            serverTimeout.record.code == .requestTimedOut,
+            "HTTP 408 maps to the timeout issue"
+        )
+        try expect(
+            serverTimeout.record.context.postProcessingFailureReason == .requestTimedOut,
+            "HTTP 408 records the timeout reason"
+        )
+        try expect(
+            serverTimeout.record.context.requestTimeoutSeconds == nil,
+            "HTTP 408 does not invent a client request limit"
+        )
     }
 
     private static func testCommandTimeoutUsesEditSpecificCopy() throws {

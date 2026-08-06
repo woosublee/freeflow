@@ -5,6 +5,7 @@ enum PostProcessingError: LocalizedError {
     case rateLimited(model: String, retryAfter: TimeInterval)
     case invalidResponse(String)
     case invalidInput(String)
+    case contextBudgetExceeded
     case emptyOutput
     case requestTimedOut(TimeInterval, modelID: String? = nil)
     case suspectedInstructionExecution
@@ -23,6 +24,8 @@ enum PostProcessingError: LocalizedError {
             return "Invalid post-processing response: \(details)"
         case .invalidInput(let details):
             return "Invalid post-processing input: \(details)"
+        case .contextBudgetExceeded:
+            return "Post-processing request exceeds the safe context budget"
         case .emptyOutput:
             return "Post-processing returned empty output"
         case .requestTimedOut(let seconds, _):
@@ -41,34 +44,84 @@ enum PostProcessingError: LocalizedError {
         return fallback
     }
 
+    private var userIssueCode: QuillUserIssueCode {
+        switch self {
+        case .requestFailed(let statusCode, let providerCode):
+            if ProviderDiagnosticCode.normalized(providerCode) == "context_length_exceeded" {
+                return .postProcessingFailed
+            }
+            switch statusCode {
+            case 400, 404, 415, 422:
+                return .providerConfigurationInvalid
+            case 401, 403:
+                return .authenticationFailed
+            case 408:
+                return .requestTimedOut
+            case 429:
+                return .postProcessingRateLimited
+            default:
+                return .postProcessingFailed
+            }
+        case .rateLimited:
+            return .postProcessingRateLimited
+        case .suspectedInstructionExecution, .outputRejected:
+            return .postProcessingGuardFallback
+        case .requestTimedOut:
+            return .requestTimedOut
+        case .invalidResponse, .invalidInput, .contextBudgetExceeded, .emptyOutput:
+            return .postProcessingFailed
+        }
+    }
+
+    private var postProcessingFailureReason: PostProcessingFailureReason? {
+        switch self {
+        case .requestTimedOut:
+            return .requestTimedOut
+        case .contextBudgetExceeded:
+            return .contextBudgetExceeded
+        case .emptyOutput:
+            return .emptyOutput
+        case .invalidResponse:
+            return .invalidResponse
+        case .requestFailed:
+            switch userIssueCode {
+            case .requestTimedOut:
+                return .requestTimedOut
+            case .postProcessingFailed:
+                return ProviderDiagnosticCode.normalized(requestFailureProviderCode)
+                    == "context_length_exceeded"
+                    ? .contextBudgetExceeded
+                    : .serviceRequestFailed
+            default:
+                return nil
+            }
+        case .rateLimited, .invalidInput, .suspectedInstructionExecution,
+             .outputRejected:
+            return nil
+        }
+    }
+
+    private var requestTimeoutSeconds: TimeInterval? {
+        if case .requestTimedOut(let seconds, _) = self {
+            return seconds
+        }
+        return nil
+    }
+
+    private var requestFailureProviderCode: String? {
+        if case .requestFailed(_, let providerCode) = self {
+            return providerCode
+        }
+        return nil
+    }
+
     func userIssue(
         providerHost: String?,
         modelID: String,
         localBackend: String? = nil,
         operation: QuillUserIssueOperation = .postProcessing
     ) -> QuillUserIssueError {
-        let code: QuillUserIssueCode
-        switch self {
-        case .requestFailed(let statusCode, _):
-            switch statusCode {
-            case 400, 404, 415, 422:
-                code = .providerConfigurationInvalid
-            case 401, 403:
-                code = .authenticationFailed
-            case 429:
-                code = .postProcessingRateLimited
-            default:
-                code = .postProcessingFailed
-            }
-        case .rateLimited:
-            code = .postProcessingRateLimited
-        case .suspectedInstructionExecution, .outputRejected:
-            code = .postProcessingGuardFallback
-        case .requestTimedOut:
-            code = .requestTimedOut
-        case .invalidResponse, .invalidInput, .emptyOutput:
-            code = .postProcessingFailed
-        }
+        let code = userIssueCode
         let statusCode: Int?
         if case .requestFailed(let status, _) = self {
             statusCode = status
@@ -82,9 +135,12 @@ enum PostProcessingError: LocalizedError {
                 context: QuillUserIssueContext(
                     httpStatus: statusCode,
                     providerHost: providerHost,
+                    providerCode: requestFailureProviderCode,
                     modelID: effectiveModelID(fallback: modelID),
                     localBackend: localBackend,
-                    operation: operation
+                    operation: operation,
+                    postProcessingFailureReason: postProcessingFailureReason,
+                    requestTimeoutSeconds: requestTimeoutSeconds
                 )
             ),
             privateDiagnostic: localizedDescription
@@ -847,7 +903,7 @@ Behavior:
             role: .postProcessing(inputReservation: 8_000)
         )
         guard let budget else {
-            throw PostProcessingError.invalidInput("Post-processing request exceeds the safe context budget")
+            throw PostProcessingError.contextBudgetExceeded
         }
 
         // JSON escaping can double an ASCII character (for example, `"` or
@@ -892,6 +948,8 @@ Behavior:
                 transcript: accepted,
                 prompt: prompts.joined(separator: "\n\n---\n\n")
             )
+        case .failure(.nonFillerEmpty):
+            throw PostProcessingError.emptyOutput
         case .failure(let failure):
             throw PostProcessingError.outputRejected(failure)
         }
@@ -1005,7 +1063,13 @@ Model: \(model)
             )
         }
 
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let responseObject: Any
+        do {
+            responseObject = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw PostProcessingError.invalidResponse("Response JSON could not be decoded")
+        }
+        guard let json = responseObject as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
               let message = firstChoice["message"] as? [String: Any],
@@ -1029,6 +1093,8 @@ Model: \(model)
         ) {
         case .success(let accepted):
             acceptedTranscript = accepted
+        case .failure(.nonFillerEmpty):
+            throw PostProcessingError.emptyOutput
         case .failure(let failure):
             throw PostProcessingError.outputRejected(failure)
         }
@@ -1254,7 +1320,13 @@ Model: \(model)
             )
         }
 
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let responseObject: Any
+        do {
+            responseObject = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw PostProcessingError.invalidResponse("Response JSON could not be decoded")
+        }
+        guard let json = responseObject as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
               let message = firstChoice["message"] as? [String: Any],

@@ -14,6 +14,9 @@ struct QuillUserIssueTests {
         try testCompactMessageAndSafeDetailsAreDeterministic(bundle: bundle)
         try testMeetingSummaryLanguageUnavailableAndProviderCodeDetails(bundle: bundle)
         try testMeetingSummaryFailureSubtypeUsesSafeLocalizedDetails(bundle: bundle)
+        try testPostProcessingFailureReasonUsesLocalizedCopyAndDetails(bundle: bundle)
+        try testPostProcessingDiagnosticFieldsRemainBackwardCompatible(bundle: bundle)
+        try testFractionalPostProcessingTimeoutIsNotTruncated(bundle: bundle)
         try testMeetingSummaryIssueActionResolver()
         print("QuillUserIssueTests passed")
     }
@@ -194,6 +197,140 @@ struct QuillUserIssueTests {
             legacy.meetingSummaryFailureSubtype == nil
                 && unknown.meetingSummaryFailureSubtype == nil,
             "legacy and unknown summary failure subtypes decode without discarding the issue"
+        )
+    }
+
+    private static func testPostProcessingFailureReasonUsesLocalizedCopyAndDetails(
+        bundle: Bundle
+    ) throws {
+        let emptyOutput = QuillUserIssueRecord(
+            code: .postProcessingFailed,
+            context: QuillUserIssueContext(
+                modelID: "qwen2.5-7b",
+                localBackend: "Local AI",
+                operation: .postProcessing,
+                postProcessingFailureReason: .emptyOutput
+            )
+        )
+        let english = emptyOutput.presentation(language: "en", bundle: bundle)
+        let korean = emptyOutput.presentation(language: "ko", bundle: bundle)
+
+        try expect(
+            english.title == "Transcript cleanup returned no text",
+            "empty cleanup output has a specific English title"
+        )
+        try expect(
+            korean.title == "전사문 정리 결과가 비어 있습니다",
+            "empty cleanup output has a specific Korean title"
+        )
+        try expect(
+            english.detailsRows.contains(
+                QuillUserIssueDetailsRow(
+                    label: "Failure reason",
+                    value: "Model returned no cleanup text"
+                )
+            ),
+            "empty cleanup output exposes a safe English reason"
+        )
+        try expect(
+            korean.detailsRows.contains(
+                QuillUserIssueDetailsRow(
+                    label: "실패 원인",
+                    value: "모델이 정리 결과를 반환하지 않았습니다"
+                )
+            ),
+            "empty cleanup output exposes a safe Korean reason"
+        )
+    }
+
+    private static func testPostProcessingDiagnosticFieldsRemainBackwardCompatible(
+        bundle: Bundle
+    ) throws {
+        let timeout = QuillUserIssueRecord(
+            code: .requestTimedOut,
+            context: QuillUserIssueContext(
+                modelID: "qwen2.5-7b",
+                localBackend: "Local AI",
+                operation: .postProcessing,
+                postProcessingFailureReason: .requestTimedOut,
+                requestTimeoutSeconds: 120
+            )
+        )
+        let english = timeout.presentation(language: "en", bundle: bundle)
+        let korean = timeout.presentation(language: "ko", bundle: bundle)
+
+        try expect(
+            english.detailsRows.contains(
+                QuillUserIssueDetailsRow(
+                    label: "Request timeout",
+                    value: "120 seconds"
+                )
+            ),
+            "cleanup timeout exposes the English effective timeout"
+        )
+        try expect(
+            korean.detailsRows.contains(
+                QuillUserIssueDetailsRow(
+                    label: "요청 제한 시간",
+                    value: "120초"
+                )
+            ),
+            "cleanup timeout exposes the Korean effective timeout"
+        )
+
+        let legacy = try JSONDecoder().decode(
+            QuillUserIssueContext.self,
+            from: Data(#"{"modelID":"legacy/model"}"#.utf8)
+        )
+        try expect(
+            legacy.postProcessingFailureReason == nil
+                && legacy.requestTimeoutSeconds == nil,
+            "legacy issue context omits new optional diagnostics"
+        )
+        let legacyPresentation = QuillUserIssueRecord(
+            code: .postProcessingFailed,
+            context: QuillUserIssueContext(
+                modelID: legacy.modelID,
+                operation: .postProcessing
+            )
+        ).presentation(language: "en", bundle: bundle)
+        try expect(
+            legacyPresentation.title == "Transcript cleanup was skipped",
+            "legacy cleanup issue keeps compatible generic copy"
+        )
+    }
+
+    private static func testFractionalPostProcessingTimeoutIsNotTruncated(
+        bundle: Bundle
+    ) throws {
+        let timeout = QuillUserIssueRecord(
+            code: .requestTimedOut,
+            context: QuillUserIssueContext(
+                operation: .postProcessing,
+                postProcessingFailureReason: .requestTimedOut,
+                requestTimeoutSeconds: 0.5
+            )
+        )
+        let english = timeout.presentation(language: "en", bundle: bundle)
+        let korean = timeout.presentation(language: "ko", bundle: bundle)
+
+        try expect(
+            english.detailsRows.contains(
+                QuillUserIssueDetailsRow(
+                    label: "Request timeout",
+                    value: "0.5 seconds"
+                )
+            ),
+            "fractional English timeout is not truncated"
+        )
+        try expect(
+            korean.detailsRows.contains(
+                QuillUserIssueDetailsRow(
+                    label: "요청 제한 시간",
+                    value: "0.5초"
+                )
+            ),
+            "fractional Korean timeout is not truncated"
         )
     }
 

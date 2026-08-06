@@ -187,6 +187,10 @@ struct QuillUserIssueUIContractTests {
             to: "private var inlineView: some View {"
         )
         try expect(bannerView.contains("dismissButton"), "banner style renders the dismiss control")
+        try expect(
+            bannerView.contains("detailsView"),
+            "banner style renders shared structured details"
+        )
         let fullView = block(
             issueView,
             from: "private var fullView: some View {",
@@ -195,10 +199,22 @@ struct QuillUserIssueUIContractTests {
         try expect(!fullView.contains("dismissButton"), "centered error card never renders a dismiss control")
         try expect(!fullView.contains("onDismiss"), "centered error card ignores onDismiss entirely")
 
+        try expect(
+            !noteBrowser.contains("private var shouldShowWarningBanner: Bool"),
+            "warning visibility does not calculate the presentation twice"
+        )
         let warningBannerUsage = block(
             noteBrowser,
-            from: "if let warningPresentation, !isWarningBannerDismissed {",
+            from: "if !isWarningBannerDismissed,",
             to: "NoteTextView("
+        )
+        try expect(
+            warningBannerUsage.contains("!appState.retryingItemIDs.contains(item.id)"),
+            "previous warning stays hidden while retranscription is in progress"
+        )
+        try expect(
+            warningBannerUsage.contains("let warningPresentation"),
+            "warning presentation is evaluated only after cheap visibility guards"
         )
         try expect(warningBannerUsage.contains("style: .warningBanner"), "sanity: this is the warning banner usage")
         try expect(warningBannerUsage.contains("onDismiss:"), "warning banner usage wires a dismiss handler")
@@ -225,8 +241,8 @@ struct QuillUserIssueUIContractTests {
             to: "private func copyRetryTranscriptToPasteboardIfNeeded"
         )
         try expect(
-            retryBody.contains("incrementNoteRetryGeneration(for: item.id)"),
-            "retry bumps the note's retry generation, invalidating stale dismissals"
+            retryBody.contains("incrementNoteRetryGeneration(for: snapshot.item.id)"),
+            "saved retry results invalidate stale dismissals"
         )
     }
 

@@ -24,7 +24,9 @@ struct PostProcessingBackendTests {
         try await testLeakedRawTranscriptionTemplateIsTreatedAsFailure()
         try await testStandaloneRawTranscriptionWordIsNotTreatedAsLeak()
         try await testDelimiterInjectionCannotReplaceTheRawTranscript()
-        try await testMeaningfulLongTranscriptReturningEmptyIsRejected()
+        try await testMeaningfulLongTranscriptReturningEmptyIsReportedAsEmptyOutput()
+        try await testMalformedCleanupResponseUsesInvalidResponseIssue()
+        try await testOversizedStaticCleanupPromptExplainsTheActualLimit()
         print("PostProcessingBackendTests passed")
     }
 
@@ -265,6 +267,26 @@ struct PostProcessingBackendTests {
                 try expect(
                     modelID == LocalAIModelCatalog.quality.id,
                     "Local timeout reports the endpoint model"
+                )
+                let issue = service.userIssue(for: error)
+                let presentation = issue.record.presentation(language: "en")
+                try expect(
+                    presentation.detailsRows.contains(
+                        QuillUserIssueDetailsRow(
+                            label: "Request timeout",
+                            value: "120 seconds"
+                        )
+                    ),
+                    "Local timeout presentation includes its effective limit"
+                )
+                try expect(
+                    presentation.detailsRows.contains(
+                        QuillUserIssueDetailsRow(
+                            label: "Model",
+                            value: LocalAIModelCatalog.quality.id
+                        )
+                    ),
+                    "Local timeout presentation includes the model that timed out"
                 )
             }
         }
@@ -620,17 +642,97 @@ struct PostProcessingBackendTests {
         try expect(!userMessage.contains("<<<RAW_TRANSCRIPTION"), "request omits raw transcription delimiter")
     }
 
-    private static func testMeaningfulLongTranscriptReturningEmptyIsRejected() async throws {
+    private static func testMeaningfulLongTranscriptReturningEmptyIsReportedAsEmptyOutput() async throws {
         let rawTranscript = String(repeating: "This is meaningful transcript content. ", count: 250)
         let service = makeLocalService { request in
             try successResponse(request: request, content: "EMPTY")
         }
 
-        try await expectFailure("meaningful transcript replaced with EMPTY") {
+        do {
             _ = try await service.postProcess(
                 transcript: rawTranscript,
                 context: testContext,
                 customVocabulary: ""
+            )
+            throw PostProcessingBackendTestFailure(
+                "Expected meaningful empty cleanup result to fail"
+            )
+        } catch let error as PostProcessingError {
+            guard case .emptyOutput = error else {
+                throw PostProcessingBackendTestFailure(
+                    "Expected empty cleanup output, got \(error)"
+                )
+            }
+        }
+    }
+
+    private static func testMalformedCleanupResponseUsesInvalidResponseIssue() async throws {
+        let service = makeCloudService(
+            cloudBaseURL: "https://api.example.com/openai/v1/\(UUID().uuidString)"
+        ) { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (Data("not-json".utf8), response)
+        }
+
+        do {
+            _ = try await service.postProcess(
+                transcript: "Meaningful transcript.",
+                context: testContext,
+                customVocabulary: ""
+            )
+            throw PostProcessingBackendTestFailure(
+                "Expected malformed cleanup response to fail"
+            )
+        } catch let error as PostProcessingError {
+            guard case .invalidResponse = error else {
+                throw PostProcessingBackendTestFailure(
+                    "Expected invalid cleanup response, got \(error)"
+                )
+            }
+            let presentation = service.userIssue(for: error).record.presentation(language: "en")
+            try expect(
+                presentation.title == "Transcript cleanup response could not be read",
+                "malformed cleanup response has a specific user-facing explanation"
+            )
+        }
+    }
+
+    private static func testOversizedStaticCleanupPromptExplainsTheActualLimit() async throws {
+        let service = makeLocalService { request in
+            try successResponse(request: request, content: "unused")
+        }
+        let oversizedPrompt = String(repeating: "instruction ", count: 2_000)
+
+        do {
+            _ = try await service.postProcess(
+                transcript: "Short transcript.",
+                context: testContext,
+                customVocabulary: "",
+                customSystemPrompt: oversizedPrompt
+            )
+            throw PostProcessingBackendTestFailure(
+                "Expected oversized static cleanup prompt to fail"
+            )
+        } catch let error as PostProcessingError {
+            guard case .contextBudgetExceeded = error else {
+                throw PostProcessingBackendTestFailure(
+                    "Expected cleanup context budget failure, got \(error)"
+                )
+            }
+            let issue = service.userIssue(for: error)
+            let presentation = issue.record.presentation(language: "en")
+            try expect(
+                presentation.title == "Transcript cleanup instructions are too large",
+                "static cleanup prompt failure does not blame the transcript"
+            )
+            try expect(
+                issue.record.recoveryAction == .none,
+                "static cleanup prompt failure does not offer a futile retry"
             )
         }
     }
@@ -688,12 +790,13 @@ struct PostProcessingBackendTests {
     }
 
     private static func makeCloudService(
+        cloudBaseURL: String = "https://api.example.com/openai/v1",
         transport: @escaping PostProcessingService.Transport
     ) -> PostProcessingService {
         PostProcessingService(
             backendExecutor: AIProcessingBackendExecutor(
                 choice: .cloud(modelID: "primary/model"),
-                cloudBaseURL: "https://api.example.com/openai/v1",
+                cloudBaseURL: cloudBaseURL,
                 cloudAPIKey: "cloud-secret"
             ),
             cloudFallbackModelID: nil,

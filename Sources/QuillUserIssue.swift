@@ -59,6 +59,17 @@ enum MeetingSummaryFailureSubtype: String, Codable, Equatable, Sendable {
     case languageMismatch
 }
 
+/// A finite, source-text-free explanation for a cleanup failure.
+/// Unlike the underlying transport or model error, this is safe to persist
+/// and display in history and warning-banner details.
+enum PostProcessingFailureReason: String, Codable, Equatable, Sendable {
+    case requestTimedOut
+    case contextBudgetExceeded
+    case emptyOutput
+    case invalidResponse
+    case serviceRequestFailed
+}
+
 enum ProviderDiagnosticCode {
     private static let allowedCodes: Set<String> = [
         "context_length_exceeded",
@@ -97,6 +108,8 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
         case retryExhausted
         case meetingSummaryFailureSubtype
         case operation
+        case postProcessingFailureReason
+        case requestTimeoutSeconds
     }
 
     let httpStatus: Int?
@@ -108,6 +121,8 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
     let retryExhausted: Bool?
     let meetingSummaryFailureSubtype: MeetingSummaryFailureSubtype?
     let operation: QuillUserIssueOperation?
+    let postProcessingFailureReason: PostProcessingFailureReason?
+    let requestTimeoutSeconds: TimeInterval?
 
     init(
         httpStatus: Int? = nil,
@@ -118,7 +133,9 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
         processExitCode: Int32? = nil,
         retryExhausted: Bool? = nil,
         meetingSummaryFailureSubtype: MeetingSummaryFailureSubtype? = nil,
-        operation: QuillUserIssueOperation? = nil
+        operation: QuillUserIssueOperation? = nil,
+        postProcessingFailureReason: PostProcessingFailureReason? = nil,
+        requestTimeoutSeconds: TimeInterval? = nil
     ) {
         self.httpStatus = httpStatus
         self.providerHost = providerHost
@@ -129,6 +146,8 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
         self.retryExhausted = retryExhausted
         self.meetingSummaryFailureSubtype = meetingSummaryFailureSubtype
         self.operation = operation
+        self.postProcessingFailureReason = postProcessingFailureReason
+        self.requestTimeoutSeconds = requestTimeoutSeconds
     }
 
     init(from decoder: Decoder) throws {
@@ -148,6 +167,14 @@ struct QuillUserIssueContext: Codable, Equatable, Sendable {
             operation: try? container.decodeIfPresent(
                 QuillUserIssueOperation.self,
                 forKey: .operation
+            ),
+            postProcessingFailureReason: try? container.decodeIfPresent(
+                PostProcessingFailureReason.self,
+                forKey: .postProcessingFailureReason
+            ),
+            requestTimeoutSeconds: try? container.decodeIfPresent(
+                TimeInterval.self,
+                forKey: .requestTimeoutSeconds
             )
         )
     }
@@ -230,6 +257,10 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
     }
 
     var recoveryAction: QuillUserRecoveryAction {
+        if context.operation == .postProcessing,
+           context.postProcessingFailureReason == .contextBudgetExceeded {
+            return .none
+        }
         switch code {
         case .authenticationFailed, .quotaExceeded,
              .providerConfigurationInvalid:
@@ -263,7 +294,7 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
         language: String = preferredLocalizedStringLanguage(),
         bundle: Bundle = .main
     ) -> QuillUserIssuePresentation {
-        let copy = code.copy(for: context.operation)
+        let copy = code.copy(for: context)
         let title = localizedCatalogString(
             copy.titleKey,
             language: language,
@@ -525,7 +556,7 @@ private extension QuillUserIssueCode {
     }
 
     func copy(
-        for operation: QuillUserIssueOperation?
+        for context: QuillUserIssueContext
     ) -> QuillUserIssueCopy {
         switch self {
         case .networkUnavailable:
@@ -535,7 +566,7 @@ private extension QuillUserIssueCode {
                 suggestionKey: "Check your internet connection, then try again."
             )
         case .requestTimedOut:
-            switch operation {
+            switch context.operation {
             case .postProcessing:
                 return QuillUserIssueCopy(
                     titleKey: "Transcript cleanup timed out",
@@ -676,11 +707,45 @@ private extension QuillUserIssueCode {
                 suggestionKey: "Check the selected input and permissions, then try again."
             )
         case .postProcessingFailed:
-            return QuillUserIssueCopy(
-                titleKey: "Transcript cleanup was skipped",
-                bodyKey: "Quill kept the original transcript because cleanup could not complete.",
-                suggestionKey: "You can use the transcript as-is or try cleanup again later."
-            )
+            guard context.operation == .postProcessing else {
+                return QuillUserIssueCopy(
+                    titleKey: "Transcript cleanup was skipped",
+                    bodyKey: "Quill kept the original transcript because cleanup could not complete.",
+                    suggestionKey: "You can use the transcript as-is or try cleanup again later."
+                )
+            }
+            switch context.postProcessingFailureReason {
+            case .contextBudgetExceeded:
+                return QuillUserIssueCopy(
+                    titleKey: "Transcript cleanup instructions are too large",
+                    bodyKey: "Quill kept the original transcript because the cleanup instructions or context could not fit safely in the selected model.",
+                    suggestionKey: "Review the cleanup prompt, context, and vocabulary before trying again."
+                )
+            case .emptyOutput:
+                return QuillUserIssueCopy(
+                    titleKey: "Transcript cleanup returned no text",
+                    bodyKey: "Quill kept the original transcript because the model returned no cleanup text.",
+                    suggestionKey: "Use the original transcript or try cleanup again later."
+                )
+            case .invalidResponse:
+                return QuillUserIssueCopy(
+                    titleKey: "Transcript cleanup response could not be read",
+                    bodyKey: "Quill kept the original transcript because the model response was not usable.",
+                    suggestionKey: "Use the original transcript or try cleanup again later."
+                )
+            case .serviceRequestFailed:
+                return QuillUserIssueCopy(
+                    titleKey: "Transcript cleanup request failed",
+                    bodyKey: "Quill kept the original transcript because the cleanup service rejected or could not complete the request.",
+                    suggestionKey: "Use the original transcript or try cleanup again later."
+                )
+            case .requestTimedOut, nil:
+                return QuillUserIssueCopy(
+                    titleKey: "Transcript cleanup was skipped",
+                    bodyKey: "Quill kept the original transcript because cleanup could not complete.",
+                    suggestionKey: "You can use the transcript as-is or try cleanup again later."
+                )
+            }
         case .postProcessingRateLimited:
             return QuillUserIssueCopy(
                 titleKey: "Transcript cleanup is temporarily limited",
@@ -784,6 +849,25 @@ private extension MeetingSummaryFailureSubtype {
     }
 }
 
+private extension PostProcessingFailureReason {
+    func localizedDetailsValue(language: String, bundle: Bundle) -> String {
+        let key: String
+        switch self {
+        case .requestTimedOut:
+            key = "Request timed out"
+        case .contextBudgetExceeded:
+            key = "Cleanup instructions or context are too large"
+        case .emptyOutput:
+            key = "Model returned no cleanup text"
+        case .invalidResponse:
+            key = "Model response could not be read"
+        case .serviceRequestFailed:
+            key = "Cleanup service request failed"
+        }
+        return localizedCatalogString(key, language: language, bundle: bundle)
+    }
+}
+
 private extension QuillUserIssueContext {
     func detailsRows(
         for issueCode: QuillUserIssueCode,
@@ -822,6 +906,41 @@ private extension QuillUserIssueContext {
                     value: modelID
                 )
             )
+        }
+        if operation == .postProcessing {
+            rows.append(
+                QuillUserIssueDetailsRow(
+                    label: localizedCatalogString("Operation", language: language, bundle: bundle),
+                    value: localizedCatalogString("Transcript cleanup", language: language, bundle: bundle)
+                )
+            )
+            if let postProcessingFailureReason {
+                rows.append(
+                    QuillUserIssueDetailsRow(
+                        label: localizedCatalogString("Failure reason", language: language, bundle: bundle),
+                        value: postProcessingFailureReason.localizedDetailsValue(
+                            language: language,
+                            bundle: bundle
+                        )
+                    )
+                )
+            }
+            if let requestTimeoutSeconds,
+               requestTimeoutSeconds.isFinite,
+               requestTimeoutSeconds > 0 {
+                let timeoutValue = localizedCatalogFormat(
+                    "%g seconds",
+                    requestTimeoutSeconds,
+                    language: language,
+                    bundle: bundle
+                )
+                rows.append(
+                    QuillUserIssueDetailsRow(
+                        label: localizedCatalogString("Request timeout", language: language, bundle: bundle),
+                        value: timeoutValue
+                    )
+                )
+            }
         }
         if issueCode == .meetingSummaryInvalidResponse,
            let meetingSummaryFailureSubtype {
