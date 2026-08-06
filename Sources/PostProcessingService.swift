@@ -1098,7 +1098,10 @@ Model: \(model)
         case .failure(let failure):
             throw PostProcessingError.outputRejected(failure)
         }
-        guard !PostProcessingOutputValidator.containsPostProcessingPromptLeak(acceptedTranscript) else {
+        guard !PostProcessingOutputValidator.containsPostProcessingPromptLeak(
+            output: acceptedTranscript,
+            source: transcript
+        ) else {
             throw PostProcessingError.outputRejected(.promptLeak)
         }
         if instructionExecutionGuardEnabled && appearsToHaveExecutedInstruction(
