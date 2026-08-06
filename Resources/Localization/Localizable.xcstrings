@@ -11653,6 +11653,294 @@
         }
       }
     },
+    "Transcript cleanup instructions are too large": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Transcript cleanup instructions are too large"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "전사문 정리 지침 또는 문맥이 너무 큽니다"
+          }
+        }
+      }
+    },
+    "Quill kept the original transcript because the cleanup instructions or context could not fit safely in the selected model.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill kept the original transcript because the cleanup instructions or context could not fit safely in the selected model."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "정리 지침 또는 문맥이 선택한 모델에 안전하게 들어가지 않아 Quill이 원본 전사문을 유지했습니다."
+          }
+        }
+      }
+    },
+    "Review the cleanup prompt, context, and vocabulary before trying again.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review the cleanup prompt, context, and vocabulary before trying again."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다시 시도하기 전에 정리 프롬프트, 문맥, 사용자 지정 어휘를 검토하세요."
+          }
+        }
+      }
+    },
+    "Transcript cleanup returned no text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Transcript cleanup returned no text"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "전사문 정리 결과가 비어 있습니다"
+          }
+        }
+      }
+    },
+    "Quill kept the original transcript because the model returned no cleanup text.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill kept the original transcript because the model returned no cleanup text."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "모델이 사용할 수 있는 정리 결과를 반환하지 않아 Quill이 원본 전사문을 유지했습니다."
+          }
+        }
+      }
+    },
+    "Transcript cleanup response could not be read": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Transcript cleanup response could not be read"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "전사문 정리 응답을 읽을 수 없습니다"
+          }
+        }
+      }
+    },
+    "Quill kept the original transcript because the model response was not usable.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill kept the original transcript because the model response was not usable."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "모델 응답을 사용할 수 없어 Quill이 원본 전사문을 유지했습니다."
+          }
+        }
+      }
+    },
+    "Transcript cleanup request failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Transcript cleanup request failed"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "전사문 정리 요청에 실패했습니다"
+          }
+        }
+      }
+    },
+    "Quill kept the original transcript because the cleanup service rejected or could not complete the request.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill kept the original transcript because the cleanup service rejected or could not complete the request."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "정리 서비스가 요청을 처리하지 못해 Quill이 원본 전사문을 유지했습니다."
+          }
+        }
+      }
+    },
+    "Operation": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Operation"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "작업"
+          }
+        }
+      }
+    },
+    "Transcript cleanup": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Transcript cleanup"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "전사문 정리"
+          }
+        }
+      }
+    },
+    "Request timeout": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request timeout"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "요청 제한 시간"
+          }
+        }
+      }
+    },
+    "%g seconds": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%g seconds"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%g초"
+          }
+        }
+      }
+    },
+    "Request timed out": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request timed out"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "요청 시간이 초과되었습니다"
+          }
+        }
+      }
+    },
+    "Cleanup instructions or context are too large": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cleanup instructions or context are too large"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "정리 지침 또는 문맥이 너무 큽니다"
+          }
+        }
+      }
+    },
+    "Model returned no cleanup text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Model returned no cleanup text"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "모델이 정리 결과를 반환하지 않았습니다"
+          }
+        }
+      }
+    },
+    "Model response could not be read": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Model response could not be read"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "모델 응답을 읽을 수 없습니다"
+          }
+        }
+      }
+    },
+    "Cleanup service request failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cleanup service request failed"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "정리 서비스 요청에 실패했습니다"
+          }
+        }
+      }
+    },
     "Transcript cleanup was skipped": {
       "localizations": {
         "en": {

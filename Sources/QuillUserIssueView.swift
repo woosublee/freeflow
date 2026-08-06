@@ -57,23 +57,26 @@ struct QuillUserIssueView: View {
     }
 
     private var bannerView: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: iconName)
-                .foregroundStyle(accentColor)
-                .padding(.top, 1)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: iconName)
+                    .foregroundStyle(accentColor)
+                    .padding(.top, 1)
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(presentation.title)
-                    .font(.caption.weight(.semibold))
-                Text(presentation.body)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(presentation.title)
+                        .font(.caption.weight(.semibold))
+                    Text(presentation.body)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+                actionButton
+                dismissButton
             }
-
-            Spacer(minLength: 8)
-            actionButton
-            dismissButton
+            detailsView
         }
         .padding(10)
         .background(

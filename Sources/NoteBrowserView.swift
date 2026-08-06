@@ -1492,7 +1492,6 @@ private struct NoteDetailView: View {
         guard let warningBannerCode else { return false }
         return appState.isWarningBannerDismissed(noteID: item.id, code: warningBannerCode)
     }
-
     private var suggestedCalendarTitle: String? {
         guard item.customTitle == nil,
               item.calendarMatch?.titleState == .suggested else {
@@ -1846,7 +1845,9 @@ private struct NoteDetailView: View {
             emptyContentState
         } else {
             VStack(spacing: 0) {
-                if let warningPresentation, !isWarningBannerDismissed {
+                if !isWarningBannerDismissed,
+                   !appState.retryingItemIDs.contains(item.id),
+                   let warningPresentation {
                     QuillUserIssueView(
                         presentation: warningPresentation,
                         style: .warningBanner,

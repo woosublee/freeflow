@@ -9,6 +9,7 @@ struct AppStateUserIssueLifecycleSourceTests {
         )
 
         try testImportAndRetryPersistVersionedIssues(source)
+        try testRetryInvalidatesWarningsOnlyAfterSavingAReplacement(source)
         try testStoppedRecordingPersistsAndPresentsOneIssue(source)
         try testPostProcessingFallbackPersistsWarningRecord(source)
         try testCorePreparationAndSaveFailuresUseSafePresentation(source)
@@ -35,6 +36,57 @@ struct AppStateUserIssueLifecycleSourceTests {
         try expect(importFlow.contains("processingStatus: issue.persistedStatus"), "import persists v1 issue")
         try expect(retryFlow.contains("let issue = self.userIssue("), "retry uses the same classifier")
         try expect(retryFlow.contains("postProcessingStatus: issue.persistedStatus"), "retry persists v1 issue")
+    }
+
+    private static func testRetryInvalidatesWarningsOnlyAfterSavingAReplacement(
+        _ source: String
+    ) throws {
+        let retryFlow = block(
+            source,
+            from: "func retryTranscription(item: PipelineHistoryItem)",
+            to: "private func copyRetryTranscriptToPasteboardIfNeeded"
+        )
+        guard let update = retryFlow.range(
+            of: "try self.pipelineHistoryStore.update(updatedItem, requiresDurableStore: true)"
+        ), let increment = retryFlow.range(
+            of: "self.incrementNoteRetryGeneration(for: snapshot.item.id)"
+        ) else {
+            throw TestFailure("retry persists a replacement before invalidating warning dismissal")
+        }
+        try expect(
+            update.lowerBound < increment.lowerBound,
+            "retry keeps an old dismissal when saving the replacement fails"
+        )
+
+        let resumedRetry = block(
+            source,
+            from: "private func resumeCloudTranscriptionAfterLaunch(",
+            to: "@MainActor\n    private func installCloudTranscriptionTask"
+        )
+        try expect(
+            resumedRetry.contains("retryingItemIDs.insert(item.id)"),
+            "resumed cloud retry uses the Note Browser item identifier"
+        )
+        guard let resumedUpdate = resumedRetry.range(
+            of: "try pipelineHistoryStore.update(updated)"
+        ), let resumedIncrement = resumedRetry.range(
+            of: "incrementNoteRetryGeneration(for: item.id)"
+        ) else {
+            throw TestFailure("resumed retry persists a replacement before invalidating warning dismissal")
+        }
+        try expect(
+            resumedUpdate.lowerBound < resumedIncrement.lowerBound,
+            "resumed retry keeps an old dismissal when saving the replacement fails"
+        )
+        let finishCloudJob = block(
+            source,
+            from: "private func finishCloudTranscriptionJob(",
+            to: "// 라이브 전사 시작 시 Note Browser에 즉시 표시될 예비 노트 생성"
+        )
+        try expect(
+            finishCloudJob.contains("retryingItemIDs.remove(historyID)"),
+            "finished cloud retry clears warning suppression"
+        )
     }
 
     private static func testStoppedRecordingPersistsAndPresentsOneIssue(
