@@ -92,7 +92,7 @@ struct SpokenLanguageResolver {
         )
     }
 
-    private static func supportedCode(_ code: String?) -> String? {
+    static func supportedCode(_ code: String?) -> String? {
         let normalized = code?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""

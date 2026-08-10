@@ -47,6 +47,7 @@ struct PromptsSettingsUIContractTests {
             "@State private var customContextPromptInput: String = \"\"",
             "PostProcessingService.defaultSystemPrompt",
             "AppContextService.defaultContextPrompt",
+            "Quill always adds transcript-preservation rules and automatic short or long cleanup instructions after this prompt.",
             "appState.customSystemPrompt = trimmed",
             "appState.customSystemPromptLastModified = today",
             "appState.customContextPrompt = trimmed",

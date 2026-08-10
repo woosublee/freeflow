@@ -3005,6 +3005,10 @@ struct PromptsSettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            Text("Quill always adds transcript-preservation rules and automatic short or long cleanup instructions after this prompt.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             if hasNewerDefault {
                 HStack(spacing: 8) {
                     Image(systemName: "arrow.triangle.2.circlepath")

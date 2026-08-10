@@ -7,6 +7,10 @@ struct PostProcessingOutputValidatorTests {
     static func main() throws {
         try testMeaningfulTranscriptCannotBecomeEmptySentinel()
         try testKoreanOutputRejectsChineseReplacement()
+        try testAutomaticKoreanSourceRejectsEnglishReplacement()
+        try testAutomaticKoreanSourceAcceptsKoreanOutput()
+        try testExplicitOutputLanguageOverridesSourceLanguage()
+        try testProtectedSyntaxOnlyOutputIsAccepted()
         try testProtectedFlagsAndPathsMustSurvive()
         try testProtectedEmailDateAndNumericFactsMustSurvive()
         try testPromptTemplateLeakIsRejected()
@@ -40,6 +44,56 @@ struct PostProcessingOutputValidatorTests {
         )
 
         try expectFailure(result, equals: .languageMismatch)
+    }
+
+    private static func testAutomaticKoreanSourceRejectsEnglishReplacement() throws {
+        let result = PostProcessingOutputValidator().validate(
+            source: "회의에서 다음 주 화요일에 제품을 출시하기로 결정했습니다.",
+            output: "The team decided to ship the product next Tuesday.",
+            outputLanguage: "",
+            expectedSourceLanguage: "ko",
+            vocabulary: []
+        )
+
+        try expectFailure(result, equals: .languageMismatch)
+    }
+
+    private static func testAutomaticKoreanSourceAcceptsKoreanOutput() throws {
+        let output = "회의에서 다음 주 화요일에 제품을 출시하기로 결정했습니다."
+        let result = PostProcessingOutputValidator().validate(
+            source: output,
+            output: output,
+            outputLanguage: "",
+            expectedSourceLanguage: "ko",
+            vocabulary: []
+        )
+
+        try expectSuccess(result, equals: output)
+    }
+
+    private static func testExplicitOutputLanguageOverridesSourceLanguage() throws {
+        let output = "The team decided to ship the product next Tuesday."
+        let result = PostProcessingOutputValidator().validate(
+            source: "회의에서 다음 주 화요일에 제품을 출시하기로 결정했습니다.",
+            output: output,
+            outputLanguage: "English",
+            expectedSourceLanguage: "ko",
+            vocabulary: []
+        )
+
+        try expectSuccess(result, equals: output)
+    }
+
+    private static func testProtectedSyntaxOnlyOutputIsAccepted() throws {
+        let output = "--dry-run /tmp/report.json"
+        let result = PostProcessingOutputValidator().validate(
+            source: output,
+            output: output,
+            outputLanguage: "English",
+            vocabulary: []
+        )
+
+        try expectSuccess(result, equals: output)
     }
 
     private static func testProtectedFlagsAndPathsMustSurvive() throws {
@@ -258,6 +312,24 @@ struct PostProcessingOutputValidatorTests {
         )
 
         try expectFailure(result, equals: .disproportionateCollapse)
+    }
+
+    private static func expectSuccess(
+        _ result: Result<String, AIValidationFailure>,
+        equals expected: String
+    ) throws {
+        switch result {
+        case .success(let output):
+            guard output == expected else {
+                throw PostProcessingOutputValidatorTestFailure(
+                    "Expected \(expected), got \(output)"
+                )
+            }
+        case .failure(let failure):
+            throw PostProcessingOutputValidatorTestFailure(
+                "Expected success, got \(failure)"
+            )
+        }
     }
 
     private static func expectFailure(

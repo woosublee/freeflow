@@ -52,6 +52,7 @@ struct PostProcessingOutputValidator {
         source: String,
         output: String,
         outputLanguage: String,
+        expectedSourceLanguage: String? = nil,
         vocabulary: [String]
     ) -> Result<String, AIValidationFailure> {
         let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -64,20 +65,31 @@ struct PostProcessingOutputValidator {
         ) {
             return .failure(.promptLeak)
         }
-        if protectedAtoms(from: source, vocabulary: vocabulary).contains(where: {
-            !trimmedOutput.contains($0)
-        }) {
+
+        let sourceProtectedAtoms = ProtectedAtomScanner.atoms(
+            from: source,
+            vocabulary: vocabulary
+        )
+        if sourceProtectedAtoms.contains(where: { !trimmedOutput.contains($0) }) {
             return .failure(.protectedAtomMissing)
         }
 
-        switch AIOutputLanguageValidator(outputLanguage: outputLanguage)
-            .validate(generatedProse: trimmedOutput) {
-        case .mismatch:
-            return .failure(.languageMismatch)
-        case .uncertain:
-            return .failure(.languageUncertain)
-        case .accepted, .notRequested:
-            break
+        let sourceProse = ProtectedAtomScanner.removingAtoms(
+            from: source,
+            atoms: sourceProtectedAtoms
+        )
+        if sourceProse.rangeOfCharacter(from: .letters) != nil {
+            switch AIOutputLanguageValidator(
+                outputLanguage: outputLanguage,
+                expectedSourceLanguage: expectedSourceLanguage
+            ).validate(generatedProse: trimmedOutput) {
+            case .mismatch:
+                return .failure(.languageMismatch)
+            case .uncertain:
+                return .failure(.languageUncertain)
+            case .accepted, .notRequested:
+                break
+            }
         }
 
         if isDisproportionatelyCollapsed(source: source, output: trimmedOutput) {
@@ -95,46 +107,6 @@ struct PostProcessingOutputValidator {
         return withoutFillers.rangeOfCharacter(
             from: CharacterSet.letters.union(.decimalDigits)
         ) != nil
-    }
-
-    private func protectedAtoms(
-        from source: String,
-        vocabulary: [String]
-    ) -> [String] {
-        let patterns = [
-            #"https?://\S+"#,
-            #"--[A-Za-z][A-Za-z0-9-]*"#,
-            #"(?<!\S)/(?:[^\s/]+/)*[^\s/]+"#,
-            #"\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_./:-]*\b"#,
-            #"`[^`]+`"#,
-            #"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"#,
-            #"(?<![A-Za-z0-9_./:-])\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?(?![A-Za-z0-9_./:-])"#,
-            #"(?<![A-Za-z0-9_/:.-])\d{4}-\d{2}-\d{2}(?![A-Za-z0-9_/:-]|\.\d)"#,
-            #"(?<![A-Za-z0-9_/:.-])(?:\d{4}|\d{1,2})/\d{1,2}/(?:\d{1,2}|\d{2,4})(?![A-Za-z0-9_/:-]|\.\d)"#,
-            #"(?<![A-Za-z0-9_./:-])[-+]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\d+)\s*(?:to|[-–—])\s*[-+]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\d+)(?![A-Za-z0-9_./:-]|\.\d)"#,
-            #"(?<![A-Za-z0-9_./:-])[-+]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\d+)(?![A-Za-z0-9_/:-]|\.\d)"#
-        ]
-        var atoms = patterns.flatMap { matches(of: $0, in: source) }
-        atoms.append(contentsOf: vocabulary.filter { term in
-            let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
-            return !trimmed.isEmpty && source.localizedCaseInsensitiveContains(trimmed)
-        })
-
-        var seen = Set<String>()
-        return atoms.filter { atom in
-            let normalized = atom.lowercased()
-            return seen.insert(normalized).inserted
-        }
-    }
-
-    private func matches(of pattern: String, in text: String) -> [String] {
-        guard let expression = try? NSRegularExpression(pattern: pattern) else {
-            return []
-        }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        return expression.matches(in: text, range: range).compactMap {
-            Range($0.range, in: text).map { String(text[$0]) }
-        }
     }
 
     private func isDisproportionatelyCollapsed(source: String, output: String) -> Bool {

@@ -2673,6 +2673,22 @@
         }
       }
     },
+    "Quill always adds transcript-preservation rules and automatic short or long cleanup instructions after this prompt.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill always adds transcript-preservation rules and automatic short or long cleanup instructions after this prompt."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill은 이 프롬프트 뒤에 전사문 보존 규칙과 자동 short 또는 long 정리 지침을 항상 추가합니다."
+          }
+        }
+      }
+    },
     "Quill can show calendar recording reminders before meetings so you can start recording from the notification.": {
       "localizations": {
         "en": {
