@@ -36,27 +36,41 @@ enum NoteTimestampFormatter {
         guard let startedAt = item.recordingStartedAt,
               let endedAt = item.recordingEndedAt,
               endedAt >= startedAt else {
-            return normalized(dateTimeStyle(locale: locale).format(item.timestamp))
+            return normalized(detailTimestampFormatter(locale: locale).string(from: item.timestamp))
         }
 
         return normalized(
-            Date.IntervalFormatStyle(date: .long, time: .shortened)
-                .locale(locale)
-                .format(startedAt..<endedAt)
+            detailIntervalFormatter(locale: locale).string(from: startedAt, to: endedAt)
         )
     }
 
     static func rowTimestamp(for item: PipelineHistoryItem, locale: Locale = .current) -> String {
         let timestamp = item.recordingStartedAt ?? item.timestamp
-        return normalized(rowTimestampStyle(locale: locale).format(timestamp))
+        return normalized(rowTimestampFormatter(locale: locale).string(from: timestamp))
     }
 
-    private static func dateTimeStyle(locale: Locale) -> Date.FormatStyle {
-        Date.FormatStyle(date: .long, time: .shortened).locale(locale)
+    private static func rowTimestampFormatter(locale: Locale) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.calendar = .current
+        formatter.setLocalizedDateFormatFromTemplate("MMMMdEEEjm")
+        return formatter
     }
 
-    private static func rowTimestampStyle(locale: Locale) -> Date.FormatStyle {
-        Date.FormatStyle().month(.wide).day().hour().minute().locale(locale)
+    private static func detailTimestampFormatter(locale: Locale) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.calendar = .current
+        formatter.setLocalizedDateFormatFromTemplate("yMMMdEEEjm")
+        return formatter
+    }
+
+    private static func detailIntervalFormatter(locale: Locale) -> DateIntervalFormatter {
+        let formatter = DateIntervalFormatter()
+        formatter.locale = locale
+        formatter.calendar = .current
+        formatter.dateTemplate = "yMMMdEEEjm"
+        return formatter
     }
 
     private static func normalized(_ value: String) -> String {
