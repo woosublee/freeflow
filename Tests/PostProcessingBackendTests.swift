@@ -30,6 +30,7 @@ struct PostProcessingBackendTests {
         try await testAutomaticKoreanTranscriptRejectsEnglishResponse()
         try await testResolvedKoreanLanguageRejectsEnglishShortTranscript()
         try await testChunkedKoreanTranscriptRejectsEnglishReplacement()
+        try await testChunkedKoreanTranscriptRejectsMinorityEnglishReplacement()
         try await testChunkedMixedLanguageTranscriptPreservesEnglishParagraph()
         try testFinalPromptLeakGuardUsesValidatorDetector()
         try await testStandaloneRawTranscriptionWordIsNotTreatedAsLeak()
@@ -825,11 +826,50 @@ struct PostProcessingBackendTests {
         }
     }
 
+    private static func testChunkedKoreanTranscriptRejectsMinorityEnglishReplacement() async throws {
+        let marker = "언어불일치확인문단"
+        let koreanParagraph = "회의에서 제품 출시 일정과 품질 점검 절차를 다시 검토하고 관련 부서에 변경 사항을 공유하기로 했습니다."
+        let source = "\(String(repeating: "\(koreanParagraph)\n\n", count: 4))\(marker) 이 문단도 원래 언어인 한국어로 유지해야 합니다."
+        let recorder = PostProcessingRequestRecorder()
+        let service = makeLocalService { request in
+            recorder.record(request)
+            let chunk = try transcriptFromPostProcessingRequest(request)
+            let output = chunk.contains(marker)
+                ? "This paragraph was incorrectly translated into English."
+                : chunk
+            return try successResponse(request: request, content: output)
+        }
+        var receivedLanguageMismatch = false
+
+        do {
+            _ = try await service.postProcess(
+                transcript: source,
+                context: testContext,
+                customVocabulary: ""
+            )
+        } catch let error as PostProcessingError {
+            guard case .outputRejected(.languageMismatch) = error else {
+                throw PostProcessingBackendTestFailure(
+                    "Expected minority chunk language mismatch, got \(error)"
+                )
+            }
+            receivedLanguageMismatch = true
+        }
+
+        try expect(recorder.count() > 1, "minority translation scenario uses multiple chunks")
+        try expect(
+            receivedLanguageMismatch,
+            "Korean-majority output rejects an English replacement in one Korean chunk"
+        )
+    }
+
     private static func testChunkedMixedLanguageTranscriptPreservesEnglishParagraph() async throws {
         let koreanParagraph = "회의에서 다음 주 화요일에 제품을 출시하기로 결정했고, 담당자는 문서를 검토한 뒤 공지하기로 했습니다. 출시 전에 품질 점검과 롤백 절차를 다시 확인하고, 관련 부서에 일정 변경 사항을 공유하기로 했습니다."
         let source = "\(String(repeating: koreanParagraph, count: 10))\n\nPlease keep the release notes in English for the external partners."
+        let recorder = PostProcessingRequestRecorder()
         let service = makeLocalService { request in
-            try successResponse(
+            recorder.record(request)
+            return try successResponse(
                 request: request,
                 content: try transcriptFromPostProcessingRequest(request)
             )
@@ -838,9 +878,14 @@ struct PostProcessingBackendTests {
         let result = try await service.postProcess(
             transcript: source,
             context: testContext,
-            customVocabulary: ""
+            customVocabulary: "",
+            spokenLanguage: SpokenLanguageResolution(
+                languageCode: "ko",
+                source: .engineDetected
+            )
         )
 
+        try expect(recorder.count() > 1, "mixed-language transcript uses multiple chunks")
         try expect(
             result.transcript.contains("Please keep the release notes in English"),
             "chunked mixed-language transcript preserves its English paragraph"

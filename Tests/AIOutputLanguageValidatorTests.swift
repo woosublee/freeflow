@@ -11,6 +11,7 @@ struct AIOutputLanguageValidatorTests {
         try testAutomaticKoreanSourceLanguageRejectsEnglishOutput()
         try testLegacyAutomaticKoreanSourceLanguageRejectsEnglishOutput()
         try testKoreanSourceLanguageIsInferredForAutomaticOutput()
+        try testEnglishSourceLanguageIsInferredForAutomaticOutput()
         try testShortSourceDoesNotCreateLanguageExpectation()
         try testTranscriptInferredLanguageStillRequiresReliableSourceText()
         try testIdentifierHeavySourceDoesNotCreateLanguageExpectation()
@@ -87,6 +88,14 @@ struct AIOutputLanguageValidatorTests {
         )
 
         try expect(detectedLanguage == "ko", "Korean source language is inferred for automatic output")
+    }
+
+    private static func testEnglishSourceLanguageIsInferredForAutomaticOutput() throws {
+        let detectedLanguage = AIOutputLanguageValidator.inferredSourceLanguage(
+            for: "The team decided to ship the product next Tuesday after reviewing the release notes and rollback plan with the external partners."
+        )
+
+        try expect(detectedLanguage == "en", "English source language is inferred for automatic output")
     }
 
     private static func testShortSourceDoesNotCreateLanguageExpectation() throws {

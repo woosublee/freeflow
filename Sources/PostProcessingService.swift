@@ -955,12 +955,15 @@ Behavior:
             throw PostProcessingError.invalidInput("Transcript must not be empty")
         }
 
-        let chunkExpectedSourceLanguage = AIOutputLanguageValidator.isAutomaticOutputLanguage(
+        let automaticOutputLanguage = AIOutputLanguageValidator.isAutomaticOutputLanguage(
             outputLanguage
-        ) ? nil : expectedSourceLanguage
+        )
         var cleanedChunks: [String] = []
         var prompts: [String] = []
         for chunk in chunks {
+            let chunkExpectedSourceLanguage = automaticOutputLanguage
+                ? AIOutputLanguageValidator.inferredSourceLanguage(for: chunk.text)
+                : expectedSourceLanguage
             let result = try await processChunk(
                 transcript: chunk.text,
                 contextSummary: contextSummary,
