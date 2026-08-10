@@ -6,6 +6,8 @@ struct NoteListRowDisplayDataTests {
         testFormatsRowDate()
         testFormatsExplicitLocaleRowDates()
         testFormatsExplicitLocaleDetailTimestamps()
+        testFormatsEnglishWeekdayAndMonthStyles()
+        testKeepsCurrentCalendarWithLocaleSpecificTemplates()
         testFormatsJapaneseDetailTimestamp()
         testFormatsSameMorningRowDateStartTime()
         testFormatsMorningToAfternoonRowDateStartTime()
@@ -55,7 +57,7 @@ struct NoteListRowDisplayDataTests {
 
         let rowDate = NoteTimestampFormatter.rowTimestamp(for: item, locale: Locale(identifier: "ko_KR"))
 
-        assert(rowDate == "5월 5일 오전 9:00", "Unexpected row date: \(rowDate)")
+        assert(rowDate == "5월 5일 (월) 오전 9:00", "Unexpected row date: \(rowDate)")
     }
 
     private static func testFormatsExplicitLocaleRowDates() {
@@ -68,9 +70,11 @@ struct NoteListRowDisplayDataTests {
 
         let english = NoteTimestampFormatter.rowTimestamp(for: item, locale: Locale(identifier: "en_US"))
         let korean = NoteTimestampFormatter.rowTimestamp(for: item, locale: Locale(identifier: "ko_KR"))
+        let japanese = NoteTimestampFormatter.rowTimestamp(for: item, locale: Locale(identifier: "ja_JP"))
 
-        assert(english == "May 15 at 10:38 AM", "Unexpected English row date: \(english)")
-        assert(korean == "5월 15일 오전 10:38", "Unexpected Korean row date: \(korean)")
+        assert(english == "Fri, May 15 at 10:38 AM", "Unexpected English row date: \(english)")
+        assert(korean == "5월 15일 (금) 오전 10:38", "Unexpected Korean row date: \(korean)")
+        assert(japanese == "5月15日(金) 10:38", "Unexpected Japanese row date: \(japanese)")
     }
 
     private static func testFormatsExplicitLocaleDetailTimestamps() {
@@ -84,8 +88,49 @@ struct NoteListRowDisplayDataTests {
         let english = NoteTimestampFormatter.detailTimestamp(for: item, locale: Locale(identifier: "en_US"))
         let korean = NoteTimestampFormatter.detailTimestamp(for: item, locale: Locale(identifier: "ko_KR"))
 
-        assert(english == "May 15, 2026, 10:38 – 11:12 AM", "Unexpected English interval: \(english)")
-        assert(korean == "2026년 5월 15일 오전 10:38~11:12", "Unexpected Korean interval: \(korean)")
+        assert(english == "Fri, May 15, 2026, 10:38 – 11:12 AM", "Unexpected English interval: \(english)")
+        assert(korean == "2026년 5월 15일 (금) 오전 10:38~11:12", "Unexpected Korean interval: \(korean)")
+    }
+
+    private static func testFormatsEnglishWeekdayAndMonthStyles() {
+        let item = historyItem(
+            timestamp: date(year: 2026, month: 8, day: 10, hour: 11, minute: 12),
+            recordingStartedAt: date(year: 2026, month: 8, day: 10, hour: 10, minute: 0),
+            recordingEndedAt: date(year: 2026, month: 8, day: 10, hour: 11, minute: 12),
+            transcript: "English notes"
+        )
+        let locale = Locale(identifier: "en_US")
+
+        assert(
+            NoteTimestampFormatter.rowTimestamp(for: item, locale: locale)
+                == "Mon, August 10 at 10:00 AM"
+        )
+        assert(
+            NoteTimestampFormatter.detailTimestamp(for: item, locale: locale)
+                == "Mon, Aug 10, 2026, 10:00 – 11:12 AM"
+        )
+    }
+
+    private static func testKeepsCurrentCalendarWithLocaleSpecificTemplates() {
+        let item = historyItem(
+            timestamp: date(year: 2026, month: 8, day: 10, hour: 11, minute: 12),
+            recordingStartedAt: date(year: 2026, month: 8, day: 10, hour: 10, minute: 0),
+            recordingEndedAt: date(year: 2026, month: 8, day: 10, hour: 11, minute: 12),
+            transcript: "Calendar notes"
+        )
+        let locale = Locale(identifier: "ar_SA")
+
+        // The prior FormatStyle path retained Calendar.current despite this
+        // locale's default Islamic calendar. Adding a weekday must not rebase
+        // the stored recording date into a different calendar.
+        let legacyItem = historyItem(
+            timestamp: date(year: 2026, month: 8, day: 10, hour: 10, minute: 0),
+            transcript: "Legacy calendar notes"
+        )
+
+        assert(NoteTimestampFormatter.rowTimestamp(for: item, locale: locale).contains("أغسطس"))
+        assert(NoteTimestampFormatter.detailTimestamp(for: item, locale: locale).contains("أغسطس"))
+        assert(NoteTimestampFormatter.detailTimestamp(for: legacyItem, locale: locale).contains("أغسطس"))
     }
 
     private static func testFormatsJapaneseDetailTimestamp() {
@@ -98,7 +143,7 @@ struct NoteListRowDisplayDataTests {
 
         let japanese = NoteTimestampFormatter.detailTimestamp(for: item, locale: Locale(identifier: "ja_JP"))
 
-        assert(japanese == "2026年5月15日 10時38分～11時12分", "Unexpected Japanese interval: \(japanese)")
+        assert(japanese == "2026年5月15日(金) 10時38分～11時12分", "Unexpected Japanese interval: \(japanese)")
     }
 
     private static func testFormatsSameMorningRowDateStartTime() {
@@ -115,7 +160,7 @@ struct NoteListRowDisplayDataTests {
             locale: Locale(identifier: "ko_KR")
         )
 
-        assert(data.rowDate == "5월 15일 오전 10:38", "Unexpected row date: \(data.rowDate)")
+        assert(data.rowDate == "5월 15일 (금) 오전 10:38", "Unexpected row date: \(data.rowDate)")
     }
 
     private static func testFormatsMorningToAfternoonRowDateStartTime() {
@@ -132,7 +177,7 @@ struct NoteListRowDisplayDataTests {
             locale: Locale(identifier: "ko_KR")
         )
 
-        assert(data.rowDate == "5월 15일 오전 10:38", "Unexpected row date: \(data.rowDate)")
+        assert(data.rowDate == "5월 15일 (금) 오전 10:38", "Unexpected row date: \(data.rowDate)")
     }
 
     private static func testFormatsCrossDateRowDateStartTime() {
@@ -149,7 +194,7 @@ struct NoteListRowDisplayDataTests {
             locale: Locale(identifier: "ko_KR")
         )
 
-        assert(data.rowDate == "5월 15일 오후 11:40", "Unexpected row date: \(data.rowDate)")
+        assert(data.rowDate == "5월 15일 (금) 오후 11:40", "Unexpected row date: \(data.rowDate)")
     }
 
     private static func testFormatsSameMorningRecordingInterval() {
@@ -162,7 +207,7 @@ struct NoteListRowDisplayDataTests {
 
         let formatted = NoteTimestampFormatter.detailTimestamp(for: item, locale: Locale(identifier: "ko_KR"))
 
-        assert(formatted == "2026년 5월 15일 오전 10:38~11:12", "Unexpected interval: \(formatted)")
+        assert(formatted == "2026년 5월 15일 (금) 오전 10:38~11:12", "Unexpected interval: \(formatted)")
     }
 
     private static func testFormatsMorningToAfternoonRecordingInterval() {
@@ -175,7 +220,7 @@ struct NoteListRowDisplayDataTests {
 
         let formatted = NoteTimestampFormatter.detailTimestamp(for: item, locale: Locale(identifier: "ko_KR"))
 
-        assert(formatted == "2026년 5월 15일 오전 10:38 ~ 오후 12:12", "Unexpected interval: \(formatted)")
+        assert(formatted == "2026년 5월 15일 (금) 오전 10:38 ~ 오후 12:12", "Unexpected interval: \(formatted)")
     }
 
     private static func testFormatsSameAfternoonRecordingInterval() {
@@ -188,7 +233,7 @@ struct NoteListRowDisplayDataTests {
 
         let formatted = NoteTimestampFormatter.detailTimestamp(for: item, locale: Locale(identifier: "ko_KR"))
 
-        assert(formatted == "2026년 5월 15일 오후 1:05~2:22", "Unexpected interval: \(formatted)")
+        assert(formatted == "2026년 5월 15일 (금) 오후 1:05~2:22", "Unexpected interval: \(formatted)")
     }
 
     private static func testFormatsCrossDateRecordingInterval() {
@@ -201,7 +246,7 @@ struct NoteListRowDisplayDataTests {
 
         let formatted = NoteTimestampFormatter.detailTimestamp(for: item, locale: Locale(identifier: "ko_KR"))
 
-        assert(formatted == "2026년 5월 15일 오후 11:40 ~ 2026년 5월 16일 오전 12:10", "Unexpected interval: \(formatted)")
+        assert(formatted == "2026년 5월 15일 (금) 오후 11:40 ~ 2026년 5월 16일 (토) 오전 12:10", "Unexpected interval: \(formatted)")
     }
 
     private static func testUsesSingleTimestampWhenRecordingIntervalIsMissing() {
@@ -212,7 +257,7 @@ struct NoteListRowDisplayDataTests {
 
         let formatted = NoteTimestampFormatter.detailTimestamp(for: item, locale: Locale(identifier: "ko_KR"))
 
-        assert(formatted == "2026년 5월 15일 오전 10:38", "Unexpected timestamp: \(formatted)")
+        assert(formatted == "2026년 5월 15일 (금) 오전 10:38", "Unexpected timestamp: \(formatted)")
     }
 
     private static func testUsesItemCustomTitleAndContentPreview() {
