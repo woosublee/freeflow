@@ -8,6 +8,17 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.38] - 2026-08-10
+
+### Improved
+
+- Adapted transcript cleanup automatically for short dictation and long meeting transcripts while preserving the source structure, language, and mixed-language text.
+
+### Fixed
+
+- Kept the original transcript when automatic-language cleanup translates all or part of a reliably detected source-language chunk, including Local AI processing.
+- Preserved commands, paths, identifiers, URLs, email addresses, dates, and numeric facts when cleanup output is validated.
+
 ## [0.1.37] - 2026-08-06
 
 ### Fixed
