@@ -678,7 +678,9 @@ _test-transcription: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(FULL_SOURCE_TRANSC
 	@$(TEST_BUILD_DIR)/AIProcessingEnvelopeTests
 	@swiftc -parse-as-library Sources/LocalAITokenBudgeter.swift Tests/LocalAITokenBudgeterTests.swift -o $(TEST_BUILD_DIR)/LocalAITokenBudgeterTests
 	@$(TEST_BUILD_DIR)/LocalAITokenBudgeterTests
-	@swiftc -parse-as-library Sources/AIOutputLanguageValidator.swift Tests/AIOutputLanguageValidatorTests.swift -o $(TEST_BUILD_DIR)/AIOutputLanguageValidatorTests
+	@swiftc -parse-as-library Sources/TranscriptCleanupMode.swift Tests/TranscriptCleanupModeTests.swift -o $(TEST_BUILD_DIR)/TranscriptCleanupModeTests
+	@$(TEST_BUILD_DIR)/TranscriptCleanupModeTests
+	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/TranscriptionLanguage.swift Sources/SpokenLanguageResolution.swift Sources/ProtectedAtomScanner.swift Sources/AIOutputLanguageValidator.swift Sources/PostProcessingOutputValidator.swift Tests/AIOutputLanguageValidatorTests.swift -o $(TEST_BUILD_DIR)/AIOutputLanguageValidatorTests
 	@$(TEST_BUILD_DIR)/AIOutputLanguageValidatorTests
 	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/AIModelCapabilities.swift Sources/LocalAIModel.swift Sources/LocalAIDiagnostics.swift Sources/LocalAIServerProcess.swift Sources/LLMAPITransport.swift Sources/LocalAIServerManager.swift Tests/LocalAIServerManagerTests.swift -o $(TEST_BUILD_DIR)/LocalAIServerManagerTests
 	@$(TEST_BUILD_DIR)/LocalAIServerManagerTests

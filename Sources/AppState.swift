@@ -7437,6 +7437,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         customVocabulary: configuration.customVocabulary,
                         customSystemPrompt: configuration.customSystemPrompt,
                         outputLanguage: configuration.outputLanguage,
+                        spokenLanguage: transcription.spokenLanguage,
                         postProcessingEnabled: configuration.postProcessingEnabled
                     )
                     try Task.checkCancellation()
@@ -7640,6 +7641,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     customVocabulary: snapshot.customVocabulary,
                     customSystemPrompt: snapshot.customSystemPrompt,
                     outputLanguage: completion.outputLanguage,
+                    spokenLanguage: transcription.spokenLanguage,
                     postProcessingEnabled: completion.postProcessingEnabled
                 )
                 let transcriptFileName = snapshot.item.transcriptFileName == nil
@@ -9981,6 +9983,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         customVocabulary: String,
         customSystemPrompt: String,
         outputLanguage: String,
+        spokenLanguage: SpokenLanguageResolution,
         postProcessingEnabled: Bool
     ) async -> (
         finalTranscript: String,
@@ -10049,7 +10052,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 context: context,
                 customVocabulary: customVocabulary,
                 customSystemPrompt: customSystemPrompt,
-                outputLanguage: outputLanguage
+                outputLanguage: outputLanguage,
+                spokenLanguage: spokenLanguage
             )
             let outcome: TranscriptProcessingOutcome = result.skippedDueToCooldown
                 ? .postProcessingSkippedCooldown
@@ -10184,6 +10188,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             customVocabulary: customVocabulary,
             customSystemPrompt: customSystemPrompt,
             outputLanguage: outputLanguage,
+            spokenLanguage: transcription.spokenLanguage,
             postProcessingEnabled: postProcessingEnabled
         )
         try Task.checkCancellation()
@@ -11050,6 +11055,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     customVocabulary: item.customVocabulary,
                     customSystemPrompt: item.customSystemPrompt,
                     outputLanguage: completion.outputLanguage,
+                    spokenLanguage: transcription.spokenLanguage,
                     postProcessingEnabled: completion.postProcessingEnabled
                 )
                 let updated = makeRetryHistoryItem(

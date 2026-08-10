@@ -7,6 +7,10 @@ struct PostProcessingBackendTests {
     static func main() async throws {
         try await testLocalRequestUsesLoopbackWithoutAuthorization()
         try await testCloudRequestOmitsLocalCompatibilityKey()
+        try await testLegacyAutomaticOutputLanguageDoesNotPromptTranslation()
+        try await testShortTranscriptUsesShortCleanupInstructions()
+        try await testLongTranscriptUsesLongCleanupInstructions()
+        try await testCustomPromptKeepsMandatoryCleanupContract()
         try await testLocalFailureDoesNotInvokeCloudFallbackOrSetCooldown()
         try await testLocalCommandTransformUsesEndpointWithoutCloudFallback()
         try await testBackendDefaultsUseLocal120AndCloud20()
@@ -23,6 +27,11 @@ struct PostProcessingBackendTests {
         try testInvalidCloudBaseURLIsNotRelabeledAsLocal()
         try await testLeakedRawTranscriptionTemplateIsTreatedAsFailure()
         try await testLeakedDataEnvelopeInstructionIsTreatedAsFailure()
+        try await testAutomaticKoreanTranscriptRejectsEnglishResponse()
+        try await testResolvedKoreanLanguageRejectsEnglishShortTranscript()
+        try await testChunkedKoreanTranscriptRejectsEnglishReplacement()
+        try await testChunkedKoreanTranscriptRejectsMinorityEnglishReplacement()
+        try await testChunkedMixedLanguageTranscriptPreservesEnglishParagraph()
         try testFinalPromptLeakGuardUsesValidatorDetector()
         try await testStandaloneRawTranscriptionWordIsNotTreatedAsLeak()
         try await testDelimiterInjectionCannotReplaceTheRawTranscript()
@@ -92,6 +101,113 @@ struct PostProcessingBackendTests {
             throw PostProcessingBackendTestFailure("cloud request body")
         }
         try expect(body["max_tokens"] == nil, "cloud cleanup omits the local legacy completion key")
+    }
+
+    private static func testLegacyAutomaticOutputLanguageDoesNotPromptTranslation() async throws {
+        let recorder = PostProcessingRequestRecorder()
+        let service = makeLocalService { request in
+            recorder.record(request)
+            return try successResponse(
+                request: request,
+                content: "The team decided to ship the product next Tuesday."
+            )
+        }
+
+        _ = try await service.postProcess(
+            transcript: "The team decided to ship the product next Tuesday.",
+            context: testContext,
+            customVocabulary: "",
+            outputLanguage: "auto"
+        )
+
+        let body = try requestBody(try recorder.request())
+        guard let messages = body["messages"] as? [[String: Any]],
+              let systemPrompt = messages.first(where: {
+                  $0["role"] as? String == "system"
+              })?["content"] as? String else {
+            throw PostProcessingBackendTestFailure("Missing cleanup system prompt")
+        }
+        try expect(
+            !systemPrompt.contains("Translate the final cleaned text into auto"),
+            "legacy automatic output language does not prompt translation"
+        )
+    }
+
+    private static func testShortTranscriptUsesShortCleanupInstructions() async throws {
+        let recorder = PostProcessingRequestRecorder()
+        let service = makeLocalService { request in
+            recorder.record(request)
+            return try successResponse(request: request, content: "Please send the file today.")
+        }
+
+        _ = try await service.postProcess(
+            transcript: "Please send the file today.",
+            context: testContext,
+            customVocabulary: ""
+        )
+
+        let systemPrompt = try systemPrompt(from: recorder.request())
+        try expect(
+            systemPrompt.contains("SHORT TRANSCRIPT MODE"),
+            "short input adds short cleanup instructions"
+        )
+        try expect(
+            !systemPrompt.contains("LONG TRANSCRIPT MODE"),
+            "short input omits long cleanup instructions"
+        )
+    }
+
+    private static func testLongTranscriptUsesLongCleanupInstructions() async throws {
+        let recorder = PostProcessingRequestRecorder()
+        let transcript = String(repeating: "가", count: 800)
+        let service = makeLocalService { request in
+            recorder.record(request)
+            return try successResponse(
+                request: request,
+                content: try transcriptFromPostProcessingRequest(request)
+            )
+        }
+
+        _ = try await service.postProcess(
+            transcript: transcript,
+            context: testContext,
+            customVocabulary: ""
+        )
+
+        let systemPrompt = try systemPrompt(from: recorder.request())
+        try expect(
+            systemPrompt.contains("LONG TRANSCRIPT MODE"),
+            "800-character input adds long cleanup instructions"
+        )
+        try expect(
+            systemPrompt.contains("Do not summarize, reorder, or turn the transcript into action items."),
+            "long input forbids meeting-summary transformations"
+        )
+    }
+
+    private static func testCustomPromptKeepsMandatoryCleanupContract() async throws {
+        let recorder = PostProcessingRequestRecorder()
+        let service = makeLocalService { request in
+            recorder.record(request)
+            return try successResponse(request: request, content: "Please send the file today.")
+        }
+
+        _ = try await service.postProcess(
+            transcript: "Please send the file today.",
+            context: testContext,
+            customVocabulary: "",
+            customSystemPrompt: "Use title case for product names."
+        )
+
+        let systemPrompt = try systemPrompt(from: recorder.request())
+        try expect(
+            systemPrompt.contains("Use title case for product names."),
+            "custom prompt remains the base prompt"
+        )
+        try expect(
+            systemPrompt.contains("PRESERVATION CONTRACT"),
+            "custom prompt cannot remove the preservation contract"
+        )
     }
 
     private static func testLocalFailureDoesNotInvokeCloudFallbackOrSetCooldown() async throws {
@@ -626,6 +742,156 @@ struct PostProcessingBackendTests {
         }
     }
 
+    private static func testAutomaticKoreanTranscriptRejectsEnglishResponse() async throws {
+        let service = makeLocalService { request in
+            try successResponse(
+                request: request,
+                content: "The team decided to ship the product next Tuesday and will finish the notes today."
+            )
+        }
+
+        do {
+            _ = try await service.postProcess(
+                transcript: "회의에서 다음 주 화요일에 제품을 출시하기로 결정했습니다. 담당자는 오늘 안에 안내 문서를 작성하고 검토 의견을 반영하기로 했습니다.",
+                context: testContext,
+                customVocabulary: ""
+            )
+            throw PostProcessingBackendTestFailure(
+                "Expected automatic Korean transcript to reject an English response"
+            )
+        } catch let error as PostProcessingError {
+            guard case .outputRejected(.languageMismatch) = error else {
+                throw PostProcessingBackendTestFailure(
+                    "Expected language-mismatch rejection, got \(error)"
+                )
+            }
+        }
+    }
+
+    private static func testResolvedKoreanLanguageRejectsEnglishShortTranscript() async throws {
+        let service = makeLocalService { request in
+            try successResponse(request: request, content: "Hello.")
+        }
+
+        do {
+            _ = try await service.postProcess(
+                transcript: "안녕하세요",
+                context: testContext,
+                customVocabulary: "",
+                spokenLanguage: SpokenLanguageResolution(
+                    languageCode: "ko",
+                    source: .engineDetected
+                )
+            )
+            throw PostProcessingBackendTestFailure(
+                "Expected resolved Korean language to reject an English short transcript"
+            )
+        } catch let error as PostProcessingError {
+            guard case .outputRejected(.languageMismatch) = error else {
+                throw PostProcessingBackendTestFailure(
+                    "Expected resolved-language mismatch rejection, got \(error)"
+                )
+            }
+        }
+    }
+
+    private static func testChunkedKoreanTranscriptRejectsEnglishReplacement() async throws {
+        let source = """
+        회의에서 다음 주 화요일에 제품을 출시하기로 결정했고, 담당자는 문서를 검토한 뒤 공지하기로 했습니다.
+
+        출시 전에 품질 점검과 롤백 절차를 다시 확인하고, 관련 부서에 일정 변경 사항을 공유하기로 했습니다.
+        """
+        let service = makeLocalService { request in
+            try successResponse(
+                request: request,
+                content: "The team will ship the product next Tuesday after reviewing the documents and rollback plan."
+            )
+        }
+
+        do {
+            _ = try await service.postProcess(
+                transcript: source,
+                context: testContext,
+                customVocabulary: ""
+            )
+            throw PostProcessingBackendTestFailure(
+                "Expected a chunked Korean transcript to reject an English replacement"
+            )
+        } catch let error as PostProcessingError {
+            guard case .outputRejected(.languageMismatch) = error else {
+                throw PostProcessingBackendTestFailure(
+                    "Expected final language-mismatch rejection, got \(error)"
+                )
+            }
+        }
+    }
+
+    private static func testChunkedKoreanTranscriptRejectsMinorityEnglishReplacement() async throws {
+        let marker = "언어불일치확인문단"
+        let koreanParagraph = "회의에서 제품 출시 일정과 품질 점검 절차를 다시 검토하고 관련 부서에 변경 사항을 공유하기로 했습니다."
+        let source = "\(String(repeating: "\(koreanParagraph)\n\n", count: 4))\(marker) 이 문단도 원래 언어인 한국어로 유지해야 합니다."
+        let recorder = PostProcessingRequestRecorder()
+        let service = makeLocalService { request in
+            recorder.record(request)
+            let chunk = try transcriptFromPostProcessingRequest(request)
+            let output = chunk.contains(marker)
+                ? "This paragraph was incorrectly translated into English."
+                : chunk
+            return try successResponse(request: request, content: output)
+        }
+        var receivedLanguageMismatch = false
+
+        do {
+            _ = try await service.postProcess(
+                transcript: source,
+                context: testContext,
+                customVocabulary: ""
+            )
+        } catch let error as PostProcessingError {
+            guard case .outputRejected(.languageMismatch) = error else {
+                throw PostProcessingBackendTestFailure(
+                    "Expected minority chunk language mismatch, got \(error)"
+                )
+            }
+            receivedLanguageMismatch = true
+        }
+
+        try expect(recorder.count() > 1, "minority translation scenario uses multiple chunks")
+        try expect(
+            receivedLanguageMismatch,
+            "Korean-majority output rejects an English replacement in one Korean chunk"
+        )
+    }
+
+    private static func testChunkedMixedLanguageTranscriptPreservesEnglishParagraph() async throws {
+        let koreanParagraph = "회의에서 다음 주 화요일에 제품을 출시하기로 결정했고, 담당자는 문서를 검토한 뒤 공지하기로 했습니다. 출시 전에 품질 점검과 롤백 절차를 다시 확인하고, 관련 부서에 일정 변경 사항을 공유하기로 했습니다."
+        let source = "\(String(repeating: koreanParagraph, count: 10))\n\nPlease keep the release notes in English for the external partners."
+        let recorder = PostProcessingRequestRecorder()
+        let service = makeLocalService { request in
+            recorder.record(request)
+            return try successResponse(
+                request: request,
+                content: try transcriptFromPostProcessingRequest(request)
+            )
+        }
+
+        let result = try await service.postProcess(
+            transcript: source,
+            context: testContext,
+            customVocabulary: "",
+            spokenLanguage: SpokenLanguageResolution(
+                languageCode: "ko",
+                source: .engineDetected
+            )
+        )
+
+        try expect(recorder.count() > 1, "mixed-language transcript uses multiple chunks")
+        try expect(
+            result.transcript.contains("Please keep the release notes in English"),
+            "chunked mixed-language transcript preserves its English paragraph"
+        )
+    }
+
     private static func testFinalPromptLeakGuardUsesValidatorDetector() throws {
         let source = try String(
             contentsOfFile: "Sources/PostProcessingService.swift",
@@ -1010,6 +1276,17 @@ struct PostProcessingBackendTests {
             throw PostProcessingBackendTestFailure("request body")
         }
         return body
+    }
+
+    private static func systemPrompt(from request: URLRequest) throws -> String {
+        let body = try requestBody(request)
+        guard let messages = body["messages"] as? [[String: Any]],
+              let systemPrompt = messages.first(where: {
+                  $0["role"] as? String == "system"
+              })?["content"] as? String else {
+            throw PostProcessingBackendTestFailure("Missing cleanup system prompt")
+        }
+        return systemPrompt
     }
 
     private static func transcriptFromPostProcessingRequest(
