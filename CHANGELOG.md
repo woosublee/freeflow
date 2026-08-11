@@ -8,6 +8,12 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.39] - 2026-08-11
+
+### Improved
+
+- Show localized weekdays beside recording timestamps in the Note Browser list and note details, including recordings that span midnight.
+
 ## [0.1.38] - 2026-08-10
 
 ### Improved
