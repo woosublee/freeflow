@@ -54,7 +54,7 @@ No public API changes are required.
 
 The cleanup data-envelope instruction and the signatures used to detect an echoed instruction must have one owner. A small policy type in the post-processing domain will provide:
 
-- the full app-owned cleanup instruction used to construct the system prompt,
+- the full app-owned cleanup instruction used to construct the user message,
 - the stable signature fragments that identify an echoed instruction.
 
 `PostProcessingService` and `PostProcessingOutputValidator` will both consume this policy instead of maintaining separate literals.
@@ -99,7 +99,7 @@ The existing localized-space normalization remains unchanged in this work. Movin
 
 ### Prompt-leak validation
 
-1. `PostProcessingService` builds its system prompt from the shared policy instruction,
+1. `PostProcessingService` builds its user message from the shared policy instruction,
 2. model output is sanitized as today,
 3. `PostProcessingOutputValidator.validate` normalizes the source, output, and policy signatures,
 4. any app-owned signature appearing only in output yields `.promptLeak`,

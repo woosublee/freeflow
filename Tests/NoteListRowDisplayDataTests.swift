@@ -196,13 +196,19 @@ struct NoteListRowDisplayDataTests {
             calendar: gregorian,
             timeZone: honolulu
         )
+        let gregorianValue = NoteTimestampFormatter.detailTimestamp(
+            for: item,
+            locale: locale,
+            calendar: gregorian,
+            timeZone: utc
+        )
         let buddhistValue = NoteTimestampFormatter.detailTimestamp(
             for: item,
-            locale: Locale(identifier: "th_TH"),
+            locale: locale,
             calendar: buddhist,
             timeZone: utc
         )
-        let utcAgain = NoteTimestampFormatter.rowTimestamp(
+        let gregorianAgain = NoteTimestampFormatter.detailTimestamp(
             for: item,
             locale: locale,
             calendar: gregorian,
@@ -210,8 +216,9 @@ struct NoteListRowDisplayDataTests {
         )
 
         assert(utcValue != honoluluValue, "time-zone-specific values differ")
-        assert(!buddhistValue.isEmpty, "calendar-specific formatter produces a value")
-        assert(utcAgain == utcValue, "alternating cache keys do not contaminate UTC")
+        assert(gregorianValue != buddhistValue, "calendar-specific values differ")
+        assert(buddhistValue.contains("2569"), "Buddhist calendar uses year 2569")
+        assert(gregorianAgain == gregorianValue, "alternating calendars do not contaminate Gregorian output")
     }
 
     private static func testHourCycleFormattingRemainsIsolated() {
