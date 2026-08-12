@@ -70,6 +70,7 @@ FULL_SOURCE_APP_STATE_TESTS = \
 	Tests/AudioImportFileCopyTests.swift \
 	Tests/LatestValueProgressCoalescerTests.swift \
 	Tests/AppStateTestStorage.swift \
+	Tests/AppStateDependenciesTests.swift \
 	Tests/AppStateStorageSafetyTests.swift \
 	Tests/AppStateHistoryProtectionSourceTests.swift \
 	Tests/AppStateTranscriptionConfigurationTests.swift \
