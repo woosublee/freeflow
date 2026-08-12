@@ -56,7 +56,13 @@ struct MeetingSummaryAppStateTests {
 
     private static func testSuccessfulGenerationMarksPendingRevealConsumableOnce() async throws {
         let item = makeItem()
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in
                 MeetingSummaryGeneratorStub { _ in generationResult }
@@ -79,7 +85,13 @@ struct MeetingSummaryAppStateTests {
 
     private static func testFailedGenerationDoesNotMarkPendingReveal() async throws {
         let item = makeItem()
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in
                 MeetingSummaryGeneratorStub { _ in
@@ -114,7 +126,13 @@ struct MeetingSummaryAppStateTests {
         let item = makeItem()
             .withMeetingSummary(envelope(completed: false))
             .withMeetingSummaryAttempt(failedAttempt)
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
 
         try await MainActor.run {
             try appState.deleteMeetingSummary(noteID: item.id)
@@ -131,7 +149,13 @@ struct MeetingSummaryAppStateTests {
 
     private static func testDeleteMeetingSummaryRemovesFailedOnlyState() async throws {
         let item = makeItem()
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         let failedAttempt = await MainActor.run {
             MeetingSummaryAttempt(
                 occurredAt: Date(timeIntervalSince1970: 2_000),
@@ -171,7 +195,13 @@ struct MeetingSummaryAppStateTests {
 
     private static func testDeleteMeetingSummaryRejectsStaleFailedAttempt() async throws {
         let item = makeItem()
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         let staleAttempt = MeetingSummaryAttempt(
             occurredAt: Date(timeIntervalSince1970: 2_000),
             outcome: .failed,
@@ -342,7 +372,13 @@ struct MeetingSummaryAppStateTests {
 
     private static func testDeleteMeetingSummaryWithoutExistingSummaryThrows() async throws {
         let item = makeItem()
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
 
         do {
             try await MainActor.run {
@@ -356,7 +392,13 @@ struct MeetingSummaryAppStateTests {
 
     private static func testFailureAttemptUsesEffectiveFallbackModel() async throws {
         let item = makeItem()
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in
                 MeetingSummaryGeneratorStub { _ in
@@ -390,7 +432,13 @@ struct MeetingSummaryAppStateTests {
 
     private static func testGenerationPersistsOnlyAfterSuccess() async throws {
         let generator = MeetingSummaryControlledGenerator()
-        let appState = try await configuredAppState(item: makeItem())
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: makeItem(),
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in generator }
         }
@@ -421,7 +469,13 @@ struct MeetingSummaryAppStateTests {
 
     private static func testUnverifiedGenerationPersistsSummaryWarningState() async throws {
         let item = makeItem()
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         let unverifiedResult = MeetingSummaryGenerationResult(
             draft: generationResult.draft,
             promptVersion: generationResult.promptVersion,
@@ -508,7 +562,13 @@ struct MeetingSummaryAppStateTests {
     private static func testFailurePreservesExistingSummary() async throws {
         let existing = envelope(completed: true)
         let item = makeItem().withMeetingSummary(existing)
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in
                 MeetingSummaryGeneratorStub { _ in
@@ -532,7 +592,13 @@ struct MeetingSummaryAppStateTests {
     private static func testGroundingFailurePreservesExistingSummaryAndCompletion() async throws {
         let existing = envelope(completed: true)
         let item = makeItem().withMeetingSummary(existing)
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in
                 MeetingSummaryGeneratorStub { _ in
@@ -561,7 +627,13 @@ struct MeetingSummaryAppStateTests {
             spokenLanguageCode: "ko",
             spokenLanguageResolution: .engineDetected
         ).withMeetingSummary(existing)
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in
                 MeetingSummaryGeneratorStub { _ in
@@ -592,7 +664,13 @@ struct MeetingSummaryAppStateTests {
             rawTranscript: "회의에서 다음 주 화요일에 출시하기로 결정했습니다.",
             postProcessedTranscript: "회의에서 다음 주 화요일에 출시하기로 결정했습니다."
         )
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in
                 MeetingSummaryGeneratorStub { _ in generationResult }
@@ -806,7 +884,13 @@ struct MeetingSummaryAppStateTests {
             issue: QuillUserIssueRecord(code: .meetingSummaryUnavailable)
         )
         let item = makeItem().withMeetingSummaryAttempt(previousAttempt)
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in generator }
         }
@@ -837,7 +921,13 @@ struct MeetingSummaryAppStateTests {
     private static func testTranscriptChangeDiscardsInflightResult() async throws {
         let generator = MeetingSummaryControlledGenerator()
         let item = makeItem()
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in generator }
         }
@@ -873,7 +963,13 @@ struct MeetingSummaryAppStateTests {
     private static func testTranscriptChangeFailureDoesNotPersistAttempt() async throws {
         let generator = MeetingSummaryControlledGenerator()
         let item = makeItem()
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in generator }
         }
@@ -1141,7 +1237,13 @@ struct MeetingSummaryAppStateTests {
     private static func testDeleteDuringGenerationDoesNotRestoreSummary() async throws {
         let generator = MeetingSummaryControlledGenerator()
         let item = makeItem().withMeetingSummary(envelope(completed: false))
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in generator }
         }
@@ -1176,7 +1278,13 @@ struct MeetingSummaryAppStateTests {
     private static func testDeleteDuringGenerationFailureDoesNotPersistAttempt() async throws {
         let generator = MeetingSummaryControlledGenerator()
         let item = makeItem().withMeetingSummary(envelope(completed: false))
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in generator }
         }
@@ -1215,7 +1323,13 @@ struct MeetingSummaryAppStateTests {
             rawTranscript: "12345 ---",
             postProcessedTranscript: "12345 ---"
         )
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in
                 MeetingSummaryGeneratorStub { _ in generationResult }
@@ -1241,7 +1355,13 @@ struct MeetingSummaryAppStateTests {
             spokenLanguageCode: "en",
             spokenLanguageResolution: .engineDetected
         )
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
 
         await MainActor.run {
             appState.updateTranscript(
@@ -1257,7 +1377,13 @@ struct MeetingSummaryAppStateTests {
 
     private static func testActionCompletionPersists() async throws {
         let item = makeItem().withMeetingSummary(envelope(completed: false))
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         let actionID = item.meetingSummary!.content.actionItems[0].id
 
         try await MainActor.run {
@@ -1278,7 +1404,13 @@ struct MeetingSummaryAppStateTests {
 
     private static func testPostProcessingDisabledDoesNotBlockSummary() async throws {
         let item = makeItem()
-        let appState = try await configuredAppState(item: item)
+        let fixture = try configuredAppStateFixture()
+        defer { fixture.cleanup() }
+        let appState = try await configuredAppState(
+            item: item,
+            store: fixture.store,
+            storageLayout: fixture.storageLayout
+        )
         await MainActor.run {
             appState.disablePostProcessing = true
             precondition(
@@ -1337,9 +1469,7 @@ struct MeetingSummaryAppStateTests {
         }
     }
 
-    private static func configuredAppState(
-        item: PipelineHistoryItem
-    ) async throws -> AppState {
+    private static func configuredAppStateFixture() throws -> ConfiguredAppStateFixture {
         let rootDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "quill-meeting-summary-tests-\(UUID().uuidString)",
@@ -1350,12 +1480,34 @@ struct MeetingSummaryAppStateTests {
             withIntermediateDirectories: true
         )
         let storageLayout = AppStateStorageLayout(rootDirectory: rootDirectory)
-        let store = PipelineHistoryStore(storeURL: storageLayout.historyStoreURL)
+        return ConfiguredAppStateFixture(
+            rootDirectory: rootDirectory,
+            storageLayout: storageLayout,
+            store: PipelineHistoryStore(storeURL: storageLayout.historyStoreURL)
+        )
+    }
+
+    private static func configuredAppState(
+        item: PipelineHistoryItem,
+        store: PipelineHistoryStore,
+        storageLayout: AppStateStorageLayout
+    ) async throws -> AppState {
         _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
         return await configuredPersistedAppState(
             store: store,
             storageLayout: storageLayout
         )
+    }
+
+    private struct ConfiguredAppStateFixture {
+        let rootDirectory: URL
+        let storageLayout: AppStateStorageLayout
+        let store: PipelineHistoryStore
+
+        func cleanup() {
+            try? store.detachForArchiveVerification()
+            try? FileManager.default.removeItem(at: rootDirectory)
+        }
     }
 
     @MainActor

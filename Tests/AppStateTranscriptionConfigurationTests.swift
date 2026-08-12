@@ -3266,9 +3266,10 @@ struct AppStateTranscriptionConfigurationTests {
         for cleanup in [staleGuard, storeUpdate] {
             assert(cleanup.contains("snapshot.item.transcriptFileName == nil"))
             assert(cleanup.contains("let transcriptFileName = updatedItem.transcriptFileName"))
-            assert(cleanup.contains("Self.deleteTranscriptFile("))
-            assert(cleanup.contains("transcriptFileName,"))
-            assert(cleanup.contains("transcriptDirectory: transcriptDirectory"))
+            let compactCleanup = cleanup.filter { !$0.isWhitespace }
+            assert(compactCleanup.contains(
+                "Self.deleteTranscriptFile(transcriptFileName,transcriptDirectory:transcriptDirectory)"
+            ))
         }
     }
 
