@@ -350,11 +350,6 @@ enum MeetingSummaryAvailability: Equatable {
 }
 
 final class AppState: ObservableObject, @unchecked Sendable {
-    @MainActor
-    static var meetingSummaryGeneratorFactory:
-        (AppState) -> any MeetingSummaryGenerating = { appState in
-            appState.makeMeetingSummaryService()
-        }
     static var retryCloudTranscriptionDependenciesFactory:
         () -> CloudTranscriptionDependencies = {
             .live
@@ -7084,7 +7079,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 languageContext: resolvedLanguage.context
             )
             attemptSourceFingerprint = source.fingerprint
-            result = try await Self.meetingSummaryGeneratorFactory(self)
+            result = try await dependencies.makeMeetingSummaryGenerator(self)
                 .generate(source: source)
 
             guard let index = pipelineHistory.firstIndex(where: { $0.id == id }) else {
