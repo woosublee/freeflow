@@ -41,6 +41,7 @@ enum NoteTimestampFormatter {
     private struct FormatterKey: Hashable {
         let role: FormatterRole
         let localeIdentifier: String
+        let hourCycle: Locale.HourCycle
         let calendarIdentifier: Calendar.Identifier
         let timeZoneIdentifier: String
     }
@@ -63,6 +64,7 @@ enum NoteTimestampFormatter {
             let key = FormatterKey(
                 role: role,
                 localeIdentifier: locale.identifier,
+                hourCycle: locale.hourCycle,
                 calendarIdentifier: calendar.identifier,
                 timeZoneIdentifier: timeZone.identifier
             )
@@ -94,6 +96,7 @@ enum NoteTimestampFormatter {
             let key = FormatterKey(
                 role: .interval,
                 localeIdentifier: locale.identifier,
+                hourCycle: locale.hourCycle,
                 calendarIdentifier: calendar.identifier,
                 timeZoneIdentifier: timeZone.identifier
             )

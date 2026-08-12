@@ -11,6 +11,7 @@ struct NoteListRowDisplayDataTests {
         testFormatsJapaneseDetailTimestamp()
         testRepeatedFormattingRemainsStable()
         testCalendarAndTimeZoneFormattingRemainIsolated()
+        testHourCycleFormattingRemainsIsolated()
         testConcurrentFormattingRemainsStable()
         testFormatsSameMorningRowDateStartTime()
         testFormatsMorningToAfternoonRowDateStartTime()
@@ -211,6 +212,52 @@ struct NoteListRowDisplayDataTests {
         assert(utcValue != honoluluValue, "time-zone-specific values differ")
         assert(!buddhistValue.isEmpty, "calendar-specific formatter produces a value")
         assert(utcAgain == utcValue, "alternating cache keys do not contaminate UTC")
+    }
+
+    private static func testHourCycleFormattingRemainsIsolated() {
+        let item = historyItem(
+            timestamp: date(
+                year: 2026,
+                month: 5,
+                day: 15,
+                hour: 13,
+                minute: 12,
+                timeZone: TimeZone(secondsFromGMT: 0)!
+            ),
+            transcript: "Hour cycles"
+        )
+        let utc = TimeZone(secondsFromGMT: 0)!
+        var twelveHourComponents = Locale.Components(
+            languageCode: .english,
+            languageRegion: .unitedStates
+        )
+        twelveHourComponents.hourCycle = .oneToTwelve
+        var twentyFourHourComponents = twelveHourComponents
+        twentyFourHourComponents.hourCycle = .zeroToTwentyThree
+        let twelveHourLocale = Locale(components: twelveHourComponents)
+        let twentyFourHourLocale = Locale(components: twentyFourHourComponents)
+
+        assert(twelveHourLocale.hourCycle != twentyFourHourLocale.hourCycle)
+
+        let twelveHourValue = NoteTimestampFormatter.rowTimestamp(
+            for: item,
+            locale: twelveHourLocale,
+            timeZone: utc
+        )
+        let twentyFourHourValue = NoteTimestampFormatter.rowTimestamp(
+            for: item,
+            locale: twentyFourHourLocale,
+            timeZone: utc
+        )
+        let twelveHourAgain = NoteTimestampFormatter.rowTimestamp(
+            for: item,
+            locale: twelveHourLocale,
+            timeZone: utc
+        )
+
+        assert(twelveHourValue.contains("PM"), "12-hour value preserves AM/PM")
+        assert(twentyFourHourValue.contains("13:12"), "24-hour value preserves hour cycle")
+        assert(twelveHourAgain == twelveHourValue, "alternating hour cycles do not contaminate 12-hour output")
     }
 
     private static func testConcurrentFormattingRemainsStable() {
