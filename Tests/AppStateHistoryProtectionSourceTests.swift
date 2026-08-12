@@ -106,6 +106,25 @@ struct AppStateHistoryProtectionSourceTests {
                 && archiveBody.contains("let makeStore = dependencies.makePipelineHistoryStore"),
             "archive captures the originating storage layout and history-store factory"
         )
+        let archiveCompletionRange = try source.range(
+            from: "private func completeHistoryArchiveTransition(",
+            to: "private func completeHistoryRecoveryInspection("
+        )
+        let archiveCompletion = String(source[archiveCompletionRange])
+        try expectOrdered(
+            [
+                "pipelineHistoryStore = activeStore",
+                "let storageLayout = dependencies.storageLayout",
+                "_ = Self.preparedDirectory(storageLayout.rootDirectory)",
+                "let audioDirectory = Self.preparedDirectory(storageLayout.audioDirectory)",
+                "_ = Self.preparedDirectory(storageLayout.transcriptDirectory)",
+                "recordingJournalStore = RecordingJournalStore(",
+                "audioDirectory: audioDirectory",
+                "cloudTranscriptionJobStore = CloudTranscriptionJobStore("
+            ],
+            in: archiveCompletion,
+            label: "verified archive completion recreates active asset directories before runtime stores"
+        )
         for requiredGuard in [
             "historyArchiveSafety == .normal",
             "pendingAudioImportJobIDs.isEmpty",

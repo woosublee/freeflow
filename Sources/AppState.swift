@@ -6626,12 +6626,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return
         }
         pipelineHistoryStore = activeStore
+        let storageLayout = dependencies.storageLayout
+        _ = Self.preparedDirectory(storageLayout.rootDirectory)
+        let audioDirectory = Self.preparedDirectory(storageLayout.audioDirectory)
+        _ = Self.preparedDirectory(storageLayout.transcriptDirectory)
         recordingJournalStore = RecordingJournalStore(
-            audioDirectory: dependencies.storageLayout.audioDirectory
+            audioDirectory: audioDirectory
         )
         cloudTranscriptionJobStore = CloudTranscriptionJobStore(
-            jobsDirectory: dependencies.storageLayout.cloudTranscriptionJobsDirectory,
-            temporaryRoot: dependencies.storageLayout.cloudTranscriptionTemporaryDirectory
+            jobsDirectory: storageLayout.cloudTranscriptionJobsDirectory,
+            temporaryRoot: storageLayout.cloudTranscriptionTemporaryDirectory
         )
         pipelineHistory = []
         retryingItemIDs = []
