@@ -350,10 +350,6 @@ enum MeetingSummaryAvailability: Equatable {
 }
 
 final class AppState: ObservableObject, @unchecked Sendable {
-    static var retryCloudTranscriptionDependenciesFactory:
-        () -> CloudTranscriptionDependencies = {
-            .live
-        }
     static var audioImportCloudTranscriptionDependenciesFactory:
         () -> CloudTranscriptionDependencies = {
             .live
@@ -3063,8 +3059,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         scheduleNoteBrowserTranscriptionModeNormalizationForSelectedInput()
         self.precomputeMacros()
         if let cloudReconciliation {
-            let cloudDependenciesFactory = Self
-                .retryCloudTranscriptionDependenciesFactory
+            let cloudDependenciesFactory = dependencies
+                .makeRetryCloudTranscriptionDependencies
             let postProcessingService = makePostProcessingService()
             Task { @MainActor [weak self] in
                 self?.scheduleCloudTranscriptionAutoResume(
@@ -7644,8 +7640,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         retryingItemIDs.insert(item.id)
 
         let postProcessingService = makePostProcessingService()
-        let cloudDependencies = Self
-            .retryCloudTranscriptionDependenciesFactory()
+        let cloudDependencies = dependencies
+            .makeRetryCloudTranscriptionDependencies()
         let transcriptDirectory = storageLayout.transcriptDirectory
 
         let task = Task { [weak self] in

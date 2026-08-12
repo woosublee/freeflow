@@ -1027,34 +1027,14 @@ struct MeetingSummaryAppStateTests {
         let store = PipelineHistoryStore(storeURL: layout.historyStoreURL)
         let item = makeItem(audioFileName: audioFileName)
         _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
-        let originalRetryDependenciesFactory = AppState.retryCloudTranscriptionDependenciesFactory
-        defer {
-            AppState.retryCloudTranscriptionDependenciesFactory = originalRetryDependenciesFactory
-        }
-        AppState.retryCloudTranscriptionDependenciesFactory = {
-            CloudTranscriptionDependencies(
-                encodedUploadCeilingBytes: 10_000,
-                upload: { request, _ in
-                    let response = HTTPURLResponse(
-                        url: request.url!,
-                        statusCode: 200,
-                        httpVersion: "HTTP/1.1",
-                        headerFields: nil
-                    )!
-                    return (Data(#"{"text":"Retry source B."}"#.utf8), response)
-                },
-                checkpointStore: InMemoryCloudTranscriptionCheckpointStore(),
-                progress: { _ in },
-                temporaryRoot: FileManager.default.temporaryDirectory
-                    .appendingPathComponent(UUID().uuidString, isDirectory: true),
-                sleep: { _ in }
-            )
-        }
         let generator = MeetingSummaryControlledGenerator()
         let appState = await configuredPersistedAppState(
             store: store,
             generator: generator,
-            storageLayout: layout
+            storageLayout: layout,
+            retryDependencies: retryCloudDependencies(
+                transcript: "Retry source B."
+            )
         )
         await MainActor.run {
             appState.apiKey = "configured-key"
@@ -1126,18 +1106,14 @@ struct MeetingSummaryAppStateTests {
             spokenLanguageResolution: .engineDetected,
             audioFileName: audioFileName
         )
-        let originalRetryDependenciesFactory = AppState.retryCloudTranscriptionDependenciesFactory
-        defer {
-            AppState.retryCloudTranscriptionDependenciesFactory = originalRetryDependenciesFactory
-        }
-        AppState.retryCloudTranscriptionDependenciesFactory = retryCloudDependencies(
-            transcript: "Retry source B."
-        )
         let generator = MeetingSummaryControlledGenerator()
         let appState = await configuredPersistedAppState(
             store: store,
             generator: generator,
-            storageLayout: layout
+            storageLayout: layout,
+            retryDependencies: retryCloudDependencies(
+                transcript: "Retry source B."
+            )
         )
         await MainActor.run {
             appState.pipelineHistory = [item]
@@ -1482,12 +1458,16 @@ struct MeetingSummaryAppStateTests {
     private static func configuredPersistedAppState(
         store: PipelineHistoryStore,
         generator: (any MeetingSummaryGenerating)? = nil,
-        storageLayout: AppStateStorageLayout? = nil
+        storageLayout: AppStateStorageLayout? = nil,
+        retryDependencies: @escaping @Sendable () -> CloudTranscriptionDependencies = {
+            .live
+        }
     ) async -> AppState {
         let configuredDependencies = dependencies(
             store: store,
             generator: generator,
-            storageLayout: storageLayout
+            storageLayout: storageLayout,
+            retryDependencies: retryDependencies
         )
         return await MainActor.run {
             let appState = AppState(dependencies: configuredDependencies)
@@ -1559,7 +1539,7 @@ struct MeetingSummaryAppStateTests {
 
     private static func retryCloudDependencies(
         transcript: String
-    ) -> () -> CloudTranscriptionDependencies {
+    ) -> @Sendable () -> CloudTranscriptionDependencies {
         {
             CloudTranscriptionDependencies(
                 encodedUploadCeilingBytes: 10_000,
