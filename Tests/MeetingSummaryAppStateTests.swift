@@ -8,7 +8,6 @@ struct MeetingSummaryAppStateTests {
         let originalFactory = await MainActor.run {
             AppState.meetingSummaryGeneratorFactory
         }
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
         do {
             try await testGenerationPersistsOnlyAfterSuccess()
             try await testUnverifiedGenerationPersistsSummaryWarningState()
@@ -47,13 +46,11 @@ struct MeetingSummaryAppStateTests {
             await MainActor.run {
                 AppState.meetingSummaryGeneratorFactory = originalFactory
             }
-            AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
             throw error
         }
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = originalFactory
         }
-        AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
         print("MeetingSummaryAppStateTests passed")
     }
 
@@ -154,10 +151,11 @@ struct MeetingSummaryAppStateTests {
             storeURL: directoryURL.appendingPathComponent("PipelineHistory.sqlite")
         )
         _ = try store.upsert(failedOnly, maxCount: 10, requiresDurableStore: true)
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        defer { AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory }
-        AppState.pipelineHistoryStoreFactory = { store }
-        let persistedAppState = await configuredPersistedAppState()
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
+        let persistedAppState = await configuredPersistedAppState(
+            store: store,
+            storageLayout: layout
+        )
 
         try await MainActor.run {
             try persistedAppState.deleteMeetingSummary(noteID: item.id)
@@ -215,10 +213,11 @@ struct MeetingSummaryAppStateTests {
         )
         let item = makeItem()
         _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        defer { AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory }
-        AppState.pipelineHistoryStoreFactory = { store }
-        let appState = await configuredPersistedAppState()
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
+        let appState = await configuredPersistedAppState(
+            store: store,
+            storageLayout: layout
+        )
         let failedAttempt = await MainActor.run {
             let attempt = MeetingSummaryAttempt(
                 occurredAt: Date(timeIntervalSince1970: 2_000),
@@ -286,10 +285,11 @@ struct MeetingSummaryAppStateTests {
         )
         let item = makeItem()
         _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        defer { AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory }
-        AppState.pipelineHistoryStoreFactory = { store }
-        let appState = await configuredPersistedAppState()
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
+        let appState = await configuredPersistedAppState(
+            store: store,
+            storageLayout: layout
+        )
         let failedAttempt = await MainActor.run {
             MeetingSummaryAttempt(
                 occurredAt: Date(timeIntervalSince1970: 2_000),
@@ -459,16 +459,13 @@ struct MeetingSummaryAppStateTests {
         )
         defer { try? FileManager.default.removeItem(at: directoryURL) }
         let store = makeInMemoryFallbackStore(at: directoryURL)
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        defer {
-            AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
-        }
-        AppState.pipelineHistoryStoreFactory = { store }
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
 
         let item = makeItem()
-        let appState = await MainActor.run {
-            AppState()
-        }
+        let appState = await configuredPersistedAppState(
+            store: store,
+            storageLayout: layout
+        )
         await MainActor.run {
             appState.apiKey = "configured-key"
             appState.selectAIProcessingBackendChoice(
@@ -626,10 +623,11 @@ struct MeetingSummaryAppStateTests {
         )
         _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
 
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        defer { AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory }
-        AppState.pipelineHistoryStoreFactory = { store }
-        let appState = await configuredPersistedAppState()
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
+        let appState = await configuredPersistedAppState(
+            store: store,
+            storageLayout: layout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in
                 MeetingSummaryGeneratorStub { _ in generationResult }
@@ -662,10 +660,11 @@ struct MeetingSummaryAppStateTests {
         ).withMeetingSummary(existing)
         _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
 
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        defer { AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory }
-        AppState.pipelineHistoryStoreFactory = { store }
-        let appState = await configuredPersistedAppState()
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
+        let appState = await configuredPersistedAppState(
+            store: store,
+            storageLayout: layout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in
                 MeetingSummaryGeneratorStub { _ in
@@ -712,10 +711,11 @@ struct MeetingSummaryAppStateTests {
         ).withMeetingSummary(existing)
         _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
 
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        defer { AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory }
-        AppState.pipelineHistoryStoreFactory = { store }
-        let appState = await configuredPersistedAppState()
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
+        let appState = await configuredPersistedAppState(
+            store: store,
+            storageLayout: layout
+        )
         await MainActor.run {
             AppState.meetingSummaryGeneratorFactory = { _ in
                 MeetingSummaryGeneratorStub { _ in
@@ -770,12 +770,13 @@ struct MeetingSummaryAppStateTests {
             .withMeetingSummaryAttempt(attempt)
         let store = PipelineHistoryStore(inMemory: true)
         _ = try store.append(item, maxCount: 10)
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        defer {
-            AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
-        }
-        AppState.pipelineHistoryStoreFactory = { store }
-        let appState = await MainActor.run { AppState() }
+        let directoryURL = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
+        let appState = await configuredPersistedAppState(
+            store: store,
+            storageLayout: layout
+        )
 
         await MainActor.run {
             appState.updateTranscript(id: item.id, text: "Edited transcript.")
@@ -900,24 +901,22 @@ struct MeetingSummaryAppStateTests {
 
     private static func testSuccessfulRetryInvalidatesInflightSummaryGeneration() async throws {
         let audioFileName = "retry-summary-invalidation-\(UUID().uuidString).mp3"
-        let audioURL = AppState.audioStorageDirectory().appendingPathComponent(audioFileName)
-        try Data([0]).write(to: audioURL)
-        defer { try? FileManager.default.removeItem(at: audioURL) }
-
         let directoryURL = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
-        let store = PipelineHistoryStore(
-            storeURL: directoryURL.appendingPathComponent("PipelineHistory.sqlite")
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
+        let audioURL = layout.audioDirectory.appendingPathComponent(audioFileName)
+        try FileManager.default.createDirectory(
+            at: layout.audioDirectory,
+            withIntermediateDirectories: true
         )
+        try Data([0]).write(to: audioURL)
+        let store = PipelineHistoryStore(storeURL: layout.historyStoreURL)
         let item = makeItem(audioFileName: audioFileName)
         _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
         let originalRetryDependenciesFactory = AppState.retryCloudTranscriptionDependenciesFactory
         defer {
-            AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
             AppState.retryCloudTranscriptionDependenciesFactory = originalRetryDependenciesFactory
         }
-        AppState.pipelineHistoryStoreFactory = { store }
         AppState.retryCloudTranscriptionDependenciesFactory = {
             CloudTranscriptionDependencies(
                 encodedUploadCeilingBytes: 10_000,
@@ -938,7 +937,10 @@ struct MeetingSummaryAppStateTests {
             )
         }
         let generator = MeetingSummaryControlledGenerator()
-        let appState = await MainActor.run { AppState() }
+        let appState = await configuredPersistedAppState(
+            store: store,
+            storageLayout: layout
+        )
         await MainActor.run {
             appState.apiKey = "configured-key"
             appState.transcriptionAPIKey = "test-api-key"
@@ -995,32 +997,33 @@ struct MeetingSummaryAppStateTests {
 
     private static func testRetryWithMissingHistoryEntryKeepsSummaryGenerationActive() async throws {
         let audioFileName = "retry-missing-history-\(UUID().uuidString).mp3"
-        let audioURL = AppState.audioStorageDirectory().appendingPathComponent(audioFileName)
-        try Data([0]).write(to: audioURL)
-        defer { try? FileManager.default.removeItem(at: audioURL) }
-
         let directoryURL = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
-        let store = PipelineHistoryStore(
-            storeURL: directoryURL.appendingPathComponent("PipelineHistory.sqlite")
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
+        let audioURL = layout.audioDirectory.appendingPathComponent(audioFileName)
+        try FileManager.default.createDirectory(
+            at: layout.audioDirectory,
+            withIntermediateDirectories: true
         )
+        try Data([0]).write(to: audioURL)
+        let store = PipelineHistoryStore(storeURL: layout.historyStoreURL)
         let item = makeItem(
             spokenLanguageCode: "en",
             spokenLanguageResolution: .engineDetected,
             audioFileName: audioFileName
         )
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
         let originalRetryDependenciesFactory = AppState.retryCloudTranscriptionDependenciesFactory
         defer {
-            AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
             AppState.retryCloudTranscriptionDependenciesFactory = originalRetryDependenciesFactory
         }
-        AppState.pipelineHistoryStoreFactory = { store }
         AppState.retryCloudTranscriptionDependenciesFactory = retryCloudDependencies(
             transcript: "Retry source B."
         )
         let generator = MeetingSummaryControlledGenerator()
-        let appState = await MainActor.run { AppState() }
+        let appState = await configuredPersistedAppState(
+            store: store,
+            storageLayout: layout
+        )
         await MainActor.run {
             appState.pipelineHistory = [item]
             configureSummaryGeneration(appState, generator: generator)
@@ -1062,11 +1065,12 @@ struct MeetingSummaryAppStateTests {
             spokenLanguageCode: "en",
             spokenLanguageResolution: .engineDetected
         )
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        defer { AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory }
-        AppState.pipelineHistoryStoreFactory = { store }
         let generator = MeetingSummaryControlledGenerator()
-        let appState = await MainActor.run { AppState() }
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
+        let appState = await configuredPersistedAppState(
+            store: store,
+            storageLayout: layout
+        )
         await MainActor.run {
             appState.pipelineHistory = [item]
             configureSummaryGeneration(appState, generator: generator)
@@ -1107,11 +1111,12 @@ struct MeetingSummaryAppStateTests {
             spokenLanguageResolution: .engineDetected
         )
         _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        defer { AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory }
-        AppState.pipelineHistoryStoreFactory = { store }
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
         let generator = MeetingSummaryControlledGenerator()
-        let appState = await configuredPersistedAppState()
+        let appState = await configuredPersistedAppState(
+            store: store,
+            storageLayout: layout
+        )
         await MainActor.run {
             configureSummaryGeneration(appState, generator: generator)
         }
@@ -1312,9 +1317,16 @@ struct MeetingSummaryAppStateTests {
         return directoryURL
     }
 
-    private static func configuredPersistedAppState() async -> AppState {
-        await MainActor.run {
-            let appState = AppState()
+    private static func configuredPersistedAppState(
+        store: PipelineHistoryStore,
+        storageLayout: AppStateStorageLayout
+    ) async -> AppState {
+        var dependencies = AppStateDependencies.live
+        dependencies.storageLayout = storageLayout
+        dependencies.makePipelineHistoryStore = { _ in store }
+        let configuredDependencies = dependencies
+        return await MainActor.run {
+            let appState = AppState(dependencies: configuredDependencies)
             appState.apiKey = "configured-key"
             appState.selectAIProcessingBackendChoice(
                 .cloud(modelID: "summary/model"),
@@ -1328,22 +1340,22 @@ struct MeetingSummaryAppStateTests {
     private static func configuredAppState(
         item: PipelineHistoryItem
     ) async throws -> AppState {
-        let storeURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("quill-meeting-summary-tests-\(UUID().uuidString)")
-            .appendingPathExtension("sqlite")
-        let store = PipelineHistoryStore(storeURL: storeURL)
-        _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
-        AppState.pipelineHistoryStoreFactory = { store }
-        return await MainActor.run {
-            let appState = AppState()
-            appState.apiKey = "configured-key"
-            appState.selectAIProcessingBackendChoice(
-                .cloud(modelID: "summary/model"),
-                for: .meetingSummary
+        let rootDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "quill-meeting-summary-tests-\(UUID().uuidString)",
+                isDirectory: true
             )
-            appState.disableMeetingSummary = false
-            return appState
-        }
+        try FileManager.default.createDirectory(
+            at: rootDirectory,
+            withIntermediateDirectories: true
+        )
+        let storageLayout = AppStateStorageLayout(rootDirectory: rootDirectory)
+        let store = PipelineHistoryStore(storeURL: storageLayout.historyStoreURL)
+        _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
+        return await configuredPersistedAppState(
+            store: store,
+            storageLayout: storageLayout
+        )
     }
 
     @MainActor
