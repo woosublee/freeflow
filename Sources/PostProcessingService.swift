@@ -250,15 +250,21 @@ struct PostProcessingTranscriptSplitter {
     private func splitAtSafeByteBoundaries(_ text: String) -> [String] {
         var chunks: [String] = []
         var current = ""
+        var currentByteCount = 0
+
         for character in text {
-            let candidate = current + String(character)
-            if !current.isEmpty && candidate.utf8.count > maximumSourceBytes {
+            let characterByteCount = String(character).utf8.count
+            if !current.isEmpty,
+               currentByteCount + characterByteCount > maximumSourceBytes {
                 chunks.append(current)
                 current = String(character)
+                currentByteCount = characterByteCount
             } else {
-                current = candidate
+                current.append(character)
+                currentByteCount += characterByteCount
             }
         }
+
         if !current.isEmpty { chunks.append(current) }
         return chunks
     }
