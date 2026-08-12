@@ -3,6 +3,7 @@ import Foundation
 
 struct AppStateStorageSafetyTests {
     static func main() async throws {
+        try verifiesDefaultAppStateUsesLiveStorageLayout()
         try await verifiesHistoryCreatedAfterAssetsDoesNotSweep()
         try await verifiesHistoryRowsLostAfterSnapshotDoesNotSweep()
         try await verifiesUnavailableHistoryBlocksMutatingActions()
@@ -36,6 +37,14 @@ struct AppStateStorageSafetyTests {
             )
         }
         print("AppStateStorageSafetyTests passed")
+    }
+
+    private static func verifiesDefaultAppStateUsesLiveStorageLayout() throws {
+        let appState = AppState()
+        try expect(
+            appState.storageLayout.rootDirectory == AppName.applicationSupportDirectory,
+            "default AppState keeps the production storage root"
+        )
     }
 
     private static func verifiesHistoryCreatedAfterAssetsDoesNotSweep() async throws {

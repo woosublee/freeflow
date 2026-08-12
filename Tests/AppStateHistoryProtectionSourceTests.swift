@@ -92,7 +92,7 @@ struct AppStateHistoryProtectionSourceTests {
                 && source.contains("HistoryArchiveTransition(")
                 && source.contains("Task.detached(priority: .userInitiated)")
                 && source.contains("completeHistoryArchiveTransition(")
-                && source.contains("let activeStore = Self.pipelineHistoryStoreAtURLFactory(")
+                && source.contains("let activeStore = dependencies.makePipelineHistoryStore(")
                 && source.contains("historyArchiveSafety = HistoryArchiveTransition.inspect("),
             "explicit archive transitions in the background and installs only a verified fresh history store"
         )
@@ -101,6 +101,11 @@ struct AppStateHistoryProtectionSourceTests {
             to: "@MainActor\n    func clearPipelineHistory()"
         )
         let archiveBody = String(source[archiveRange])
+        try expect(
+            archiveBody.contains("let storageRoot = dependencies.storageLayout.rootDirectory")
+                && archiveBody.contains("let makeStore = dependencies.makePipelineHistoryStore"),
+            "archive captures the originating storage layout and history-store factory"
+        )
         for requiredGuard in [
             "historyArchiveSafety == .normal",
             "pendingAudioImportJobIDs.isEmpty",
@@ -231,11 +236,11 @@ struct AppStateHistoryProtectionSourceTests {
         )
         let snapshotFailureRange = try source.range(
             from: "private func completeHistoryRecoverySnapshotOperationFailure(at storageRoot: URL)",
-            to: "static func appStorageRootDirectory() -> URL"
+            to: "@discardableResult\n    private static func preparedDirectory("
         )
         let snapshotFailure = String(source[snapshotFailureRange])
         try expect(
-            !snapshotFailure.contains("pipelineHistoryStoreAtURLFactory")
+            !snapshotFailure.contains("dependencies.makePipelineHistoryStore")
                 && !snapshotFailure.contains("pipelineHistoryStore ="),
             "snapshot-only recovery failure keeps the active Core Data store attached"
         )

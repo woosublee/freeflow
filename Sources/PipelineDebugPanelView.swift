@@ -55,7 +55,7 @@ struct PipelineDebugPanelView: View {
         guard let item = appState.pipelineHistory.first else { return }
         TestCaseExporter.exportWithSavePanel(
             item: item,
-            audioDirURL: AppState.audioStorageDirectory()
+            audioDirURL: appState.storageLayout.audioDirectory
         )
     }
 }

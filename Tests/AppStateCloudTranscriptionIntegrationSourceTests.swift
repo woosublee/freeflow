@@ -277,7 +277,7 @@ struct AppStateCloudTranscriptionIntegrationSourceTests {
     private static func verifiesStartupReconciliationOrder(_ source: String) throws {
         let initializer = block(
             source,
-            from: "init() {",
+            from: "init(dependencies: AppStateDependencies = .live) {",
             to: "private static func loadShortcutConfiguration"
         )
         try expectOrdered(

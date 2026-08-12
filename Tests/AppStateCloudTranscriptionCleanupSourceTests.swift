@@ -28,7 +28,7 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
             [
                 "cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(",
                 "retryingItemIDs.remove(assets.historyID)",
-                "Self.deleteStoredFiles(assets)",
+                "Self.deleteStoredFiles(assets, storageLayout: storageLayout)",
                 "cloudTranscriptionJobStore.delete("
             ],
             in: cleanup,
@@ -77,14 +77,14 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
     private static func verifiesTrimmedAssetsUseCommonCleanup(_ source: String) throws {
         let initializer = block(
             source,
-            from: "init() {",
+            from: "init(dependencies: AppStateDependencies = .live) {",
             to: "private static func loadShortcutConfiguration"
         )
         try expectOrdered(
             [
                 "pipelineHistoryStore.trim(to: maxPipelineHistoryCount)",
                 "cloudTranscriptionJobStore.invalidateSession(",
-                "Self.deleteStoredFiles(removedAssets)",
+                "Self.deleteStoredFiles(removedAssets, storageLayout: storageLayout)",
                 "cloudTranscriptionJobStore.delete("
             ],
             in: initializer,

@@ -1575,6 +1575,7 @@ private struct NoteDetailView: View {
                 item: item,
                 content: displayContent,
                 customTitle: item.customTitle,
+                audioDirectory: appState.storageLayout.audioDirectory,
                 onDismiss: { showObsidianExportSheet = false }
             )
         }
@@ -2214,12 +2215,16 @@ private struct NoteDetailView: View {
         let postProcessed = item.postProcessedTranscript
         let raw = item.rawTranscript
         let fileName = item.transcriptFileName
+        let transcriptDirectory = appState.storageLayout.transcriptDirectory
         Task.detached(priority: .userInitiated) {
             let text: String
             if !postProcessed.isEmpty {
                 text = postProcessed
             } else if let fileName {
-                text = AppState.loadTranscript(from: fileName) ?? raw
+                text = AppState.loadTranscript(
+                    from: fileName,
+                    transcriptDirectory: transcriptDirectory
+                ) ?? raw
             } else {
                 text = raw
             }
@@ -2867,6 +2872,7 @@ private struct ObsidianExportSheet: View {
     let item: PipelineHistoryItem
     let content: String
     var customTitle: String? = nil
+    let audioDirectory: URL
     let onDismiss: () -> Void
 
     @AppStorage("obsidian_vault_path") private var vaultPath: String = ""
@@ -2888,7 +2894,7 @@ private struct ObsidianExportSheet: View {
     private var hasAudio: Bool {
         guard let fileName = item.audioFileName else { return false }
         return FileManager.default.fileExists(
-            atPath: AppState.audioStorageDirectory().appendingPathComponent(fileName).path
+            atPath: audioDirectory.appendingPathComponent(fileName).path
         )
     }
 
@@ -3039,7 +3045,7 @@ private struct ObsidianExportSheet: View {
             .components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|"))
             .joined(separator: "-")
         let audioSrcURL: URL? = (includeAudio && hasAudio && item.audioFileName != nil)
-            ? AppState.audioStorageDirectory().appendingPathComponent(item.audioFileName!)
+            ? audioDirectory.appendingPathComponent(item.audioFileName!)
             : nil
         ObsidianExportManager.shared.export(
             itemID: item.id,

@@ -369,7 +369,7 @@ final class MCPServer {
             isoFormatter.timeZone = TimeZone.current
             let payload = MeetingSourcePayload.make(
                 item: item,
-                audioDirectory: AppState.audioStorageDirectory(),
+                audioDirectory: appState.storageLayout.audioDirectory,
                 fileExists: { FileManager.default.fileExists(atPath: $0.path) },
                 formatter: isoFormatter
             )
