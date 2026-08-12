@@ -9,6 +9,10 @@ struct NoteListRowDisplayDataTests {
         testFormatsEnglishWeekdayAndMonthStyles()
         testKeepsCurrentCalendarWithLocaleSpecificTemplates()
         testFormatsJapaneseDetailTimestamp()
+        testRepeatedFormattingRemainsStable()
+        testCalendarAndTimeZoneFormattingRemainIsolated()
+        testHourCycleFormattingRemainsIsolated()
+        testConcurrentFormattingRemainsStable()
         testFormatsSameMorningRowDateStartTime()
         testFormatsMorningToAfternoonRowDateStartTime()
         testFormatsCrossDateRowDateStartTime()
@@ -144,6 +148,144 @@ struct NoteListRowDisplayDataTests {
         let japanese = NoteTimestampFormatter.detailTimestamp(for: item, locale: Locale(identifier: "ja_JP"))
 
         assert(japanese == "2026年5月15日(金) 10時38分～11時12分", "Unexpected Japanese interval: \(japanese)")
+    }
+
+    private static func testRepeatedFormattingRemainsStable() {
+        let item = historyItem(
+            timestamp: date(year: 2026, month: 5, day: 15, hour: 11, minute: 12),
+            recordingStartedAt: date(year: 2026, month: 5, day: 15, hour: 10, minute: 38),
+            recordingEndedAt: date(year: 2026, month: 5, day: 15, hour: 11, minute: 12),
+            transcript: "Repeated formatting"
+        )
+        let locale = Locale(identifier: "ko_KR")
+        let expected = NoteTimestampFormatter.detailTimestamp(for: item, locale: locale)
+
+        for _ in 0..<100 {
+            assert(
+                NoteTimestampFormatter.detailTimestamp(for: item, locale: locale)
+                    == expected
+            )
+        }
+    }
+
+    private static func testCalendarAndTimeZoneFormattingRemainIsolated() {
+        let timestamp = date(
+            year: 2026,
+            month: 1,
+            day: 1,
+            hour: 2,
+            minute: 30,
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+        let item = historyItem(timestamp: timestamp, transcript: "Time zones")
+        let locale = Locale(identifier: "en_US")
+        let utc = TimeZone(secondsFromGMT: 0)!
+        let honolulu = TimeZone(identifier: "Pacific/Honolulu")!
+        let gregorian = Calendar(identifier: .gregorian)
+        let buddhist = Calendar(identifier: .buddhist)
+
+        let utcValue = NoteTimestampFormatter.rowTimestamp(
+            for: item,
+            locale: locale,
+            calendar: gregorian,
+            timeZone: utc
+        )
+        let honoluluValue = NoteTimestampFormatter.rowTimestamp(
+            for: item,
+            locale: locale,
+            calendar: gregorian,
+            timeZone: honolulu
+        )
+        let gregorianValue = NoteTimestampFormatter.detailTimestamp(
+            for: item,
+            locale: locale,
+            calendar: gregorian,
+            timeZone: utc
+        )
+        let buddhistValue = NoteTimestampFormatter.detailTimestamp(
+            for: item,
+            locale: locale,
+            calendar: buddhist,
+            timeZone: utc
+        )
+        let gregorianAgain = NoteTimestampFormatter.detailTimestamp(
+            for: item,
+            locale: locale,
+            calendar: gregorian,
+            timeZone: utc
+        )
+
+        assert(utcValue != honoluluValue, "time-zone-specific values differ")
+        assert(gregorianValue != buddhistValue, "calendar-specific values differ")
+        assert(buddhistValue.contains("2569"), "Buddhist calendar uses year 2569")
+        assert(gregorianAgain == gregorianValue, "alternating calendars do not contaminate Gregorian output")
+    }
+
+    private static func testHourCycleFormattingRemainsIsolated() {
+        let item = historyItem(
+            timestamp: date(
+                year: 2026,
+                month: 5,
+                day: 15,
+                hour: 13,
+                minute: 12,
+                timeZone: TimeZone(secondsFromGMT: 0)!
+            ),
+            transcript: "Hour cycles"
+        )
+        let utc = TimeZone(secondsFromGMT: 0)!
+        var twelveHourComponents = Locale.Components(
+            languageCode: .english,
+            languageRegion: .unitedStates
+        )
+        twelveHourComponents.hourCycle = .oneToTwelve
+        var twentyFourHourComponents = twelveHourComponents
+        twentyFourHourComponents.hourCycle = .zeroToTwentyThree
+        let twelveHourLocale = Locale(components: twelveHourComponents)
+        let twentyFourHourLocale = Locale(components: twentyFourHourComponents)
+
+        assert(twelveHourLocale.hourCycle != twentyFourHourLocale.hourCycle)
+
+        let twelveHourValue = NoteTimestampFormatter.rowTimestamp(
+            for: item,
+            locale: twelveHourLocale,
+            timeZone: utc
+        )
+        let twentyFourHourValue = NoteTimestampFormatter.rowTimestamp(
+            for: item,
+            locale: twentyFourHourLocale,
+            timeZone: utc
+        )
+        let twelveHourAgain = NoteTimestampFormatter.rowTimestamp(
+            for: item,
+            locale: twelveHourLocale,
+            timeZone: utc
+        )
+
+        assert(twelveHourValue.contains("PM"), "12-hour value preserves AM/PM")
+        assert(twentyFourHourValue.contains("13:12"), "24-hour value preserves hour cycle")
+        assert(twelveHourAgain == twelveHourValue, "alternating hour cycles do not contaminate 12-hour output")
+    }
+
+    private static func testConcurrentFormattingRemainsStable() {
+        let item = historyItem(
+            timestamp: date(year: 2026, month: 5, day: 15, hour: 11, minute: 12),
+            recordingStartedAt: date(year: 2026, month: 5, day: 15, hour: 10, minute: 38),
+            recordingEndedAt: date(year: 2026, month: 5, day: 15, hour: 11, minute: 12),
+            transcript: "Concurrent formatting"
+        )
+        let locale = Locale(identifier: "en_US")
+        let expected = NoteTimestampFormatter.detailTimestamp(for: item, locale: locale)
+        let results = LockedStrings()
+
+        DispatchQueue.concurrentPerform(iterations: 200) { _ in
+            results.append(
+                NoteTimestampFormatter.detailTimestamp(for: item, locale: locale)
+            )
+        }
+
+        assert(results.values.count == 200)
+        assert(results.values.allSatisfy { $0 == expected })
     }
 
     private static func testFormatsSameMorningRowDateStartTime() {
@@ -554,15 +696,39 @@ struct NoteListRowDisplayDataTests {
         )
     }
 
-    private static func date(year: Int, month: Int, day: Int, hour: Int, minute: Int) -> Date {
+    private static func date(
+        year: Int,
+        month: Int,
+        day: Int,
+        hour: Int,
+        minute: Int,
+        timeZone: TimeZone = .current
+    ) -> Date {
         var components = DateComponents()
         components.calendar = Calendar(identifier: .gregorian)
-        components.timeZone = .current
+        components.timeZone = timeZone
         components.year = year
         components.month = month
         components.day = day
         components.hour = hour
         components.minute = minute
         return components.date!
+    }
+}
+
+private final class LockedStrings: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    var values: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ value: String) {
+        lock.lock()
+        storage.append(value)
+        lock.unlock()
     }
 }

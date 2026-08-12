@@ -8,6 +8,8 @@ struct PostProcessingChunkingTests {
         try testParagraphsArePreferredAndRemainOrdered()
         try testSentencesSplitWhenParagraphExceedsBudget()
         try testLongTokenFallsBackToSafeByteBoundaries()
+        try testMultibyteCharactersRespectSafeBoundaries()
+        try testLargeUnbrokenTokenPreservesOrderAndBudget()
         print("PostProcessingChunkingTests passed")
     }
 
@@ -46,6 +48,38 @@ struct PostProcessingChunkingTests {
             "oversized token splits at safe byte boundaries"
         )
         try expect(chunks.allSatisfy { $0.text.utf8.count <= 8 }, "every chunk respects the byte budget")
+    }
+
+    private static func testMultibyteCharactersRespectSafeBoundaries() throws {
+        let splitter = PostProcessingTranscriptSplitter(maximumSourceBytes: 7)
+        let source = "가나다🙂라마"
+
+        let chunks = splitter.chunks(for: source)
+
+        try expect(
+            chunks.map(\.text).joined() == source,
+            "multibyte chunks preserve every Character in order"
+        )
+        try expect(
+            chunks.allSatisfy { chunk in
+                chunk.text.count == 1 || chunk.text.utf8.count <= 7
+            },
+            "multibyte chunks stay within budget unless one Character exceeds it"
+        )
+    }
+
+    private static func testLargeUnbrokenTokenPreservesOrderAndBudget() throws {
+        let splitter = PostProcessingTranscriptSplitter(maximumSourceBytes: 1_024)
+        let source = String(repeating: "abcdefghij", count: 10_000)
+
+        let chunks = splitter.chunks(for: source)
+
+        try expect(chunks.map(\.text).joined() == source, "large token preserves source order")
+        try expect(chunks.count > 1, "large token is split")
+        try expect(
+            chunks.allSatisfy { $0.text.utf8.count <= 1_024 },
+            "every ASCII chunk respects the byte budget"
+        )
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
