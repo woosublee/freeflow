@@ -32,45 +32,139 @@ func transcriptStatus(for item: PipelineHistoryItem, retrying: Set<UUID>) -> Tra
 }
 
 enum NoteTimestampFormatter {
-    static func detailTimestamp(for item: PipelineHistoryItem, locale: Locale = .current) -> String {
+    private enum FormatterRole: Hashable {
+        case row
+        case detail
+        case interval
+    }
+
+    private struct FormatterKey: Hashable {
+        let role: FormatterRole
+        let localeIdentifier: String
+        let calendarIdentifier: Calendar.Identifier
+        let timeZoneIdentifier: String
+    }
+
+    private final class FormatterCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var dateFormatters: [FormatterKey: DateFormatter] = [:]
+        private var intervalFormatters: [FormatterKey: DateIntervalFormatter] = [:]
+
+        func string(
+            from date: Date,
+            role: FormatterRole,
+            template: String,
+            locale: Locale,
+            calendar: Calendar,
+            timeZone: TimeZone
+        ) -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            let key = FormatterKey(
+                role: role,
+                localeIdentifier: locale.identifier,
+                calendarIdentifier: calendar.identifier,
+                timeZoneIdentifier: timeZone.identifier
+            )
+            let formatter: DateFormatter
+            if let cached = dateFormatters[key] {
+                formatter = cached
+            } else {
+                let created = DateFormatter()
+                created.locale = locale
+                created.calendar = calendar
+                created.timeZone = timeZone
+                created.setLocalizedDateFormatFromTemplate(template)
+                dateFormatters[key] = created
+                formatter = created
+            }
+            return formatter.string(from: date)
+        }
+
+        func string(
+            from start: Date,
+            to end: Date,
+            template: String,
+            locale: Locale,
+            calendar: Calendar,
+            timeZone: TimeZone
+        ) -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            let key = FormatterKey(
+                role: .interval,
+                localeIdentifier: locale.identifier,
+                calendarIdentifier: calendar.identifier,
+                timeZoneIdentifier: timeZone.identifier
+            )
+            let formatter: DateIntervalFormatter
+            if let cached = intervalFormatters[key] {
+                formatter = cached
+            } else {
+                let created = DateIntervalFormatter()
+                created.locale = locale
+                created.calendar = calendar
+                created.timeZone = timeZone
+                created.dateTemplate = template
+                intervalFormatters[key] = created
+                formatter = created
+            }
+            return formatter.string(from: start, to: end)
+        }
+    }
+
+    private static let cache = FormatterCache()
+
+    static func detailTimestamp(
+        for item: PipelineHistoryItem,
+        locale: Locale = .current,
+        calendar: Calendar = .current,
+        timeZone: TimeZone = .current
+    ) -> String {
         guard let startedAt = item.recordingStartedAt,
               let endedAt = item.recordingEndedAt,
               endedAt >= startedAt else {
-            return normalized(detailTimestampFormatter(locale: locale).string(from: item.timestamp))
+            return normalized(
+                cache.string(
+                    from: item.timestamp,
+                    role: .detail,
+                    template: "yMMMdEEEjm",
+                    locale: locale,
+                    calendar: calendar,
+                    timeZone: timeZone
+                )
+            )
         }
 
         return normalized(
-            detailIntervalFormatter(locale: locale).string(from: startedAt, to: endedAt)
+            cache.string(
+                from: startedAt,
+                to: endedAt,
+                template: "yMMMdEEEjm",
+                locale: locale,
+                calendar: calendar,
+                timeZone: timeZone
+            )
         )
     }
 
-    static func rowTimestamp(for item: PipelineHistoryItem, locale: Locale = .current) -> String {
+    static func rowTimestamp(
+        for item: PipelineHistoryItem,
+        locale: Locale = .current,
+        calendar: Calendar = .current,
+        timeZone: TimeZone = .current
+    ) -> String {
         let timestamp = item.recordingStartedAt ?? item.timestamp
-        return normalized(rowTimestampFormatter(locale: locale).string(from: timestamp))
-    }
-
-    private static func rowTimestampFormatter(locale: Locale) -> DateFormatter {
-        let formatter = DateFormatter()
-        formatter.locale = locale
-        formatter.calendar = .current
-        formatter.setLocalizedDateFormatFromTemplate("MMMMdEEEjm")
-        return formatter
-    }
-
-    private static func detailTimestampFormatter(locale: Locale) -> DateFormatter {
-        let formatter = DateFormatter()
-        formatter.locale = locale
-        formatter.calendar = .current
-        formatter.setLocalizedDateFormatFromTemplate("yMMMdEEEjm")
-        return formatter
-    }
-
-    private static func detailIntervalFormatter(locale: Locale) -> DateIntervalFormatter {
-        let formatter = DateIntervalFormatter()
-        formatter.locale = locale
-        formatter.calendar = .current
-        formatter.dateTemplate = "yMMMdEEEjm"
-        return formatter
+        return normalized(
+            cache.string(
+                from: timestamp,
+                role: .row,
+                template: "MMMMdEEEjm",
+                locale: locale,
+                calendar: calendar,
+                timeZone: timeZone
+            )
+        )
     }
 
     private static func normalized(_ value: String) -> String {
