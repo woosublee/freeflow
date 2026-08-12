@@ -5305,19 +5305,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         try? FileManager.default.removeItem(at: fileURL)
     }
 
-    static func loadTranscript(
-        from fileName: String,
-        transcriptDirectory: URL
-    ) -> String? {
-        let fileURL = transcriptDirectory.appendingPathComponent(fileName)
-        return try? String(contentsOf: fileURL, encoding: .utf8)
-    }
-
     func loadTranscript(from fileName: String) -> String? {
-        Self.loadTranscript(
-            from: fileName,
-            transcriptDirectory: storageLayout.transcriptDirectory
-        )
+        let fileURL = storageLayout.transcriptDirectory.appendingPathComponent(fileName)
+        return try? String(contentsOf: fileURL, encoding: .utf8)
     }
 
     static func fileSizeBytes(for fileURL: URL) -> Int64? {

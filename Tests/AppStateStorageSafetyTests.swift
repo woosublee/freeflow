@@ -5,6 +5,7 @@ struct AppStateStorageSafetyTests {
     static func main() async throws {
         try verifiesDefaultAppStateUsesLiveStorageLayout()
         try await verifiesAppStateInstancesKeepIndependentHistoryLayouts()
+        try await verifiesArchiveUsesOriginatingHistoryStoreFactory()
         try await verifiesHistoryCreatedAfterAssetsDoesNotSweep()
         try await verifiesHistoryRowsLostAfterSnapshotDoesNotSweep()
         try await verifiesUnavailableHistoryBlocksMutatingActions()
@@ -111,6 +112,64 @@ struct AppStateStorageSafetyTests {
                    "first AppState loads only its history layout")
         try expect(secondState.pipelineHistory.map(\.id) == [secondItem.id],
                    "second AppState loads only its history layout")
+    }
+
+    private static func verifiesArchiveUsesOriginatingHistoryStoreFactory() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            let layout = environment.storageLayout
+            try Data("unavailable canonical history".utf8).write(to: layout.historyStoreURL)
+            let unavailableStore = PipelineHistoryStore(
+                storeURL: layout.historyStoreURL,
+                persistentStoreLoader: { _ in
+                    TestFailure("Injected unavailable history for factory ownership")
+                }
+            )
+            let originatingRecorder = HistoryStoreURLRecorder()
+            let laterRecorder = HistoryStoreURLRecorder()
+            let startupFactory = UnavailableStartupStoreFactoryState(
+                startupURL: layout.historyStoreURL
+            )
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = { url in
+                originatingRecorder.record(url)
+                return startupFactory.makeStore(
+                    for: url,
+                    unavailableStore: unavailableStore
+                )
+            }
+
+            let configuredDependencies = dependencies
+            let appState = await MainActor.run {
+                AppState(dependencies: configuredDependencies)
+            }
+            dependencies.makePipelineHistoryStore = { url in
+                laterRecorder.record(url)
+                return PipelineHistoryStore(storeURL: url)
+            }
+            let archiveAccepted = await MainActor.run {
+                appState.archiveOldHistoryAndStartFresh()
+            }
+
+            try expect(archiveAccepted, "factory ownership archive is accepted")
+            try await waitForArchiveCompletion(appState)
+            try expect(
+                originatingRecorder.contains(layout.historyStoreURL),
+                "archive replacement uses the originating AppState factory"
+            )
+            try expect(
+                originatingRecorder.count(of: layout.historyStoreURL) >= 5,
+                "originating factory receives startup, archive probe, and replacement requests"
+            )
+            try expect(
+                laterRecorder.isEmpty,
+                "later dependency mutation cannot redirect archive work"
+            )
+            try expect(
+                !appState.isHistoryUnavailable,
+                "originating factory installs the verified fresh active store"
+            )
+        }
     }
 
     private static func verifiesHistoryCreatedAfterAssetsDoesNotSweep() async throws {
@@ -830,6 +889,27 @@ struct AppStateStorageSafetyTests {
         _ label: String
     ) throws {
         guard condition() else { throw TestFailure(label) }
+    }
+
+    private final class HistoryStoreURLRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var urls: [URL] = []
+
+        var isEmpty: Bool {
+            lock.withLock { urls.isEmpty }
+        }
+
+        func record(_ url: URL) {
+            lock.withLock { urls.append(url) }
+        }
+
+        func contains(_ url: URL) -> Bool {
+            lock.withLock { urls.contains(url) }
+        }
+
+        func count(of url: URL) -> Int {
+            lock.withLock { urls.filter { $0 == url }.count }
+        }
     }
 
     private final class UnavailableStartupStoreFactoryState: @unchecked Sendable {

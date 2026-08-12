@@ -3,6 +3,28 @@ import Foundation
 struct AppStateHistoryProtectionSourceTests {
     static func main() throws {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
+        let repositorySwiftSource = try combinedSwiftSource(in: ["Sources", "Tests"])
+        let removedSeams = [
+            ["meeting", "Summary", "Generator", "Factory"].joined(),
+            ["storage", "Root", "Provider"].joined(),
+            ["pipeline", "History", "Store", "Factory"].joined(),
+            ["pipeline", "History", "Store", "At", "URL", "Factory"].joined(),
+            ["retry", "Cloud", "Transcription", "Dependencies", "Factory"].joined(),
+            ["make", "Default", "Pipeline", "History", "Store"].joined()
+        ]
+        let removedStaticReferences = [
+            ["App", "State", ".", "app", "Storage", "Root", "Directory"].joined(),
+            ["App", "State", ".", "audio", "Storage", "Directory"].joined(),
+            ["App", "State", ".", "transcript", "Storage", "Directory"].joined(),
+            ["App", "State", ".", "load", "Transcript"].joined(),
+            ["static func ", "load", "Transcript"].joined()
+        ]
+        for removedIdentifier in removedSeams + removedStaticReferences {
+            try expect(
+                !repositorySwiftSource.contains(removedIdentifier),
+                "removed AppState dependency seam remains absent: \(removedIdentifier)"
+            )
+        }
 
         try expect(
             source.contains("if initialHistoryArchiveSafety == .normal,")
@@ -265,6 +287,21 @@ struct AppStateHistoryProtectionSourceTests {
         )
 
         print("AppStateHistoryProtectionSourceTests passed")
+    }
+
+    private static func combinedSwiftSource(in directories: [String]) throws -> String {
+        let fileManager = FileManager.default
+        var source = ""
+        for directory in directories {
+            guard let enumerator = fileManager.enumerator(atPath: directory) else {
+                throw TestFailure("Missing source directory: \(directory)")
+            }
+            for case let relativePath as String in enumerator where relativePath.hasSuffix(".swift") {
+                let fileURL = URL(fileURLWithPath: directory).appendingPathComponent(relativePath)
+                source += try String(contentsOf: fileURL, encoding: .utf8)
+            }
+        }
+        return source
     }
 
     private static func expectOrdered(

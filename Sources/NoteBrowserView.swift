@@ -2221,10 +2221,8 @@ private struct NoteDetailView: View {
             if !postProcessed.isEmpty {
                 text = postProcessed
             } else if let fileName {
-                text = AppState.loadTranscript(
-                    from: fileName,
-                    transcriptDirectory: transcriptDirectory
-                ) ?? raw
+                let fileURL = transcriptDirectory.appendingPathComponent(fileName)
+                text = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? raw
             } else {
                 text = raw
             }

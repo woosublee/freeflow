@@ -4098,10 +4098,8 @@ struct RunLogEntryView: View {
                         Task.detached(priority: .userInitiated) {
                             let text: String
                             if let fileName = item.transcriptFileName {
-                                text = AppState.loadTranscript(
-                                    from: fileName,
-                                    transcriptDirectory: transcriptDirectory
-                                ) ?? ""
+                                let fileURL = transcriptDirectory.appendingPathComponent(fileName)
+                                text = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
                             } else {
                                 // 구 항목: rawTranscript 또는 postProcessedTranscript에서 읽기
                                 let t = item.rawTranscript.isEmpty ? item.postProcessedTranscript : item.rawTranscript
