@@ -145,6 +145,7 @@ private struct AudioImportTaskConfiguration {
     let outputLanguage: String
     let postProcessingEnabled: Bool
     let pressEnterCommandEnabled: Bool
+    let nativeWhisperExecution: NativeWhisperExecutionSnapshot?
     let cloudDependencies: CloudTranscriptionDependencies
     let postProcessingService: PostProcessingService
 
@@ -159,6 +160,7 @@ private struct AudioImportTaskConfiguration {
         outputLanguage: String,
         postProcessingEnabled: Bool,
         pressEnterCommandEnabled: Bool,
+        nativeWhisperExecution: NativeWhisperExecutionSnapshot?,
         cloudDependencies: CloudTranscriptionDependencies,
         postProcessingService: PostProcessingService
     ) {
@@ -176,6 +178,7 @@ private struct AudioImportTaskConfiguration {
         self.outputLanguage = outputLanguage
         self.postProcessingEnabled = postProcessingEnabled
         self.pressEnterCommandEnabled = pressEnterCommandEnabled
+        self.nativeWhisperExecution = nativeWhisperExecution
         self.cloudDependencies = cloudDependencies
         self.postProcessingService = postProcessingService
     }
@@ -200,6 +203,7 @@ private struct AudioImportTaskConfiguration {
             transcriptionLanguage: transcriptionLanguage,
             localTranscriptionModel: localTranscriptionModel,
             transcriptionModel: transcriptionModel,
+            nativeWhisperExecution: nativeWhisperExecution,
             cloudDependencies: cloudDependencies,
             cloudExecutionContext: cloudExecutionContext
         )
@@ -4814,8 +4818,33 @@ final class AppState: ObservableObject, @unchecked Sendable {
             useLegacyMlxWhisper: useLegacyMlxWhisper,
             transcriptionLanguage: transcriptionLanguage,
             localTranscriptionModel: localTranscriptionModel,
-            transcriptionModel: transcriptionModel
+            transcriptionModel: transcriptionModel,
+            nativeWhisperExecution: nativeWhisperExecutionSnapshot(
+                useLocalTranscription: useLocalTranscription,
+                localTranscriptionModel: localTranscriptionModel,
+                useLegacyMlxWhisper: useLegacyMlxWhisper
+            )
         )
+    }
+
+    private func nativeWhisperExecutionSnapshot(
+        for choice: TranscriptionBackendChoice
+    ) -> NativeWhisperExecutionSnapshot? {
+        guard case .nativeWhisper = choice else { return nil }
+        return dependencies.nativeWhisper.makeExecutionSnapshot()
+    }
+
+    private func nativeWhisperExecutionSnapshot(
+        useLocalTranscription: Bool,
+        localTranscriptionModel: TranscriptionModel,
+        useLegacyMlxWhisper: Bool
+    ) -> NativeWhisperExecutionSnapshot? {
+        guard useLocalTranscription,
+              !localTranscriptionModel.isAppleSpeech,
+              !useLegacyMlxWhisper else {
+            return nil
+        }
+        return dependencies.nativeWhisper.makeExecutionSnapshot()
     }
 
     private func persistShortcut(_ binding: ShortcutBinding, key: String) {
@@ -7343,6 +7372,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             outputLanguage: outputLanguage,
             postProcessingEnabled: !disablePostProcessing,
             pressEnterCommandEnabled: isPressEnterVoiceCommandEnabled,
+            nativeWhisperExecution: nativeWhisperExecutionSnapshot(for: choice),
             cloudDependencies: Self
                 .audioImportCloudTranscriptionDependenciesFactory(),
             postProcessingService: makePostProcessingService()
@@ -7858,6 +7888,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     useLegacyMlxWhisper: configuration.useLegacyMlxWhisper,
                     language: TranscriptionLanguage.find(
                         code: item.transcriptionLanguageCode
+                    ),
+                    nativeWhisperExecution: nativeWhisperExecutionSnapshot(
+                        for: retryChoice
                     )
                 ),
                 completionSnapshot
@@ -10508,6 +10541,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let capturedTranscriptionLanguage = transcriptionLanguage
         let capturedLocalTranscriptionModel = localTranscriptionModel
         let capturedTranscriptionModel = transcriptionModel
+        let capturedNativeWhisperExecution = nativeWhisperExecutionSnapshot(
+            useLocalTranscription: capturedUseLocalTranscription,
+            localTranscriptionModel: capturedLocalTranscriptionModel,
+            useLegacyMlxWhisper: capturedUseLegacyMlxWhisper
+        )
         let capturedCustomVocabulary = customVocabulary
         let capturedCustomSystemPrompt = customSystemPrompt
         let capturedOutputLanguage = outputLanguage
@@ -10774,6 +10812,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             transcriptionLanguage: capturedTranscriptionLanguage,
                             localTranscriptionModel: capturedLocalTranscriptionModel,
                             transcriptionModel: capturedTranscriptionModel,
+                            nativeWhisperExecution: capturedNativeWhisperExecution,
                             cloudExecutionContext: cloudExecutionContext
                         )
                         transcription = try await Self.resolveRawTranscript(

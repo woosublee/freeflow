@@ -8,6 +8,7 @@ struct TranscriptionExecutionSnapshotTests {
         try rejectsProviderURLCredentialsQueryAndFragment()
         try cloudSnapshotCapturesImmutableExecutionValues()
         try localSnapshotCapturesImmutableExecutionValues()
+        try localSnapshotRetainsNativeWhisperExecution()
         try completionSnapshotConvertsToDurablePolicyWithoutSecrets()
         try completionPolicyDecodesLegacyPreserveExactWordingKey()
         try serviceFactoryStaysInTranscriptionServiceBoundary()
@@ -122,6 +123,50 @@ struct TranscriptionExecutionSnapshotTests {
         try expect(path != snapshot.localWhisperPath, "later local path mutation ignored")
         try expect(useLegacy != snapshot.useLegacyMlxWhisper, "later local engine mutation ignored")
         try expect(language != snapshot.language, "later local language mutation ignored")
+    }
+
+    private static func localSnapshotRetainsNativeWhisperExecution() throws {
+        let modelURL = URL(fileURLWithPath: "/tmp/origin-a/model.bin")
+        let native = NativeWhisperExecutionSnapshot(
+            modelID: "origin-a",
+            modelIsReady: { true },
+            modelURL: { modelURL },
+            validateRunnerAndModel: { _ in },
+            prepareAudio: { url in
+                NativeWhisperExecutionSnapshot.PreparedAudio(
+                    fileURL: url,
+                    cleanup: {}
+                )
+            },
+            transcribe: { _, _, _ in
+                TranscriptionResult(
+                    text: "origin-a",
+                    spokenLanguage: SpokenLanguageResolver.resolve(
+                        requestedLanguageCode: "auto",
+                        engineLanguageCode: nil,
+                        transcript: "origin-a"
+                    )
+                )
+            }
+        )
+        let local = LocalTranscriptionExecutionSnapshot(
+            model: .find(id: "mlx-community/whisper-large-v3-turbo"),
+            localWhisperPath: nil,
+            useLegacyMlxWhisper: false,
+            language: .auto,
+            nativeWhisperExecution: native
+        )
+
+        try expectEqual(
+            local.nativeWhisperExecution?.modelID,
+            "origin-a",
+            "local snapshot retains Native Whisper execution"
+        )
+        try expectEqual(
+            local.nativeWhisperExecution?.modelURL(),
+            modelURL,
+            "local snapshot retains the originating model URL"
+        )
     }
 
     private static func completionSnapshotConvertsToDurablePolicyWithoutSecrets() throws {

@@ -39,6 +39,10 @@ struct AppStateHistoryProtectionSourceTests {
             ["local", "AI", "Processing", "Availability", "Provider"].joined()
         ]
         let removedSeams = removedHistorySeams + removedModelSeams
+        let removedNativeWhisperWorkerConstructions: [String] = [
+            ["Native", "Whisper", "Model", "Store", "()"].joined(),
+            ["Native", "Whisper", "Runtime", "()"].joined()
+        ]
         let removedStaticReferences = [
             ["App", "State", ".", "app", "Storage", "Root", "Directory"].joined(),
             ["App", "State", ".", "audio", "Storage", "Directory"].joined(),
@@ -50,6 +54,27 @@ struct AppStateHistoryProtectionSourceTests {
             try expect(
                 !repositorySwiftSource.contains(removedIdentifier),
                 "removed AppState dependency seam remains absent: \(removedIdentifier)"
+            )
+        }
+
+        // Native Whisper behavior and two-environment isolation are covered by
+        // TranscriptionServiceLocalIssueTests. This narrow scan only prevents
+        // the removed worker-local live construction from returning.
+        let transcriptionServiceSource = try String(
+            contentsOfFile: "Sources/TranscriptionService.swift",
+            encoding: .utf8
+        )
+        let nativeWhisperWorkerRange = try transcriptionServiceSource.range(
+            from: "private func transcribeWithNativeWhisper(fileURL: URL)",
+            to: "private func transcribeWithAppleSpeech(fileURL: URL)"
+        )
+        let nativeWhisperWorker = String(
+            transcriptionServiceSource[nativeWhisperWorkerRange]
+        )
+        for removedConstruction in removedNativeWhisperWorkerConstructions {
+            try expect(
+                !nativeWhisperWorker.contains(removedConstruction),
+                "Native Whisper worker does not reopen live execution: \(removedConstruction)"
             )
         }
 

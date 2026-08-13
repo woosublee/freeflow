@@ -89,6 +89,8 @@ struct AppStateNativeWhisperDependencies {
     var progressSchedule:
         LatestValueProgressCoalescer<NativeWhisperDownloadProgress>.Schedule
     var deleteModel: @Sendable (NativeWhisperModel) throws -> Void
+    var makeExecutionSnapshot:
+        @Sendable () -> NativeWhisperExecutionSnapshot
 
     static var live: AppStateNativeWhisperDependencies {
         let store = NativeWhisperModelStore()
@@ -104,7 +106,10 @@ struct AppStateNativeWhisperDependencies {
             progressSchedule:
                 LatestValueProgressCoalescer<NativeWhisperDownloadProgress>
                     .mainQueueSchedule,
-            deleteModel: { try store.deleteModel($0) }
+            deleteModel: { try store.deleteModel($0) },
+            makeExecutionSnapshot: {
+                .live(store: store)
+            }
         )
     }
 }

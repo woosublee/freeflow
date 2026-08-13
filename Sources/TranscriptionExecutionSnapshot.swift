@@ -124,11 +124,26 @@ struct CloudTranscriptionExecutionSnapshot: Sendable {
     }
 }
 
-struct LocalTranscriptionExecutionSnapshot: Equatable, Sendable {
+struct LocalTranscriptionExecutionSnapshot: Sendable {
     let model: TranscriptionModel
     let localWhisperPath: String?
     let useLegacyMlxWhisper: Bool
     let language: TranscriptionLanguage
+    let nativeWhisperExecution: NativeWhisperExecutionSnapshot?
+
+    init(
+        model: TranscriptionModel,
+        localWhisperPath: String?,
+        useLegacyMlxWhisper: Bool,
+        language: TranscriptionLanguage,
+        nativeWhisperExecution: NativeWhisperExecutionSnapshot? = nil
+    ) {
+        self.model = model
+        self.localWhisperPath = localWhisperPath
+        self.useLegacyMlxWhisper = useLegacyMlxWhisper
+        self.language = language
+        self.nativeWhisperExecution = nativeWhisperExecution
+    }
 }
 
 struct TranscriptionCompletionSnapshot: Codable, Equatable, Sendable {

@@ -72,6 +72,7 @@ class TranscriptionService {
     private let requestedLanguageCode: String
     private let cloudDependencies: CloudTranscriptionDependencies
     private let cloudExecutionContext: CloudTranscriptionExecutionContext?
+    private let nativeWhisperExecution: NativeWhisperExecutionSnapshot?
     private var transcriptionResponseFormat: String {
         Self.responseFormat(forModel: transcriptionModel)
     }
@@ -91,6 +92,7 @@ class TranscriptionService {
         localTranscriptionModel: TranscriptionModel = .default,
         transcriptionModel: String = AppState.defaultTranscriptionModel,
         language: String? = nil,
+        nativeWhisperExecution: NativeWhisperExecutionSnapshot? = nil,
         cloudDependencies: CloudTranscriptionDependencies = .live,
         cloudExecutionContext: CloudTranscriptionExecutionContext? = nil
     ) throws {
@@ -111,6 +113,7 @@ class TranscriptionService {
             : transcriptionLanguage.whisperArgument
         self.language = effectiveRequestLanguage
         self.requestedLanguageCode = effectiveRequestLanguage ?? "auto"
+        self.nativeWhisperExecution = nativeWhisperExecution
         self.cloudDependencies = cloudDependencies
         self.cloudExecutionContext = cloudExecutionContext
     }
@@ -350,46 +353,45 @@ class TranscriptionService {
     }
 
     private func transcribeWithNativeWhisper(fileURL: URL) async throws -> TranscriptionResult {
-        let model = NativeWhisperModelCatalog.recommended
-        let store = NativeWhisperModelStore()
-        guard store.installStatus(for: model) == .ready else {
+        let execution = nativeWhisperExecution ?? .live()
+        guard execution.modelIsReady() else {
             throw QuillUserIssueError.local(
                 code: .localModelMissing,
                 backend: "Native Whisper",
-                modelID: model.id,
+                modelID: execution.modelID,
                 diagnostic: "Recommended Native Whisper model is not installed"
             )
         }
-        let runtime = NativeWhisperRuntime()
-        let modelURL = store.modelURL(for: model)
+        let modelURL = execution.modelURL()
         do {
-            try runtime.validateRunnerAndModel(modelURL: modelURL)
+            try execution.validateRunnerAndModel(modelURL)
         } catch let error as NativeWhisperRuntimeError {
-            throw error.userIssue(modelID: model.id)
+            throw error.userIssue(modelID: execution.modelID)
         }
 
-        let preparedAudio: PreparedNativeWhisperAudio
+        let preparedAudio: NativeWhisperExecutionSnapshot.PreparedAudio
         do {
-            preparedAudio = try await AudioImportConversionService()
-                .prepareForNativeWhisper(fileURL)
+            preparedAudio = try await execution.prepareAudio(fileURL)
+        } catch let error as CancellationError {
+            throw error
         } catch {
             throw QuillUserIssueError.local(
                 code: .audioPreparationFailed,
                 backend: "Native Whisper",
-                modelID: model.id,
+                modelID: execution.modelID,
                 diagnostic: error.localizedDescription
             )
         }
         defer { preparedAudio.cleanup() }
 
         do {
-            return try await runtime.transcribe(
-                audioURL: preparedAudio.fileURL,
-                modelURL: modelURL,
-                languageCode: transcriptionLanguage.whisperArgument
+            return try await execution.transcribe(
+                preparedAudio.fileURL,
+                modelURL,
+                transcriptionLanguage.whisperArgument
             )
         } catch let error as NativeWhisperRuntimeError {
-            throw error.userIssue(modelID: model.id)
+            throw error.userIssue(modelID: execution.modelID)
         }
     }
 
@@ -1083,6 +1085,7 @@ extension TranscriptionExecutionSnapshot {
                 useLegacyMlxWhisper: local.useLegacyMlxWhisper,
                 transcriptionLanguage: local.language,
                 localTranscriptionModel: local.model,
+                nativeWhisperExecution: local.nativeWhisperExecution,
                 cloudDependencies: cloudDependencies,
                 cloudExecutionContext: nil
             )
