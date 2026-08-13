@@ -10541,6 +10541,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let capturedTranscriptionLanguage = transcriptionLanguage
         let capturedLocalTranscriptionModel = localTranscriptionModel
         let capturedTranscriptionModel = transcriptionModel
+        let capturedNativeWhisperExecution = nativeWhisperExecutionSnapshot(
+            useLocalTranscription: capturedUseLocalTranscription,
+            localTranscriptionModel: capturedLocalTranscriptionModel,
+            useLegacyMlxWhisper: capturedUseLegacyMlxWhisper
+        )
         let capturedCustomVocabulary = customVocabulary
         let capturedCustomSystemPrompt = customSystemPrompt
         let capturedOutputLanguage = outputLanguage
@@ -10807,6 +10812,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             transcriptionLanguage: capturedTranscriptionLanguage,
                             localTranscriptionModel: capturedLocalTranscriptionModel,
                             transcriptionModel: capturedTranscriptionModel,
+                            nativeWhisperExecution:
+                                capturedNativeWhisperExecution ?? .live(),
                             cloudExecutionContext: cloudExecutionContext
                         )
                         transcription = try await Self.resolveRawTranscript(

@@ -1126,6 +1126,19 @@ struct AppStateTranscriptionConfigurationTests {
         precondition(retryBody.contains("cloudExecutionContext: snapshot.cloudExecutionContext"))
         precondition(stoppedRecordingBody.contains("let capturedUseLegacyMlxWhisper = useLegacyMlxWhisper"))
         precondition(stoppedRecordingBody.contains("useLegacyMlxWhisper: capturedUseLegacyMlxWhisper,"))
+        guard let capture = stoppedRecordingBody.range(
+            of: "let capturedNativeWhisperExecution = nativeWhisperExecutionSnapshot("
+        ), let task = stoppedRecordingBody.range(
+            of: "let task = Task { [weak self] in"
+        ) else {
+            preconditionFailure("Expected stopped Native Whisper execution capture")
+        }
+        precondition(capture.lowerBound < task.lowerBound)
+        precondition(
+            stoppedRecordingBody.contains(
+                "capturedNativeWhisperExecution ?? .live(),"
+            )
+        )
     }
 
     // Retry never re-captures context; it reuses the note's stored
