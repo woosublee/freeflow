@@ -4814,8 +4814,26 @@ final class AppState: ObservableObject, @unchecked Sendable {
             useLegacyMlxWhisper: useLegacyMlxWhisper,
             transcriptionLanguage: transcriptionLanguage,
             localTranscriptionModel: localTranscriptionModel,
-            transcriptionModel: transcriptionModel
+            transcriptionModel: transcriptionModel,
+            nativeWhisperExecution: nativeWhisperExecutionSnapshot(
+                useLocalTranscription: useLocalTranscription,
+                localTranscriptionModel: localTranscriptionModel,
+                useLegacyMlxWhisper: useLegacyMlxWhisper
+            ) ?? .live()
         )
+    }
+
+    private func nativeWhisperExecutionSnapshot(
+        useLocalTranscription: Bool,
+        localTranscriptionModel: TranscriptionModel,
+        useLegacyMlxWhisper: Bool
+    ) -> NativeWhisperExecutionSnapshot? {
+        guard useLocalTranscription,
+              !localTranscriptionModel.isAppleSpeech,
+              !useLegacyMlxWhisper else {
+            return nil
+        }
+        return dependencies.nativeWhisper.makeExecutionSnapshot()
     }
 
     private func persistShortcut(_ binding: ShortcutBinding, key: String) {

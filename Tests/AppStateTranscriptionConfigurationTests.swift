@@ -11,6 +11,7 @@ struct AppStateTranscriptionConfigurationTests {
         try testMakeTranscriptionServiceMapsEmptyLocalWhisperPathToNil()
         try testMakeTranscriptionServiceDefaultsLegacyMlxWhisperOff()
         try testMakeTranscriptionServicePassesLegacyMlxWhisperToggle()
+        try testMakeTranscriptionServiceUsesOriginatingNativeWhisperExecution()
         try testExecutionSnapshotKeepsCloudServiceConfigurationImmutable()
         try testExecutionSnapshotKeepsLocalServiceConfigurationImmutable()
         testTranscriptionResponseFormatUsesVerboseJSONForKnownWhisperModels()
@@ -69,7 +70,6 @@ struct AppStateTranscriptionConfigurationTests {
         testStoppedTranscriptionSettingsSnapshotCapturesHistoryMetadata()
         try testAppStateCreatedTranscriptionServicesPassLegacyMlxWhisperToggle()
         try testRetrySnapshotGatesStoredContextByCurrentToggleAndUsability()
-        try testNativeWhisperPreparesAudioBeforeRuntime()
         try testNoteBrowserTranscriptionMenuUsesFlatNativeCheckedItems()
         await testAudioImportConfigurationUsesChoiceDerivedBackend()
         try testInitialAudioImportUsesChoiceConfiguration()
@@ -218,6 +218,28 @@ struct AppStateTranscriptionConfigurationTests {
         let configuration = mirroredTranscriptionConfiguration(service)
 
         assert(configuration.useLegacyMlxWhisper == true)
+    }
+
+    private static func testMakeTranscriptionServiceUsesOriginatingNativeWhisperExecution()
+        throws {
+        resetDefaults()
+        var dependencies = transcriptionTestDependencies(status: { _ in .ready })
+        dependencies.nativeWhisper.makeExecutionSnapshot = {
+            markerNativeWhisperExecution(modelID: "originating-app-state")
+        }
+        let appState = makeAppState(dependencies: dependencies)
+        appState.useLocalTranscription = true
+        appState.useLegacyMlxWhisper = false
+        appState.localTranscriptionModel = .find(
+            id: "mlx-community/whisper-large-v3-turbo"
+        )
+
+        let service = try appState.makeTranscriptionService()
+        let execution = Mirror(reflecting: service)
+            .descendant("nativeWhisperExecution")
+            as? NativeWhisperExecutionSnapshot
+
+        assert(execution?.modelID == "originating-app-state")
     }
 
     private static func testExecutionSnapshotKeepsCloudServiceConfigurationImmutable() throws {
@@ -1157,27 +1179,6 @@ struct AppStateTranscriptionConfigurationTests {
         }
         precondition(postProcessingIssueRange.lowerBound < contextIssueRange.lowerBound)
         precondition(contextIssueRange.lowerBound < normalStatusRange.lowerBound)
-    }
-
-    private static func testNativeWhisperPreparesAudioBeforeRuntime() throws {
-        let source = try String(contentsOfFile: "Sources/TranscriptionService.swift", encoding: .utf8)
-        let nativeBody = sourceBlock(
-            in: source,
-            from: "private func transcribeWithNativeWhisper(fileURL: URL)",
-            to: "    // Run mlx_whisper locally"
-        )
-        guard let preflightRange = nativeBody.range(of: "try runtime.validateRunnerAndModel(modelURL: modelURL)"),
-              let conversionRange = nativeBody.range(of: "preparedAudio = try await AudioImportConversionService()") else {
-            preconditionFailure("Expected native Whisper preflight before audio conversion")
-        }
-
-        precondition(preflightRange.lowerBound < conversionRange.lowerBound)
-        precondition(nativeBody.contains("let runtime = NativeWhisperRuntime()"))
-        precondition(nativeBody.contains("let modelURL = store.modelURL(for: model)"))
-        precondition(nativeBody.contains("defer { preparedAudio.cleanup() }"))
-        precondition(nativeBody.contains("audioURL: preparedAudio.fileURL"))
-        precondition(nativeBody.contains("modelURL: modelURL"))
-        precondition(!nativeBody.contains("audioURL: fileURL"))
     }
 
     private static func testNoteBrowserTranscriptionMenuUsesFlatNativeCheckedItems() throws {
@@ -3635,6 +3636,28 @@ struct AppStateTranscriptionConfigurationTests {
             preconditionFailure("Expected source block from \(startMarker) to \(endMarker)")
         }
         return String(source[start.lowerBound..<end.lowerBound])
+    }
+
+    private static func markerNativeWhisperExecution(
+        modelID: String
+    ) -> NativeWhisperExecutionSnapshot {
+        NativeWhisperExecutionSnapshot(
+            modelID: modelID,
+            modelIsReady: { true },
+            modelURL: { URL(fileURLWithPath: "/tmp/\(modelID).bin") },
+            validateRunnerAndModel: { _ in },
+            prepareAudio: { .init(fileURL: $0, cleanup: {}) },
+            transcribe: { _, _, _ in
+                TranscriptionResult(
+                    text: modelID,
+                    spokenLanguage: SpokenLanguageResolver.resolve(
+                        requestedLanguageCode: "auto",
+                        engineLanguageCode: nil,
+                        transcript: modelID
+                    )
+                )
+            }
+        )
     }
 
     private static func mirroredCompleteTranscriptionConfiguration(

@@ -72,6 +72,9 @@ struct AppStateDependenciesTests {
         let second = AppStateDependencies.live
         let originalSecondStatus = second.nativeWhisper.installStatus(.recommended)
         first.nativeWhisper.installStatus = { _ in .ready }
+        first.nativeWhisper.makeExecutionSnapshot = {
+            markerNativeWhisperExecution(modelID: "first-environment")
+        }
 
         try expect(
             first.nativeWhisper.installStatus(.recommended) == .ready,
@@ -80,6 +83,38 @@ struct AppStateDependenciesTests {
         try expect(
             second.nativeWhisper.installStatus(.recommended) == originalSecondStatus,
             "mutating one Native Whisper dependency value does not alter another"
+        )
+        try expect(
+            first.nativeWhisper.makeExecutionSnapshot().modelID
+                == "first-environment",
+            "the first dependency copy uses its execution factory"
+        )
+        try expect(
+            second.nativeWhisper.makeExecutionSnapshot().modelID
+                == NativeWhisperModelCatalog.recommended.id,
+            "the second dependency copy keeps its live execution factory"
+        )
+    }
+
+    private static func markerNativeWhisperExecution(
+        modelID: String
+    ) -> NativeWhisperExecutionSnapshot {
+        NativeWhisperExecutionSnapshot(
+            modelID: modelID,
+            modelIsReady: { true },
+            modelURL: { URL(fileURLWithPath: "/tmp/\(modelID).bin") },
+            validateRunnerAndModel: { _ in },
+            prepareAudio: { .init(fileURL: $0, cleanup: {}) },
+            transcribe: { _, _, _ in
+                TranscriptionResult(
+                    text: modelID,
+                    spokenLanguage: SpokenLanguageResolver.resolve(
+                        requestedLanguageCode: "auto",
+                        engineLanguageCode: nil,
+                        transcript: modelID
+                    )
+                )
+            }
         )
     }
 
