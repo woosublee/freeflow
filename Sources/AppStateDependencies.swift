@@ -38,6 +38,7 @@ struct AppStateStorageLayout: Sendable {
 
 struct AppStateDependencies {
     var storageLayout: AppStateStorageLayout
+    var credentialStorageLayout: CredentialStorageLayout
     var makePipelineHistoryStore:
         @Sendable (URL) -> PipelineHistoryStore
     var makeMeetingSummaryGenerator:
@@ -48,6 +49,7 @@ struct AppStateDependencies {
     static var live: AppStateDependencies {
         AppStateDependencies(
             storageLayout: .live,
+            credentialStorageLayout: .live,
             makePipelineHistoryStore: { PipelineHistoryStore(storeURL: $0) },
             makeMeetingSummaryGenerator: { appState in
                 appState.makeMeetingSummaryService()

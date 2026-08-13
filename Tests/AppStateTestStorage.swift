@@ -22,10 +22,11 @@ enum AppStateTestStorage {
             withIntermediateDirectories: true
         )
         let storageLayout = AppStateStorageLayout(rootDirectory: rootDirectory)
+        let settingsDirectory = rootDirectory.appendingPathComponent("settings", isDirectory: true)
         var dependencies = AppStateDependencies.live
         dependencies.storageLayout = storageLayout
-        AppSettingsStorage.storageDirectoryOverride = rootDirectory
-            .appendingPathComponent("settings", isDirectory: true)
+        dependencies.credentialStorageLayout = CredentialStorageLayout(directory: settingsDirectory)
+        AppSettingsStorage.storageDirectoryOverride = settingsDirectory
         defer {
             AppSettingsStorage.storageDirectoryOverride = originalSettingsDirectory
             try? FileManager.default.removeItem(at: rootDirectory)
