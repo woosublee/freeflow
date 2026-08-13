@@ -8447,6 +8447,54 @@
         }
       }
     },
+    "Unable to save API key": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to save API key"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API 키를 저장할 수 없음"
+          }
+        }
+      }
+    },
+    "Unable to save API base URL": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to save API base URL"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API 기본 URL을 저장할 수 없음"
+          }
+        }
+      }
+    },
+    "Unable to save the provider value": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to save the provider value"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "제공자 값을 저장할 수 없음"
+          }
+        }
+      }
+    },
     "Failed to save note title": {
       "localizations": {
         "en": {

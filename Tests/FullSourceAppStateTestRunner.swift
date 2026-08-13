@@ -14,6 +14,7 @@ struct FullSourceAppStateTestRunner {
         try await AppStateTestStorage.withIsolatedStorage { _ in
             try AppStateDependenciesTests.main()
             try await NoteAssetStoreTests.main()
+            try CredentialStoreTests.main()
             try await AudioImportFileCopyTests.main()
             try LatestValueProgressCoalescerTests.main()
             try await AppStateStorageSafetyTests.main()

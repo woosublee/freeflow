@@ -3200,19 +3200,27 @@ struct AppStateTranscriptionConfigurationTests {
                 defaults: defaults,
                 key: "post_processing_backend_choice"
             )
-            AppSettingsStorage.save(
+            // AppState will be constructed with `environment.dependencies`, so
+            // fixture credentials must be written through the same
+            // credentialStorageLayout it will actually read from, not the
+            // process-global AppSettingsStorage override resetDefaults()
+            // points elsewhere.
+            let credentialStore = CredentialStore(
+                layout: environment.dependencies.credentialStorageLayout
+            )
+            try credentialStore.save(
                 "post-processing-key",
                 account: "groq_api_key"
             )
-            AppSettingsStorage.save(
+            try credentialStore.save(
                 "transcription-key",
                 account: "transcription_api_key"
             )
-            AppSettingsStorage.save(
+            try credentialStore.save(
                 "http://127.0.0.1:1",
                 account: "api_base_url"
             )
-            AppSettingsStorage.save(
+            try credentialStore.save(
                 "http://127.0.0.1:1",
                 account: "transcription_api_url"
             )

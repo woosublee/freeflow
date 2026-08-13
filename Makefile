@@ -72,6 +72,7 @@ FULL_SOURCE_APP_STATE_TESTS = \
 	Tests/AppStateTestStorage.swift \
 	Tests/AppStateDependenciesTests.swift \
 	Tests/NoteAssetStoreTests.swift \
+	Tests/CredentialStoreTests.swift \
 	Tests/AppStateStorageSafetyTests.swift \
 	Tests/AppStateHistoryProtectionSourceTests.swift \
 	Tests/AppStateTranscriptionConfigurationTests.swift \

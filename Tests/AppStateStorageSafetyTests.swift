@@ -5,6 +5,7 @@ struct AppStateStorageSafetyTests {
     static func main() async throws {
         try verifiesDefaultAppStateUsesLiveStorageLayout()
         try await verifiesAppStateInstancesKeepIndependentHistoryLayouts()
+        try await verifiesAppStateInstancesKeepIndependentCredentialStores()
         try await verifiesArchiveUsesOriginatingHistoryStoreFactory()
         try await verifiesHistoryCreatedAfterAssetsDoesNotSweep()
         try await verifiesHistoryRowsLostAfterSnapshotDoesNotSweep()
@@ -115,6 +116,70 @@ struct AppStateStorageSafetyTests {
                    "first AppState loads only its history layout")
         try expect(secondState.pipelineHistory.map(\.id) == [secondItem.id],
                    "second AppState loads only its history layout")
+    }
+
+    private static func verifiesAppStateInstancesKeepIndependentCredentialStores() async throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("quill-instance-credentials-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let firstStorageLayout = AppStateStorageLayout(
+            rootDirectory: parent.appendingPathComponent("first-storage", isDirectory: true)
+        )
+        let secondStorageLayout = AppStateStorageLayout(
+            rootDirectory: parent.appendingPathComponent("second-storage", isDirectory: true)
+        )
+        let firstCredentialLayout = CredentialStorageLayout(
+            directory: parent.appendingPathComponent("first-credentials", isDirectory: true)
+        )
+        let secondCredentialLayout = CredentialStorageLayout(
+            directory: parent.appendingPathComponent("second-credentials", isDirectory: true)
+        )
+        try CredentialStore(layout: firstCredentialLayout).save(
+            "first-instance-key",
+            account: "groq_api_key"
+        )
+        try CredentialStore(layout: secondCredentialLayout).save(
+            "second-instance-key",
+            account: "groq_api_key"
+        )
+
+        var firstDependencies = AppStateDependencies.live
+        firstDependencies.storageLayout = firstStorageLayout
+        firstDependencies.credentialStorageLayout = firstCredentialLayout
+        var secondDependencies = AppStateDependencies.live
+        secondDependencies.storageLayout = secondStorageLayout
+        secondDependencies.credentialStorageLayout = secondCredentialLayout
+        let configuredFirstDependencies = firstDependencies
+        let configuredSecondDependencies = secondDependencies
+        let firstState = await MainActor.run {
+            AppState(dependencies: configuredFirstDependencies)
+        }
+        let secondState = await MainActor.run {
+            AppState(dependencies: configuredSecondDependencies)
+        }
+
+        try expect(
+            firstState.apiKey == "first-instance-key",
+            "the first AppState loads its own stored API key"
+        )
+        try expect(
+            secondState.apiKey == "second-instance-key",
+            "the second AppState loads its own stored API key"
+        )
+
+        await MainActor.run {
+            firstState.apiKey = "first-instance-updated-key"
+        }
+        try expect(
+            CredentialStore(layout: firstCredentialLayout)
+                .load(account: "groq_api_key") == "first-instance-updated-key",
+            "updating the first AppState's API key persists to its own credential layout"
+        )
+        try expect(
+            CredentialStore(layout: secondCredentialLayout)
+                .load(account: "groq_api_key") == "second-instance-key",
+            "updating the first AppState's API key does not affect the second instance's stored credential"
+        )
     }
 
     private static func verifiesArchiveUsesOriginatingHistoryStoreFactory() async throws {

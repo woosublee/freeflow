@@ -2435,6 +2435,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let dependencies: AppStateDependencies
     var storageLayout: AppStateStorageLayout { dependencies.storageLayout }
     var noteAssetStore: NoteAssetStore { NoteAssetStore(storageLayout: storageLayout) }
+    var credentialStore: CredentialStore {
+        CredentialStore(layout: dependencies.credentialStorageLayout)
+    }
     private var pipelineHistoryStore: PipelineHistoryStore
     private var recordingJournalStore: RecordingJournalStore
     private var cloudTranscriptionJobStore: CloudTranscriptionJobStore
@@ -2512,11 +2515,26 @@ final class AppState: ObservableObject, @unchecked Sendable {
         if hasCompletedSetup && !hasStoredTranscriptionEnabled {
             UserDefaults.standard.set(true, forKey: transcriptionEnabledStorageKey)
         }
-        let apiKey = Self.loadStoredAPIKey(account: apiKeyStorageKey)
-        let apiBaseURL = Self.loadStoredAPIBaseURL(account: "api_base_url")
+        let initialCredentialStore = CredentialStore(
+            layout: dependencies.credentialStorageLayout
+        )
+        let apiKey = Self.loadStoredAPIKey(
+            account: apiKeyStorageKey,
+            credentialStore: initialCredentialStore
+        )
+        let apiBaseURL = Self.loadStoredAPIBaseURL(
+            account: "api_base_url",
+            credentialStore: initialCredentialStore
+        )
         let transcriptionModel = UserDefaults.standard.string(forKey: transcriptionModelStorageKey) ?? Self.defaultTranscriptionModel
-        let transcriptionAPIURL = Self.loadOptionalStoredAPIValue(account: transcriptionAPIURLStorageKey)
-        let transcriptionAPIKey = Self.loadStoredAPIKey(account: transcriptionAPIKeyStorageKey)
+        let transcriptionAPIURL = Self.loadOptionalStoredAPIValue(
+            account: transcriptionAPIURLStorageKey,
+            credentialStore: initialCredentialStore
+        )
+        let transcriptionAPIKey = Self.loadStoredAPIKey(
+            account: transcriptionAPIKeyStorageKey,
+            credentialStore: initialCredentialStore
+        )
         let meetingSummarySettingsInitialized = UserDefaults.standard.bool(
             forKey: meetingSummarySettingsInitializedStorageKey
         )
@@ -4266,8 +4284,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         defaultInputDeviceListenerAddress = nil
     }
 
-    private static func loadStoredAPIKey(account: String) -> String {
-        if let storedKey = AppSettingsStorage.load(account: account), !storedKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+    private static func loadStoredAPIKey(
+        account: String,
+        credentialStore: CredentialStore
+    ) -> String {
+        if let storedKey = credentialStore.load(account: account), !storedKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return storedKey
         }
         return ""
@@ -4275,10 +4296,26 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private func persistAPIKey(_ value: String) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            AppSettingsStorage.delete(account: apiKeyStorageKey)
-        } else {
-            AppSettingsStorage.save(trimmed, account: apiKeyStorageKey)
+        persistCredential(prefix: "Unable to save API key") {
+            if trimmed.isEmpty {
+                try credentialStore.delete(account: apiKeyStorageKey)
+            } else {
+                try credentialStore.save(trimmed, account: apiKeyStorageKey)
+            }
+        }
+    }
+
+    private func persistCredential(
+        prefix: String,
+        _ operation: () throws -> Void
+    ) {
+        do {
+            try operation()
+        } catch {
+            errorMessage = LocalizedUserMessage.providerFailure(
+                prefix: localizedCatalogString(prefix),
+                providerDetail: error.localizedDescription
+            )
         }
     }
 
@@ -4304,8 +4341,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let didNormalize: Bool
     }
 
-    private static func loadStoredAPIBaseURL(account: String) -> String {
-        if let stored = AppSettingsStorage.load(account: account), !stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+    private static func loadStoredAPIBaseURL(
+        account: String,
+        credentialStore: CredentialStore
+    ) -> String {
+        if let stored = credentialStore.load(account: account), !stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return stored
         }
         return defaultAPIBaseURL
@@ -4523,24 +4563,31 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private func persistAPIBaseURL(_ value: String) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty || trimmed == Self.defaultAPIBaseURL {
-            AppSettingsStorage.delete(account: apiBaseURLStorageKey)
-        } else {
-            AppSettingsStorage.save(trimmed, account: apiBaseURLStorageKey)
+        persistCredential(prefix: "Unable to save API base URL") {
+            if trimmed.isEmpty || trimmed == Self.defaultAPIBaseURL {
+                try credentialStore.delete(account: apiBaseURLStorageKey)
+            } else {
+                try credentialStore.save(trimmed, account: apiBaseURLStorageKey)
+            }
         }
     }
 
     private func persistOptionalAPIValue(_ value: String, account: String) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            AppSettingsStorage.delete(account: account)
-        } else {
-            AppSettingsStorage.save(trimmed, account: account)
+        persistCredential(prefix: "Unable to save the provider value") {
+            if trimmed.isEmpty {
+                try credentialStore.delete(account: account)
+            } else {
+                try credentialStore.save(trimmed, account: account)
+            }
         }
     }
 
-    private static func loadOptionalStoredAPIValue(account: String) -> String {
-        let stored = AppSettingsStorage.load(account: account) ?? ""
+    private static func loadOptionalStoredAPIValue(
+        account: String,
+        credentialStore: CredentialStore
+    ) -> String {
+        let stored = credentialStore.load(account: account) ?? ""
         return stored.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
