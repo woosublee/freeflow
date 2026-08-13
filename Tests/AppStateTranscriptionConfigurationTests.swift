@@ -70,6 +70,7 @@ struct AppStateTranscriptionConfigurationTests {
         testStoppedTranscriptionSettingsSnapshotCapturesHistoryMetadata()
         try testAppStateCreatedTranscriptionServicesPassLegacyMlxWhisperToggle()
         try testRetrySnapshotGatesStoredContextByCurrentToggleAndUsability()
+        try testAppStateCapturesNativeWhisperExecutionBeforeImportAndRetryTasks()
         try testNoteBrowserTranscriptionMenuUsesFlatNativeCheckedItems()
         await testAudioImportConfigurationUsesChoiceDerivedBackend()
         try testInitialAudioImportUsesChoiceConfiguration()
@@ -273,7 +274,10 @@ struct AppStateTranscriptionConfigurationTests {
             model: .find(id: "mlx-community/whisper-large-v3-turbo"),
             localWhisperPath: "/tmp/original-mlx-whisper",
             useLegacyMlxWhisper: true,
-            language: .find(code: "ja")
+            language: .find(code: "ja"),
+            nativeWhisperExecution: markerNativeWhisperExecution(
+                modelID: "retry-origin"
+            )
         )
         let completion = TranscriptionCompletionSnapshot(
             postProcessingEnabled: false,
@@ -290,6 +294,10 @@ struct AppStateTranscriptionConfigurationTests {
         assert(configuration.localWhisperPath == "/tmp/original-mlx-whisper")
         assert(configuration.useLegacyMlxWhisper)
         assert(configuration.transcriptionLanguageCode == "ja")
+        let execution = Mirror(reflecting: service)
+            .descendant("nativeWhisperExecution")
+            as? NativeWhisperExecutionSnapshot
+        assert(execution?.modelID == "retry-origin")
     }
 
     private static func testTranscriptionResponseFormatUsesVerboseJSONForKnownWhisperModels() {
@@ -1179,6 +1187,36 @@ struct AppStateTranscriptionConfigurationTests {
         }
         precondition(postProcessingIssueRange.lowerBound < contextIssueRange.lowerBound)
         precondition(contextIssueRange.lowerBound < normalStatusRange.lowerBound)
+    }
+
+    private static func testAppStateCapturesNativeWhisperExecutionBeforeImportAndRetryTasks()
+        throws {
+        let source = try String(
+            contentsOfFile: "Sources/AppState.swift",
+            encoding: .utf8
+        )
+        let importBody = sourceBlock(
+            in: source,
+            from: "func importAudioFile(_ fileURL: URL, choice:",
+            to: "\n    @MainActor\n    func retryTranscription"
+        )
+        let retrySnapshot = sourceBlock(
+            in: source,
+            from: "private func makeRetrySnapshot(for item:",
+            to: "\n    private func makeRetryHistoryItem("
+        )
+
+        guard let importCapture = importBody.range(
+            of: "nativeWhisperExecution: nativeWhisperExecutionSnapshot(for: choice)"
+        ), let importTask = importBody.range(of: "Task { [weak self] in") else {
+            preconditionFailure("Expected Native Whisper import capture before Task")
+        }
+        precondition(importCapture.lowerBound < importTask.lowerBound)
+        precondition(
+            retrySnapshot.contains(
+                "nativeWhisperExecution: nativeWhisperExecutionSnapshot(\n                        for: retryChoice"
+            )
+        )
     }
 
     private static func testNoteBrowserTranscriptionMenuUsesFlatNativeCheckedItems() throws {
