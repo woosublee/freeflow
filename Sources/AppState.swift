@@ -5370,21 +5370,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map { Int64($0) }
     }
 
-    static func saveAudioFile(
-        from tempURL: URL,
-        audioDirectory: URL
-    ) -> SavedAudioFile? {
-        let fileName = UUID().uuidString + "." + AudioImportOptions.storageExtension(for: tempURL.lastPathComponent)
-        let destURL = audioDirectory.appendingPathComponent(fileName)
-        do {
-            try? FileManager.default.removeItem(at: destURL)
-            try FileManager.default.copyItem(at: tempURL, to: destURL)
-            return SavedAudioFile(fileName: fileName, fileURL: destURL)
-        } catch {
-            return nil
-        }
-    }
-
     private func recordingJournalID(
         forAudioFileName fileName: String
     ) -> UUID? {
@@ -5398,25 +5383,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return nil
         }
         return recordingID
-    }
-
-    private static func savedAudioFileForStoppedRecording(
-        _ fileURL: URL,
-        audioDirectory: URL
-    ) -> SavedAudioFile? {
-        let audioDirectory = audioDirectory.standardizedFileURL
-        let standardizedURL = fileURL.standardizedFileURL
-        guard standardizedURL.deletingLastPathComponent() == audioDirectory else {
-            return saveAudioFile(from: fileURL, audioDirectory: audioDirectory)
-        }
-        guard standardizedURL.pathExtension.lowercased() == "wav",
-              (try? RecordingCanonicalWAV.validateFile(at: standardizedURL)) != nil else {
-            return saveAudioFile(from: fileURL, audioDirectory: audioDirectory)
-        }
-        return SavedAudioFile(
-            fileName: standardizedURL.lastPathComponent,
-            fileURL: standardizedURL
-        )
     }
 
     @MainActor
@@ -10537,7 +10503,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
         let capturedLiveTranscriber = liveTranscriber
         let capturedPressEnterCommandEnabled = isPressEnterVoiceCommandEnabled
-        let audioDirectory = storageLayout.audioDirectory
+        let capturedNoteAssetStore = noteAssetStore
         liveTranscriber = nil
         setActiveRecorderPCMHandler(nil)
 
@@ -10558,10 +10524,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         )
                     )
                     let savedAudioFile = transcriber.recordedAudioURL.flatMap { url -> SavedAudioFile? in
-                        let saved = Self.saveAudioFile(
-                            from: url,
-                            audioDirectory: audioDirectory
-                        )
+                        let saved = try? capturedNoteAssetStore.saveAudio(from: url)
                         try? FileManager.default.removeItem(at: url)
                         return saved
                     }
@@ -10612,10 +10575,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         inFlightContextTask: inFlightContextTask
                     )
                     let errorAudioFile = transcriber.recordedAudioURL.flatMap { url -> SavedAudioFile? in
-                        let saved = Self.saveAudioFile(
-                            from: url,
-                            audioDirectory: audioDirectory
-                        )
+                        let saved = try? capturedNoteAssetStore.saveAudio(from: url)
                         try? FileManager.default.removeItem(at: url)
                         return saved
                     }
@@ -10704,7 +10664,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 return
             }
 
-            let savedAudioFile = Self.savedAudioFileForStoppedRecording(fileURL, audioDirectory: storageLayout.audioDirectory)
+            let savedAudioFile = try? capturedNoteAssetStore
+                .adoptOrSaveStoppedAudio(from: fileURL)
             let transcriptionFileURL = savedAudioFile?.fileURL ?? fileURL
             if let savedAudioFile {
                 let recoveryContext = sessionContext ?? self.fallbackContextAtStop()
@@ -10944,7 +10905,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             guard let self else { return }
             switch stoppedRecording {
             case .transcribable(let fileURL, _):
-                guard let savedAudioFile = Self.savedAudioFileForStoppedRecording(fileURL, audioDirectory: storageLayout.audioDirectory) else {
+                guard let savedAudioFile = try? noteAssetStore
+                    .adoptOrSaveStoppedAudio(from: fileURL) else {
                     self.completeStoppedRecording(
                         .audioOnly(recordingID),
                         overlayID: overlayID
