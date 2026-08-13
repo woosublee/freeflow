@@ -18,6 +18,7 @@ struct AppStateStorageSafetyTests {
         try await verifiesTrustedHistorySweepsOrphans()
         try await verifiesArchiveCompletionAllowsImmediateAssetSavesWithoutRestart()
         try await verifiesSnapshotOnlyRecoveryFailureLeavesActiveStoreUntouched()
+        try await verifiesRecoveryOperationInProgressBlocksMutation()
         try await AppStateTestStorage.withIsolatedStorage { environment in
             try prepareStorageDirectories(for: environment.storageLayout)
             let fallbackAudioURL = try await verifiesFallbackHistoryDoesNotSweepStoredAudio(
@@ -239,6 +240,31 @@ struct AppStateStorageSafetyTests {
                     : PipelineHistoryStore(storeURL: url)
             }
 
+            let actionID = UUID()
+            let summary = MeetingSummaryEnvelope(
+                schemaVersion: MeetingSummaryEnvelope.currentSchemaVersion,
+                promptVersion: 1,
+                generatedAt: Date(),
+                sourceFingerprint: String(repeating: "a", count: 64),
+                modelID: "summary/model",
+                backendKind: .cloud,
+                content: MeetingSummaryContent(
+                    overview: MeetingSummaryEvidenceText(text: "Overview", sourceQuotes: []),
+                    keyPoints: [],
+                    decisions: [],
+                    actionItems: [
+                        MeetingSummaryActionItem(
+                            id: actionID,
+                            task: "Follow up",
+                            owner: nil,
+                            dueDate: nil,
+                            sourceQuote: nil,
+                            isCompleted: false
+                        )
+                    ],
+                    openQuestions: []
+                )
+            )
             let item = PipelineHistoryItem(
                 timestamp: Date(),
                 rawTranscript: "original transcript",
@@ -252,14 +278,14 @@ struct AppStateStorageSafetyTests {
                 customVocabulary: "",
                 audioFileName: audioURL.lastPathComponent,
                 transcriptFileName: transcriptURL.lastPathComponent
-            )
+            ).withMeetingSummary(summary)
             let configuredDependencies = dependencies
             let appState = await MainActor.run {
                 AppState(dependencies: configuredDependencies)
             }
             var setActionCompletedThrew = false
             var deleteMeetingSummaryThrew = false
-            await MainActor.run {
+            let mcpRecordingStarted = await MainActor.run { () -> Bool in
                 appState.pipelineHistory = [item]
                 appState.clearPipelineHistory()
                 appState.updateTranscript(id: item.id, text: "replacement transcript")
@@ -272,11 +298,14 @@ struct AppStateStorageSafetyTests {
                     URL(fileURLWithPath: "/nonexistent/protected-import.wav"),
                     choice: .apiStandard(modelID: "whisper-large-v3")
                 )
-                _ = appState.startRecordingFromMCP()
+                let recordingStarted = appState.startRecordingFromMCP()
                 do {
+                    // The item carries a real meeting summary with a matching
+                    // action so a thrown error here is caused by history
+                    // protection, not by the note lacking a summary to edit.
                     try appState.setMeetingSummaryActionCompleted(
                         noteID: item.id,
-                        actionID: UUID(),
+                        actionID: actionID,
                         isCompleted: true
                     )
                 } catch {
@@ -287,9 +316,14 @@ struct AppStateStorageSafetyTests {
                 } catch {
                     deleteMeetingSummaryThrew = true
                 }
+                return recordingStarted
             }
 
             try expect(appState.isHistoryUnavailable, "history load failure enters protection mode")
+            try expect(
+                !mcpRecordingStarted,
+                "protected history rejects an MCP-triggered recording start"
+            )
             try expect(
                 appState.pipelineHistory.map(\.id) == [item.id],
                 "protected history mutations do not alter in-memory note ownership"
@@ -306,6 +340,10 @@ struct AppStateStorageSafetyTests {
             try expect(!appState.isRecording, "protected history cannot start recording")
             try expect(setActionCompletedThrew, "protected history rejects meeting summary action updates")
             try expect(deleteMeetingSummaryThrew, "protected history rejects meeting summary deletion")
+            try expect(
+                appState.pipelineHistory.first?.meetingSummary?.content.actionItems.first?.isCompleted == false,
+                "protected history keeps the existing meeting summary action state unchanged"
+            )
         }
     }
 
@@ -683,6 +721,13 @@ struct AppStateStorageSafetyTests {
                 appState.historyPersistenceWarning?.code == .historyPersistenceUnavailable,
                 "unresolved archive transaction shows the protected-history warning"
             )
+            let archiveAccepted = await MainActor.run {
+                appState.archiveOldHistoryAndStartFresh()
+            }
+            try expect(
+                !archiveAccepted,
+                "an unresolved interrupted transaction rejects the archive-and-start-fresh recovery action"
+            )
         }
     }
 
@@ -844,6 +889,119 @@ struct AppStateStorageSafetyTests {
             try expect(
                 FileManager.default.fileExists(atPath: importedAudioURL.path),
                 "archive completion recreates the active audio directory so imports succeed immediately"
+            )
+
+            let transcriptFileName = "restart-free-transcript-\(UUID().uuidString).txt"
+            await MainActor.run {
+                guard let originalItem = appState.pipelineHistory.first else { return }
+                let noteItem = originalItem.replacingAssetFileNames(
+                    audioFileName: originalItem.audioFileName,
+                    transcriptFileName: transcriptFileName
+                )
+                appState.pipelineHistory = [noteItem]
+                appState.updateTranscript(id: noteItem.id, text: "restart-free transcript")
+            }
+            let importedTranscriptURL = environment.storageLayout.transcriptDirectory
+                .appendingPathComponent(transcriptFileName)
+            let writtenTranscript = try String(contentsOf: importedTranscriptURL, encoding: .utf8)
+            try expect(
+                writtenTranscript == "restart-free transcript",
+                "archive completion recreates the active transcript directory so transcript writes succeed immediately"
+            )
+        }
+    }
+
+    private static func verifiesRecoveryOperationInProgressBlocksMutation() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            let storeURL = environment.storageLayout.historyStoreURL
+            let sourceItem = PipelineHistoryItem(
+                id: UUID(uuidString: "9B1D9E3E-1C40-4B62-9B62-9C0E7E9C2F20")!,
+                timestamp: Date(timeIntervalSince1970: 1_754_010_203),
+                rawTranscript: "recovery-in-progress source",
+                postProcessedTranscript: "recovery-in-progress source",
+                postProcessingPrompt: nil,
+                contextSummary: "",
+                contextScreenshotDataURL: nil,
+                contextScreenshotStatus: "No screenshot",
+                postProcessingStatus: "succeeded",
+                debugStatus: "",
+                customVocabulary: ""
+            )
+            let sourceStore = PipelineHistoryStore(storeURL: storeURL)
+            _ = try sourceStore.upsert(
+                sourceItem,
+                maxCount: Int.max,
+                requiresDurableStore: true
+            )
+            try sourceStore.detachForArchiveVerification()
+            let unavailableStore = PipelineHistoryStore(
+                storeURL: storeURL,
+                persistentStoreLoader: { _ in
+                    TestFailure("Injected unavailable history for recovery-in-progress fixture")
+                }
+            )
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = makeUnavailableStartupStoreFactory(
+                unavailableStore,
+                startupURL: environment.storageLayout.historyStoreURL
+            )
+
+            let configuredDependencies = dependencies
+            let appState = await MainActor.run {
+                AppState(dependencies: configuredDependencies)
+            }
+            let archiveAccepted = await MainActor.run {
+                appState.archiveOldHistoryAndStartFresh()
+            }
+            try expect(
+                archiveAccepted,
+                "recovery-in-progress fixture enters the archive recovery route"
+            )
+            try await waitForArchiveCompletion(appState)
+
+            let snapshotID = try await MainActor.run { () -> UUID in
+                guard let snapshotID = appState.historyRecoverySnapshots.first?.id else {
+                    throw TestFailure(
+                        "archive did not publish a recovery snapshot for the recovery-in-progress fixture"
+                    )
+                }
+                return snapshotID
+            }
+
+            let freshItem = PipelineHistoryItem(
+                timestamp: Date(),
+                rawTranscript: "active generation note",
+                postProcessedTranscript: "active generation note",
+                postProcessingPrompt: nil,
+                contextSummary: "",
+                contextScreenshotDataURL: nil,
+                contextScreenshotStatus: "No screenshot",
+                postProcessingStatus: "succeeded",
+                debugStatus: "",
+                customVocabulary: ""
+            )
+            let (deletionAccepted, historyUnchangedWhileRecovering) = await MainActor.run { () -> (Bool, Bool) in
+                appState.pipelineHistory = [freshItem]
+                // Starting the recovery-snapshot delete flips
+                // isHistoryRecoveryOperationInProgress synchronously, before its
+                // detached work runs. A mutation attempted in this same
+                // synchronous window must observe the in-progress guard.
+                let deletionAccepted = appState.deleteHistoryRecoverySnapshot(id: snapshotID)
+                appState.clearPipelineHistory()
+                let historyUnchanged = appState.pipelineHistory.map(\.id) == [freshItem.id]
+                return (deletionAccepted, historyUnchanged)
+            }
+            try expect(deletionAccepted, "a real recovery-snapshot deletion is accepted")
+            try expect(
+                historyUnchangedWhileRecovering,
+                "a mutation attempted while a recovery operation is in progress is rejected"
+            )
+
+            try await waitForHistoryRecoveryCompletion(appState)
+            try expect(
+                appState.historyRecoverySnapshots.isEmpty,
+                "the recovery operation completes normally once it is allowed to run"
             )
         }
     }
@@ -1028,52 +1186,9 @@ struct AppStateStorageSafetyTests {
         }
     }
 
-    private static func waitForArchiveCompletion(_ appState: AppState) async throws {
-        let deadline = Date(timeIntervalSinceNow: 6)
-        while await MainActor.run(body: { appState.isHistoryArchiveTransitioning }), Date() < deadline {
-            try await Task.sleep(nanoseconds: 25_000_000)
-        }
-        let isStillTransitioning = await MainActor.run {
-            appState.isHistoryArchiveTransitioning
-        }
-        try expect(
-            !isStillTransitioning,
-            "archive transition completes within the test timeout"
-        )
-    }
-
-    private static func waitForHistoryRecoveryCompletion(_ appState: AppState) async throws {
-        let deadline = Date(timeIntervalSinceNow: 6)
-        while await MainActor.run(body: { appState.isHistoryRecoveryOperationInProgress }), Date() < deadline {
-            try await Task.sleep(nanoseconds: 25_000_000)
-        }
-        let isStillRecovering = await MainActor.run {
-            appState.isHistoryRecoveryOperationInProgress
-        }
-        try expect(
-            !isStillRecovering,
-            "history recovery operation completes within the test timeout"
-        )
-    }
-
-    private static func waitForHistoryRecoveryInspection(
-        _ appState: AppState,
-        snapshotID: UUID
-    ) async throws {
-        let deadline = Date(timeIntervalSinceNow: 6)
-        while Date() < deadline {
-            let isComplete = await MainActor.run {
-                appState.historyRecoveryInspectionSnapshotID == nil
-                    && appState.historyRecoveryInspections[snapshotID] != nil
-            }
-            if isComplete { return }
-            try await Task.sleep(nanoseconds: 25_000_000)
-        }
-        throw TestFailure("automatic recovery inspection did not complete within the test timeout")
-    }
-
     private static func waitUntil(
         timeoutSeconds: Double = 6,
+        failureMessage: @autoclosure () -> String = "condition did not become true within the test timeout",
         _ condition: @escaping @Sendable () async -> Bool
     ) async throws {
         let deadline = Date(timeIntervalSinceNow: timeoutSeconds)
@@ -1081,13 +1196,44 @@ struct AppStateStorageSafetyTests {
             if await condition() { return }
             try await Task.sleep(nanoseconds: 25_000_000)
         }
-        throw TestFailure("condition did not become true within the test timeout")
+        throw TestFailure(failureMessage())
+    }
+
+    private static func waitForArchiveCompletion(_ appState: AppState) async throws {
+        try await waitUntil(
+            failureMessage: "archive transition completes within the test timeout"
+        ) {
+            await MainActor.run { !appState.isHistoryArchiveTransitioning }
+        }
+    }
+
+    private static func waitForHistoryRecoveryCompletion(_ appState: AppState) async throws {
+        try await waitUntil(
+            failureMessage: "history recovery operation completes within the test timeout"
+        ) {
+            await MainActor.run { !appState.isHistoryRecoveryOperationInProgress }
+        }
+    }
+
+    private static func waitForHistoryRecoveryInspection(
+        _ appState: AppState,
+        snapshotID: UUID
+    ) async throws {
+        try await waitUntil(
+            failureMessage: "automatic recovery inspection did not complete within the test timeout"
+        ) {
+            await MainActor.run {
+                appState.historyRecoveryInspectionSnapshotID == nil
+                    && appState.historyRecoveryInspections[snapshotID] != nil
+            }
+        }
     }
 
     private static func waitForFileRemoval(at fileURL: URL) async throws {
-        let deadline = Date(timeIntervalSinceNow: 6)
-        while FileManager.default.fileExists(atPath: fileURL.path), Date() < deadline {
-            try await Task.sleep(nanoseconds: 100_000_000)
+        try await waitUntil(
+            failureMessage: "\(fileURL.lastPathComponent) was not removed within the test timeout"
+        ) {
+            !FileManager.default.fileExists(atPath: fileURL.path)
         }
     }
 

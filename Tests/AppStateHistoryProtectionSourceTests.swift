@@ -39,22 +39,22 @@ struct AppStateHistoryProtectionSourceTests {
             )
         }
 
-        // The remaining archive-guard conditions beyond `pendingAudioImportJobIDs`
-        // (already covered behaviorally by
-        // AppStateStorageSafetyTests.verifiesArchiveCompletionAllowsImmediateAssetSavesWithoutRestart's
-        // preconditions and by the isHistoryUnavailable precondition
-        // `archiveOldHistoryAndStartFresh` itself requires) can only occur while
-        // history is simultaneously unavailable, which is also the precondition
-        // for calling archive at all. Live recording, retry, and meeting-summary
-        // generation cannot be driven into that exact combined state through the
-        // public API without a real audio pipeline, so this remains a narrow
-        // existence check rather than a simulated race.
+        // Every archive-guard condition can only actually block anything while
+        // history is simultaneously unavailable, since `archiveOldHistoryAndStartFresh`
+        // itself requires `isHistoryUnavailable == true` as its own precondition
+        // — and `requireAvailableHistoryForMutation()` blocks the public entry
+        // points (`importAudioFile`, recording start, retry, meeting-summary
+        // generation) from ever running while history is unavailable. That
+        // combination cannot be constructed through the public API without a
+        // real audio/recording/summary pipeline, so these guards remain a
+        // narrow existence check rather than a simulated race.
         let archiveGuardRange = try source.range(
             from: "func archiveOldHistoryAndStartFresh(",
             to: "@MainActor\n    func clearPipelineHistory()"
         )
         let archiveGuardBody = String(source[archiveGuardRange])
         for requiredGuard in [
+            "pendingAudioImportJobIDs.isEmpty",
             "!cloudTranscriptionHistoryCoordinator.hasActiveWork",
             "meetingSummaryGeneratingNoteIDs.isEmpty",
             "pendingRecordingJournalFinalizationCount == 0",
@@ -65,6 +65,11 @@ struct AppStateHistoryProtectionSourceTests {
                 "archive continues to wait for \(requiredGuard) before moving history files"
             )
         }
+        try expect(
+            source.contains("pendingAudioImportJobIDs.insert(jobID)")
+                && source.contains("pendingAudioImportJobIDs.remove(jobID)"),
+            "audio import is tracked before its detached audio copy can touch history storage"
+        )
 
         // Recording start and microphone-permission resumption recheck history
         // availability after every asynchronous suspension point as defense in
@@ -78,6 +83,12 @@ struct AppStateHistoryProtectionSourceTests {
         )
         let recordingStart = String(source[recordingStartRange])
         try expect(
+            source.contains("private var pendingRecordingStartCount = 0")
+                && recordingStart.contains("pendingRecordingStartCount += 1")
+                && recordingStart.contains("defer { self.pendingRecordingStartCount -= 1 }"),
+            "an awaited recording start tracks itself as pending via defer, so an early throw or return still decrements the count"
+        )
+        try expect(
             recordingStart.components(separatedBy: "requireAvailableHistoryForMutation()").count >= 3,
             "an awaited recording start rechecks archive protection before creating writers"
         )
@@ -86,6 +97,13 @@ struct AppStateHistoryProtectionSourceTests {
             to: "private func applyAudioInterruptionIfNeeded()"
         )
         let microphonePermission = String(source[microphonePermissionRange])
+        try expect(
+            microphonePermission.contains("pendingRecordingStartCount += 1")
+                && microphonePermission.contains(
+                    "defer { strongSelf.pendingRecordingStartCount -= 1 }"
+                ),
+            "microphone permission resumption tracks itself as pending via defer, so an early throw or return still decrements the count"
+        )
         try expect(
             microphonePermission.components(
                 separatedBy: "strongSelf.requireAvailableHistoryForMutation()"
