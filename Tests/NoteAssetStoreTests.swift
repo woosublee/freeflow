@@ -10,6 +10,9 @@ struct NoteAssetStoreTests {
         try testLoadTranscriptThrowsForMissingFile()
         try testDeleteTranscriptIsIdempotentForMissingFile()
         try testSaveAudioCopiesFileAndPreservesExtension()
+        try testAdoptStoppedAudioReusesCanonicalWAVInAudioDirectory()
+        try testAdoptStoppedAudioCopiesExternalFile()
+        try testAdoptStoppedAudioCopiesInvalidWAVAlreadyInAudioDirectory()
         try testSaveAudioThrowsWhenSourceFileIsMissing()
         try await testSaveSecurityScopedAudioThrowsWhenSourceFileIsMissing()
         try testDeleteAudioIsIdempotentForMissingFile()
@@ -80,6 +83,85 @@ struct NoteAssetStoreTests {
             try expect(saved.fileName.hasSuffix(".m4a"), "saved audio keeps the source extension")
             let copied = try Data(contentsOf: saved.fileURL)
             try expect(copied == contents, "saved audio contents match the source file")
+        }
+    }
+
+    private static func testAdoptStoppedAudioReusesCanonicalWAVInAudioDirectory() throws {
+        try withTemporaryStore { store in
+            let fileURL = store.storageLayout.audioDirectory
+                .appendingPathComponent("promoted.wav")
+            let originalData = canonicalWAVData(samples: [12, 34])
+            try originalData.write(to: fileURL)
+            let before = try audioFileNames(in: store)
+
+            let saved = try store.adoptOrSaveStoppedAudio(from: fileURL)
+
+            try expect(
+                saved.fileURL == fileURL.standardizedFileURL,
+                "canonical stopped audio is reused"
+            )
+            try expect(
+                saved.fileName == fileURL.lastPathComponent,
+                "canonical stopped audio keeps its name"
+            )
+            let savedData = try Data(contentsOf: saved.fileURL)
+            try expect(
+                savedData == originalData,
+                "reused audio remains unchanged"
+            )
+            let after = try audioFileNames(in: store)
+            try expect(
+                after == before,
+                "reusing canonical audio does not create a second file"
+            )
+        }
+    }
+
+    private static func testAdoptStoppedAudioCopiesExternalFile() throws {
+        try withTemporaryStore { store in
+            let sourceURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("note-asset-store-external-\(UUID().uuidString).wav")
+            let contents = canonicalWAVData(samples: [56, 78])
+            try contents.write(to: sourceURL)
+            defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+            let saved = try store.adoptOrSaveStoppedAudio(from: sourceURL)
+
+            try expect(
+                saved.fileURL != sourceURL.standardizedFileURL,
+                "external stopped audio is copied"
+            )
+            try expect(
+                saved.fileURL.deletingLastPathComponent()
+                    == store.storageLayout.audioDirectory.standardizedFileURL,
+                "external stopped audio is saved under the store audio directory"
+            )
+            let savedData = try Data(contentsOf: saved.fileURL)
+            try expect(
+                savedData == contents,
+                "copied stopped audio preserves contents"
+            )
+        }
+    }
+
+    private static func testAdoptStoppedAudioCopiesInvalidWAVAlreadyInAudioDirectory() throws {
+        try withTemporaryStore { store in
+            let sourceURL = store.storageLayout.audioDirectory
+                .appendingPathComponent("invalid.wav")
+            let contents = Data("not a canonical wav".utf8)
+            try contents.write(to: sourceURL)
+
+            let saved = try store.adoptOrSaveStoppedAudio(from: sourceURL)
+
+            try expect(
+                saved.fileURL != sourceURL.standardizedFileURL,
+                "invalid in-place WAV is copied instead of adopted"
+            )
+            let savedData = try Data(contentsOf: saved.fileURL)
+            try expect(
+                savedData == contents,
+                "copied invalid WAV preserves contents"
+            )
         }
     }
 
@@ -389,6 +471,24 @@ struct NoteAssetStoreTests {
         } catch is NoteAssetStoreError {
             // expected
         }
+    }
+
+    private static func canonicalWAVData(samples: [Int16]) -> Data {
+        var payload = Data()
+        for sample in samples {
+            let value = UInt16(bitPattern: sample)
+            payload.append(UInt8(value & 0x00ff))
+            payload.append(UInt8(value >> 8))
+        }
+        var data = CanonicalPCM16WAV.header(dataByteCount: UInt32(payload.count))
+        data.append(payload)
+        return data
+    }
+
+    private static func audioFileNames(in store: NoteAssetStore) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(
+            atPath: store.storageLayout.audioDirectory.path
+        ).sorted()
     }
 
     private static func makeItem(audioFileName: String?) -> PipelineHistoryItem {

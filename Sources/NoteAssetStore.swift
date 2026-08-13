@@ -51,6 +51,22 @@ struct NoteAssetStore: Sendable {
         }
     }
 
+    func adoptOrSaveStoppedAudio(
+        from fileURL: URL
+    ) throws -> AppState.SavedAudioFile {
+        let audioDirectory = storageLayout.audioDirectory.standardizedFileURL
+        let standardizedURL = fileURL.standardizedFileURL
+        guard standardizedURL.deletingLastPathComponent() == audioDirectory,
+              standardizedURL.pathExtension.lowercased() == "wav",
+              (try? CanonicalPCM16WAV.validateFile(at: standardizedURL)) != nil else {
+            return try saveAudio(from: fileURL)
+        }
+        return AppState.SavedAudioFile(
+            fileName: standardizedURL.lastPathComponent,
+            fileURL: standardizedURL
+        )
+    }
+
     func saveSecurityScopedAudio(from fileURL: URL) async throws -> AppState.SavedAudioFile {
         try await Task.detached(priority: .userInitiated) {
             let accessGranted = fileURL.startAccessingSecurityScopedResource()
