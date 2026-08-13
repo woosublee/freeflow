@@ -17,7 +17,7 @@ struct AppStateHistoryProtectionSourceTests {
     static func main() throws {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
         let repositorySwiftSource = try combinedSwiftSource(in: ["Sources", "Tests"])
-        let removedSeams = [
+        let removedHistorySeams: [String] = [
             ["meeting", "Summary", "Generator", "Factory"].joined(),
             ["storage", "Root", "Provider"].joined(),
             ["pipeline", "History", "Store", "Factory"].joined(),
@@ -25,6 +25,20 @@ struct AppStateHistoryProtectionSourceTests {
             ["retry", "Cloud", "Transcription", "Dependencies", "Factory"].joined(),
             ["make", "Default", "Pipeline", "History", "Store"].joined()
         ]
+        let removedModelSeams: [String] = [
+            ["native", "Whisper", "Install", "Status", "Provider"].joined(),
+            ["native", "Whisper", "Install", "Starter"].joined(),
+            ["native", "Whisper", "Progress", "Schedule"].joined(),
+            ["local", "AI", "Server", "Manager", "Factory"].joined(),
+            ["local", "AI", "Idle", "Shutdown", "Sleep"].joined(),
+            ["local", "AI", "Install", "Status", "Provider"].joined(),
+            ["local", "AI", "Install", "Starter"].joined(),
+            ["local", "AI", "Progress", "Schedule"].joined(),
+            ["local", "AI", "Model", "Delete"].joined(),
+            ["local", "AI", "Partial", "Model", "Delete"].joined(),
+            ["local", "AI", "Processing", "Availability", "Provider"].joined()
+        ]
+        let removedSeams = removedHistorySeams + removedModelSeams
         let removedStaticReferences = [
             ["App", "State", ".", "app", "Storage", "Root", "Directory"].joined(),
             ["App", "State", ".", "audio", "Storage", "Directory"].joined(),
