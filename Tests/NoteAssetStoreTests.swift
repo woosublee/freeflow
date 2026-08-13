@@ -24,6 +24,7 @@ struct NoteAssetStoreTests {
         try testStoredAudioURLIsNilWithoutAudioFileName()
         try testPrepareDirectoriesCreatesAudioAndTranscriptDirectories()
         try testTwoStoresWithIndependentLayoutsDoNotShareFiles()
+        try testOneStoreCannotDeleteAnotherStoresTranscript()
         try testSaveTranscriptThrowsWhenDirectoryIsUnavailable()
         try testSaveAudioThrowsWhenDirectoryIsUnavailable()
         print("NoteAssetStoreTests passed")
@@ -427,6 +428,37 @@ struct NoteAssetStoreTests {
         try expect(
             firstLoaded == "first store transcript" && secondLoaded == "second store transcript",
             "each store independently persists and loads its own transcript"
+        )
+    }
+
+    private static func testOneStoreCannotDeleteAnotherStoresTranscript() throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note-asset-store-delete-isolation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let firstStore = NoteAssetStore(
+            storageLayout: AppStateStorageLayout(
+                rootDirectory: parent.appendingPathComponent("first", isDirectory: true)
+            )
+        )
+        let secondStore = NoteAssetStore(
+            storageLayout: AppStateStorageLayout(
+                rootDirectory: parent.appendingPathComponent("second", isDirectory: true)
+            )
+        )
+        firstStore.prepareDirectories()
+        secondStore.prepareDirectories()
+        let fileName = try firstStore.saveTranscript(
+            rawTranscript: "first store",
+            postProcessedTranscript: ""
+        )
+
+        try secondStore.deleteTranscript(fileName: fileName)
+
+        let originalURL = firstStore.storageLayout.transcriptDirectory
+            .appendingPathComponent(fileName)
+        try expect(
+            FileManager.default.fileExists(atPath: originalURL.path),
+            "a different store cannot delete the originating transcript"
         )
     }
 

@@ -5337,31 +5337,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    static func saveTranscriptFile(
-        rawTranscript: String,
-        postProcessedTranscript: String,
-        transcriptDirectory: URL
-    ) -> String? {
-        let fileName = UUID().uuidString + ".txt"
-        let fileURL = transcriptDirectory.appendingPathComponent(fileName)
-        // postProcessedTranscript가 있으면 그걸, 없으면 rawTranscript 저장
-        let content = postProcessedTranscript.isEmpty ? rawTranscript : postProcessedTranscript
-        do {
-            try content.write(to: fileURL, atomically: true, encoding: .utf8)
-            return fileName
-        } catch {
-            return nil
-        }
-    }
-
-    static func deleteTranscriptFile(
-        _ fileName: String,
-        transcriptDirectory: URL
-    ) {
-        let fileURL = transcriptDirectory.appendingPathComponent(fileName)
-        try? FileManager.default.removeItem(at: fileURL)
-    }
-
     func loadTranscript(from fileName: String) -> String? {
         try? noteAssetStore.loadTranscript(fileName: fileName)
     }
@@ -5417,18 +5392,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         transcriptFileName: String?,
         storageLayout: AppStateStorageLayout
     ) {
-        if let audioFileName {
-            deleteAudioFile(
-                audioFileName,
-                audioDirectory: storageLayout.audioDirectory
-            )
-        }
-        if let transcriptFileName {
-            deleteTranscriptFile(
-                transcriptFileName,
-                transcriptDirectory: storageLayout.transcriptDirectory
-            )
-        }
+        try? NoteAssetStore(storageLayout: storageLayout).deleteAssets(
+            audioFileName: audioFileName,
+            transcriptFileName: transcriptFileName
+        )
     }
 
     private static func deleteStoredFiles(
@@ -7631,7 +7598,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let postProcessingService = makePostProcessingService()
         let cloudDependencies = dependencies
             .makeRetryCloudTranscriptionDependencies()
-        let transcriptDirectory = storageLayout.transcriptDirectory
+        let noteAssetStore = noteAssetStore
 
         let task = Task { [weak self] in
             guard let self else { return }
@@ -7662,10 +7629,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     postProcessingEnabled: completion.postProcessingEnabled
                 )
                 let transcriptFileName = snapshot.item.transcriptFileName == nil
-                    ? Self.saveTranscriptFile(
+                    ? try? noteAssetStore.saveTranscript(
                         rawTranscript: parsedTranscript.transcript,
-                        postProcessedTranscript: result.finalTranscript,
-                        transcriptDirectory: transcriptDirectory
+                        postProcessedTranscript: result.finalTranscript
                     )
                     : snapshot.item.transcriptFileName
                 updatedItem = self.makeRetryHistoryItem(
@@ -7718,9 +7684,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 ) else {
                     if snapshot.item.transcriptFileName == nil,
                        let transcriptFileName = updatedItem.transcriptFileName {
-                        Self.deleteTranscriptFile(
-                            transcriptFileName,
-                            transcriptDirectory: transcriptDirectory
+                        try? noteAssetStore.deleteTranscript(
+                            fileName: transcriptFileName
                         )
                     }
                     self.retryingItemIDs.remove(snapshot.item.id)
@@ -7751,9 +7716,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 } catch {
                     if snapshot.item.transcriptFileName == nil,
                        let transcriptFileName = updatedItem.transcriptFileName {
-                        Self.deleteTranscriptFile(
-                            transcriptFileName,
-                            transcriptDirectory: transcriptDirectory
+                        try? noteAssetStore.deleteTranscript(
+                            fileName: transcriptFileName
                         )
                     }
                     let issue = self.userIssue(for: error)
@@ -11901,10 +11865,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             pipelineHistory.first(where: { $0.id == id })
         }
         let previousTranscriptFileName = existingEntry?.transcriptFileName
-        let transcriptFileName = Self.saveTranscriptFile(
+        let transcriptFileName = try? noteAssetStore.saveTranscript(
             rawTranscript: rawTranscript,
-            postProcessedTranscript: postProcessedTranscript,
-            transcriptDirectory: storageLayout.transcriptDirectory
+            postProcessedTranscript: postProcessedTranscript
         )
         updateTranscriptionJob(jobID) {
             $0.liveNoteID = nil
@@ -11962,9 +11925,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 try pipelineHistoryStore.update(entry)
                 if let previousTranscriptFileName,
                    previousTranscriptFileName != transcriptFileName {
-                    Self.deleteTranscriptFile(
-                        previousTranscriptFileName,
-                        transcriptDirectory: storageLayout.transcriptDirectory
+                    try? noteAssetStore.deleteTranscript(
+                        fileName: previousTranscriptFileName
                     )
                 }
             } else {
@@ -11988,9 +11950,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     storageLayout: storageLayout
                 )
             } else if let transcriptFileName {
-                Self.deleteTranscriptFile(
-                    transcriptFileName,
-                    transcriptDirectory: storageLayout.transcriptDirectory
+                try? noteAssetStore.deleteTranscript(
+                    fileName: transcriptFileName
                 )
             }
             let issue = self.userIssue(for: error)
