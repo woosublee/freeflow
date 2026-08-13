@@ -4094,10 +4094,12 @@ struct RunLogEntryView: View {
                         isExpanded.toggle()
                     }
                     if isExpanded && loadedTranscript == nil {
+                        let transcriptDirectory = appState.storageLayout.transcriptDirectory
                         Task.detached(priority: .userInitiated) {
                             let text: String
                             if let fileName = item.transcriptFileName {
-                                text = AppState.loadTranscript(from: fileName) ?? ""
+                                let fileURL = transcriptDirectory.appendingPathComponent(fileName)
+                                text = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
                             } else {
                                 // 구 항목: rawTranscript 또는 postProcessedTranscript에서 읽기
                                 let t = item.rawTranscript.isEmpty ? item.postProcessedTranscript : item.rawTranscript
@@ -4194,7 +4196,7 @@ struct RunLogEntryView: View {
                     actionIconButton(systemName: "square.and.arrow.up", help: "Export run log") {
                         TestCaseExporter.exportWithSavePanel(
                             item: item,
-                            audioDirURL: AppState.audioStorageDirectory()
+                            audioDirURL: appState.storageLayout.audioDirectory
                         )
                     }
 
@@ -4223,7 +4225,7 @@ struct RunLogEntryView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     // Audio player
                     if let audioFileName = item.audioFileName {
-                        let audioURL = AppState.audioStorageDirectory().appendingPathComponent(audioFileName)
+                        let audioURL = appState.storageLayout.audioDirectory.appendingPathComponent(audioFileName)
                         AudioPlayerView(audioURL: audioURL)
                     } else {
                         HStack(spacing: 6) {
@@ -4451,7 +4453,7 @@ struct RunLogEntryView: View {
             return already
         }
         if let fileName = item.transcriptFileName,
-           let loaded = AppState.loadTranscript(from: fileName),
+           let loaded = appState.loadTranscript(from: fileName),
            !loaded.isEmpty {
             return loaded
         }

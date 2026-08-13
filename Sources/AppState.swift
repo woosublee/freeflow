@@ -350,49 +350,6 @@ enum MeetingSummaryAvailability: Equatable {
 }
 
 final class AppState: ObservableObject, @unchecked Sendable {
-    @MainActor
-    static var meetingSummaryGeneratorFactory:
-        (AppState) -> any MeetingSummaryGenerating = { appState in
-            appState.makeMeetingSummaryService()
-        }
-    static var storageRootProvider: () -> URL = {
-        AppName.applicationSupportDirectory
-    }
-    static var pipelineHistoryStoreFactory: () -> PipelineHistoryStore = {
-        makeDefaultPipelineHistoryStore()
-    }
-    static var pipelineHistoryStoreAtURLFactory: (URL) -> PipelineHistoryStore = {
-        PipelineHistoryStore(storeURL: $0)
-    }
-
-    static func makeDefaultPipelineHistoryStore() -> PipelineHistoryStore {
-        pipelineHistoryStoreAtURLFactory(
-            appStorageRootDirectory().appendingPathComponent("PipelineHistory.sqlite")
-        )
-    }
-
-    private static func makeRecordingJournalStore() -> RecordingJournalStore {
-        RecordingJournalStore(audioDirectory: audioStorageDirectory())
-    }
-
-    private static func makeCloudTranscriptionJobStore() -> CloudTranscriptionJobStore {
-        let audioDirectory = audioStorageDirectory()
-        return CloudTranscriptionJobStore(
-            jobsDirectory: audioDirectory
-                .deletingLastPathComponent()
-                .appendingPathComponent("cloud-transcription/jobs", isDirectory: true),
-            temporaryRoot: FileManager.default.temporaryDirectory
-                .appendingPathComponent(
-                    Bundle.main.bundleIdentifier ?? "com.woosublee.quill",
-                    isDirectory: true
-                )
-                .appendingPathComponent("cloud-transcription", isDirectory: true)
-        )
-    }
-    static var retryCloudTranscriptionDependenciesFactory:
-        () -> CloudTranscriptionDependencies = {
-            .live
-        }
     static var audioImportCloudTranscriptionDependenciesFactory:
         () -> CloudTranscriptionDependencies = {
             .live
@@ -2475,6 +2432,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var defaultInputDeviceListener: AudioObjectPropertyListenerBlock?
     private var defaultInputDeviceListenerAddress: AudioObjectPropertyAddress?
     private var needsMicrophoneRefreshAfterRecording = false
+    private let dependencies: AppStateDependencies
+    var storageLayout: AppStateStorageLayout { dependencies.storageLayout }
     private var pipelineHistoryStore: PipelineHistoryStore
     private var recordingJournalStore: RecordingJournalStore
     private var cloudTranscriptionJobStore: CloudTranscriptionJobStore
@@ -2511,8 +2470,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var pendingSpeechPermissionContext: PendingRecordingPermissionContext?
     private let postTranscriptionUpdateReminderDuration: TimeInterval = 7
 
-    init() {
-        let storageRoot = Self.appStorageRootDirectory()
+    init(dependencies: AppStateDependencies = .live) {
+        self.dependencies = dependencies
+        let storageLayout = dependencies.storageLayout
+        let storageRoot = Self.preparedDirectory(storageLayout.rootDirectory)
+        let audioDirectory = Self.preparedDirectory(storageLayout.audioDirectory)
+        _ = Self.preparedDirectory(storageLayout.transcriptDirectory)
         let recoveredArchiveSafety = HistoryArchiveTransition
             .rollbackInterruptedTransactions(at: storageRoot)
         if recoveredArchiveSafety != .unresolvedInterruptedTransaction {
@@ -2520,12 +2483,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 .removeExpiredCompletedSnapshots()
         }
         let initialHistoryArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        pipelineHistoryStore = Self.pipelineHistoryStoreFactory()
+        pipelineHistoryStore = dependencies.makePipelineHistoryStore(
+            storageLayout.historyStoreURL
+        )
         let initialHistoryUnavailable = pipelineHistoryStore.availability == .unavailable
             || initialHistoryArchiveSafety == .unresolvedInterruptedTransaction
-        let audioDirectory = Self.audioStorageDirectory()
-        recordingJournalStore = Self.makeRecordingJournalStore()
-        cloudTranscriptionJobStore = Self.makeCloudTranscriptionJobStore()
+        recordingJournalStore = RecordingJournalStore(
+            audioDirectory: audioDirectory
+        )
+        cloudTranscriptionJobStore = CloudTranscriptionJobStore(
+            jobsDirectory: storageLayout.cloudTranscriptionJobsDirectory,
+            temporaryRoot: storageLayout.cloudTranscriptionTemporaryDirectory
+        )
         UserDefaults.standard.removeObject(forKey: "force_http2_transcription")
         Self.migrateModelStorageKeys()
         let hasCompletedSetup = UserDefaults.standard.bool(forKey: "hasCompletedSetup")
@@ -2819,9 +2788,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
            pipelineHistoryStore.availability == .ready {
             Self.recoverRecordingJournalsBeforeHistoryLoad(
                 recordingJournalStore: recordingJournalStore,
-                historyStore: pipelineHistoryStore
+                historyStore: pipelineHistoryStore,
+                storageLayout: storageLayout
             )
-            let transcriptDirectory = Self.transcriptStorageDirectory()
+            let transcriptDirectory = storageLayout.transcriptDirectory
             savedHistory = pipelineHistoryStore.loadAllHistory()
             if pipelineHistoryStore.availability == .ready {
                 var referenceTrust = pipelineHistoryStore.referenceTrust
@@ -2877,7 +2847,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         cloudTranscriptionJobStore.invalidateSession(
                             historyID: removedAssets.historyID
                         )
-                        Self.deleteStoredFiles(removedAssets)
+                        Self.deleteStoredFiles(removedAssets, storageLayout: storageLayout)
                         try? cloudTranscriptionJobStore.delete(
                             historyID: removedAssets.historyID,
                             session: nil
@@ -2940,7 +2910,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                   pipelineHistoryStore.availability == .ready {
             Self.recoverRecordingJournalsBeforeHistoryLoad(
                 recordingJournalStore: recordingJournalStore,
-                historyStore: pipelineHistoryStore
+                historyStore: pipelineHistoryStore,
+                storageLayout: storageLayout
             )
             savedHistory = pipelineHistoryStore.loadAllHistory()
             if pipelineHistoryStore.availability == .ready {
@@ -3088,8 +3059,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         scheduleNoteBrowserTranscriptionModeNormalizationForSelectedInput()
         self.precomputeMacros()
         if let cloudReconciliation {
-            let cloudDependenciesFactory = Self
-                .retryCloudTranscriptionDependenciesFactory
+            let cloudDependenciesFactory = dependencies
+                .makeRetryCloudTranscriptionDependencies
             let postProcessingService = makePostProcessingService()
             Task { @MainActor [weak self] in
                 self?.scheduleCloudTranscriptionAutoResume(
@@ -4857,12 +4828,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     func openHistoryDataFolder() {
-        NSWorkspace.shared.open(Self.appStorageRootDirectory())
+        NSWorkspace.shared.open(storageLayout.rootDirectory)
     }
 
     func openHistoryRecoveryFolder() {
         NSWorkspace.shared.open(
-            Self.appStorageRootDirectory().appendingPathComponent("Recovery", isDirectory: true)
+            storageLayout.rootDirectory.appendingPathComponent("Recovery", isDirectory: true)
         )
     }
 
@@ -4878,7 +4849,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @MainActor
     func refreshHistoryRecoverySnapshots() {
         historyRecoverySnapshots = HistoryRecoveryService(
-            storageRoot: Self.appStorageRootDirectory()
+            storageRoot: storageLayout.rootDirectory
         ).listSnapshots()
         let currentIDs = Set(historyRecoverySnapshots.map(\.id))
         historyRecoveryInspections = historyRecoveryInspections.filter {
@@ -4943,7 +4914,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             historyRecoveryInspectionAttemptedIDs.insert(snapshotID)
             historyRecoveryInspectionSnapshotID = snapshotID
             let inspectionRevision = historyRecoveryInspectionRevision
-            let storageRoot = Self.appStorageRootDirectory()
+            let storageRoot = dependencies.storageLayout.rootDirectory
             let activeHistory = pipelineHistory
             let appStateReference = WeakAppStateReference(self)
             Task.detached(priority: .userInitiated) {
@@ -5027,13 +4998,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return false
         }
 
-        let storageRoot = Self.appStorageRootDirectory()
-        let makeStore = Self.pipelineHistoryStoreAtURLFactory
+        let storageRoot = dependencies.storageLayout.rootDirectory
+        let storeURL = dependencies.storageLayout.historyStoreURL
+        let audioDirectory = dependencies.storageLayout.audioDirectory
+        let transcriptDirectory = dependencies.storageLayout.transcriptDirectory
+        let makeStore = dependencies.makePipelineHistoryStore
         let appStateReference = WeakAppStateReference(self)
         isHistoryRecoveryOperationInProgress = true
         historyRecoveryOperationMessage = localizedCatalogString("Recovering history…")
         Task.detached(priority: .userInitiated) {
-            let storeURL = storageRoot.appendingPathComponent("PipelineHistory.sqlite")
             let activeStore = makeStore(storeURL)
             do {
                 guard activeStore.availability == .ready,
@@ -5044,11 +5017,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 let result = try HistoryRecoveryService(storageRoot: storageRoot).importSnapshot(
                     id: id,
                     into: activeStore,
-                    audioDirectory: storageRoot.appendingPathComponent("audio", isDirectory: true),
-                    transcriptDirectory: storageRoot.appendingPathComponent(
-                        "transcripts",
-                        isDirectory: true
-                    )
+                    audioDirectory: audioDirectory,
+                    transcriptDirectory: transcriptDirectory
                 )
                 try activeStore.detachForArchiveVerification()
                 await MainActor.run {
@@ -5108,7 +5078,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         message: String,
         operation: @escaping @Sendable (HistoryRecoveryService) throws -> Void
     ) {
-        let storageRoot = Self.appStorageRootDirectory()
+        let storageRoot = dependencies.storageLayout.rootDirectory
         let appStateReference = WeakAppStateReference(self)
         historyRecoveryImportResult = nil
         isHistoryRecoveryOperationInProgress = true
@@ -5152,36 +5122,21 @@ final class AppState: ObservableObject, @unchecked Sendable {
         errorMessage = localizedCatalogString("Recovery snapshot operation could not be completed.")
     }
 
-    static func appStorageRootDirectory() -> URL {
-        let rootDirectory = storageRootProvider()
-        if !FileManager.default.fileExists(atPath: rootDirectory.path) {
+    @discardableResult
+    private static func preparedDirectory(_ directory: URL) -> URL {
+        if !FileManager.default.fileExists(atPath: directory.path) {
             try? FileManager.default.createDirectory(
-                at: rootDirectory,
+                at: directory,
                 withIntermediateDirectories: true
             )
         }
-        return rootDirectory
-    }
-
-    static func audioStorageDirectory() -> URL {
-        let audioDir = appStorageRootDirectory().appendingPathComponent("audio", isDirectory: true)
-        if !FileManager.default.fileExists(atPath: audioDir.path) {
-            try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true)
-        }
-        return audioDir
-    }
-
-    static func transcriptStorageDirectory() -> URL {
-        let dir = appStorageRootDirectory().appendingPathComponent("transcripts", isDirectory: true)
-        if !FileManager.default.fileExists(atPath: dir.path) {
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-        return dir
+        return directory
     }
 
     private static func recoverRecordingJournalsBeforeHistoryLoad(
         recordingJournalStore: RecordingJournalStore,
-        historyStore: PipelineHistoryStore
+        historyStore: PipelineHistoryStore,
+        storageLayout: AppStateStorageLayout
     ) {
         let executor = RecordingJournalRecoveryExecutor(
             store: recordingJournalStore
@@ -5200,7 +5155,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     )
                     if historyStore.referenceTrust.permitsStartupReferenceCleanup {
                         for assets in removedAssets {
-                            Self.deleteStoredFiles(assets)
+                            Self.deleteStoredFiles(assets, storageLayout: storageLayout)
                         }
                     }
                 } catch {
@@ -5325,9 +5280,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    static func saveTranscriptFile(rawTranscript: String, postProcessedTranscript: String) -> String? {
+    static func saveTranscriptFile(
+        rawTranscript: String,
+        postProcessedTranscript: String,
+        transcriptDirectory: URL
+    ) -> String? {
         let fileName = UUID().uuidString + ".txt"
-        let fileURL = transcriptStorageDirectory().appendingPathComponent(fileName)
+        let fileURL = transcriptDirectory.appendingPathComponent(fileName)
         // postProcessedTranscript가 있으면 그걸, 없으면 rawTranscript 저장
         let content = postProcessedTranscript.isEmpty ? rawTranscript : postProcessedTranscript
         do {
@@ -5338,13 +5297,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    static func deleteTranscriptFile(_ fileName: String) {
-        let fileURL = transcriptStorageDirectory().appendingPathComponent(fileName)
+    static func deleteTranscriptFile(
+        _ fileName: String,
+        transcriptDirectory: URL
+    ) {
+        let fileURL = transcriptDirectory.appendingPathComponent(fileName)
         try? FileManager.default.removeItem(at: fileURL)
     }
 
-    static func loadTranscript(from fileName: String) -> String? {
-        let fileURL = transcriptStorageDirectory().appendingPathComponent(fileName)
+    func loadTranscript(from fileName: String) -> String? {
+        let fileURL = storageLayout.transcriptDirectory.appendingPathComponent(fileName)
         return try? String(contentsOf: fileURL, encoding: .utf8)
     }
 
@@ -5352,9 +5314,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map { Int64($0) }
     }
 
-    static func saveAudioFile(from tempURL: URL) -> SavedAudioFile? {
+    static func saveAudioFile(
+        from tempURL: URL,
+        audioDirectory: URL
+    ) -> SavedAudioFile? {
         let fileName = UUID().uuidString + "." + AudioImportOptions.storageExtension(for: tempURL.lastPathComponent)
-        let destURL = audioStorageDirectory().appendingPathComponent(fileName)
+        let destURL = audioDirectory.appendingPathComponent(fileName)
         do {
             try? FileManager.default.removeItem(at: destURL)
             try FileManager.default.copyItem(at: tempURL, to: destURL)
@@ -5380,16 +5345,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private static func savedAudioFileForStoppedRecording(
-        _ fileURL: URL
+        _ fileURL: URL,
+        audioDirectory: URL
     ) -> SavedAudioFile? {
-        let audioDirectory = audioStorageDirectory().standardizedFileURL
+        let audioDirectory = audioDirectory.standardizedFileURL
         let standardizedURL = fileURL.standardizedFileURL
         guard standardizedURL.deletingLastPathComponent() == audioDirectory else {
-            return saveAudioFile(from: fileURL)
+            return saveAudioFile(from: fileURL, audioDirectory: audioDirectory)
         }
         guard standardizedURL.pathExtension.lowercased() == "wav",
               (try? RecordingCanonicalWAV.validateFile(at: standardizedURL)) != nil else {
-            return saveAudioFile(from: fileURL)
+            return saveAudioFile(from: fileURL, audioDirectory: audioDirectory)
         }
         return SavedAudioFile(
             fileName: standardizedURL.lastPathComponent,
@@ -5397,7 +5363,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
-    static func saveSecurityScopedAudioFileOffMain(from fileURL: URL) async -> SavedAudioFile? {
+    static func saveSecurityScopedAudioFileOffMain(
+        from fileURL: URL,
+        audioDirectory: URL
+    ) async -> SavedAudioFile? {
         await Task.detached(priority: .userInitiated) {
             let accessGranted = fileURL.startAccessingSecurityScopedResource()
             defer {
@@ -5405,7 +5374,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     fileURL.stopAccessingSecurityScopedResource()
                 }
             }
-            return Self.saveAudioFile(from: fileURL)
+            return Self.saveAudioFile(
+                from: fileURL,
+                audioDirectory: audioDirectory
+            )
         }.value
     }
 
@@ -5421,29 +5393,49 @@ final class AppState: ObservableObject, @unchecked Sendable {
             forKey: assets.historyID
         )
         retryingItemIDs.remove(assets.historyID)
-        Self.deleteStoredFiles(assets)
+        Self.deleteStoredFiles(assets, storageLayout: storageLayout)
         try? cloudTranscriptionJobStore.delete(
             historyID: assets.historyID,
             session: nil
         )
     }
 
-    private static func deleteAudioFile(_ fileName: String) {
-        let fileURL = audioStorageDirectory().appendingPathComponent(fileName)
+    private static func deleteAudioFile(
+        _ fileName: String,
+        audioDirectory: URL
+    ) {
+        let fileURL = audioDirectory.appendingPathComponent(fileName)
         try? FileManager.default.removeItem(at: fileURL)
     }
 
-    private static func deleteStoredFiles(audioFileName: String?, transcriptFileName: String?) {
+    private static func deleteStoredFiles(
+        audioFileName: String?,
+        transcriptFileName: String?,
+        storageLayout: AppStateStorageLayout
+    ) {
         if let audioFileName {
-            deleteAudioFile(audioFileName)
+            deleteAudioFile(
+                audioFileName,
+                audioDirectory: storageLayout.audioDirectory
+            )
         }
         if let transcriptFileName {
-            deleteTranscriptFile(transcriptFileName)
+            deleteTranscriptFile(
+                transcriptFileName,
+                transcriptDirectory: storageLayout.transcriptDirectory
+            )
         }
     }
 
-    private static func deleteStoredFiles(_ assets: DeletedPipelineHistoryAssets) {
-        deleteStoredFiles(audioFileName: assets.audioFileName, transcriptFileName: assets.transcriptFileName)
+    private static func deleteStoredFiles(
+        _ assets: DeletedPipelineHistoryAssets,
+        storageLayout: AppStateStorageLayout
+    ) {
+        deleteStoredFiles(
+            audioFileName: assets.audioFileName,
+            transcriptFileName: assets.transcriptFileName,
+            storageLayout: storageLayout
+        )
     }
 
     static func normalizeInterruptedHistoryItem(
@@ -6571,8 +6563,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return false
         }
 
-        let storageRoot = Self.appStorageRootDirectory()
-        let makeStore = Self.pipelineHistoryStoreAtURLFactory
+        let storageRoot = dependencies.storageLayout.rootDirectory
+        let makeStore = dependencies.makePipelineHistoryStore
         let appStateReference = WeakAppStateReference(self)
         isHistoryArchiveTransitioning = true
         historyArchiveSafety = .transitioning
@@ -6605,8 +6597,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         storageRoot: URL,
         postAction: HistoryArchivePostAction
     ) {
-        let activeStore = Self.pipelineHistoryStoreAtURLFactory(
-            storageRoot.appendingPathComponent("PipelineHistory.sqlite")
+        let activeStore = dependencies.makePipelineHistoryStore(
+            dependencies.storageLayout.historyStoreURL
         )
         guard activeStore.availability == .ready,
               activeStore.durability == .durable,
@@ -6615,8 +6607,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return
         }
         pipelineHistoryStore = activeStore
-        recordingJournalStore = Self.makeRecordingJournalStore()
-        cloudTranscriptionJobStore = Self.makeCloudTranscriptionJobStore()
+        let storageLayout = dependencies.storageLayout
+        _ = Self.preparedDirectory(storageLayout.rootDirectory)
+        let audioDirectory = Self.preparedDirectory(storageLayout.audioDirectory)
+        _ = Self.preparedDirectory(storageLayout.transcriptDirectory)
+        recordingJournalStore = RecordingJournalStore(
+            audioDirectory: audioDirectory
+        )
+        cloudTranscriptionJobStore = CloudTranscriptionJobStore(
+            jobsDirectory: storageLayout.cloudTranscriptionJobsDirectory,
+            temporaryRoot: storageLayout.cloudTranscriptionTemporaryDirectory
+        )
         pipelineHistory = []
         retryingItemIDs = []
         pendingAudioImportJobIDs = []
@@ -6674,8 +6675,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         _ result: HistoryRecoveryImportResult,
         storageRoot: URL
     ) {
-        let activeStore = Self.pipelineHistoryStoreAtURLFactory(
-            storageRoot.appendingPathComponent("PipelineHistory.sqlite")
+        let activeStore = dependencies.makePipelineHistoryStore(
+            dependencies.storageLayout.historyStoreURL
         )
         guard activeStore.availability == .ready,
               activeStore.durability == .durable,
@@ -6700,8 +6701,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func completeHistoryRecoveryOperationFailure(at storageRoot: URL) {
-        let activeStore = Self.pipelineHistoryStoreAtURLFactory(
-            storageRoot.appendingPathComponent("PipelineHistory.sqlite")
+        let activeStore = dependencies.makePipelineHistoryStore(
+            dependencies.storageLayout.historyStoreURL
         )
         if activeStore.availability == .ready,
            activeStore.durability == .durable,
@@ -7064,7 +7065,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 languageContext: resolvedLanguage.context
             )
             attemptSourceFingerprint = source.fingerprint
-            result = try await Self.meetingSummaryGeneratorFactory(self)
+            result = try await dependencies.makeMeetingSummaryGenerator(self)
                 .generate(source: source)
 
             guard let index = pipelineHistory.firstIndex(where: { $0.id == id }) else {
@@ -7228,7 +7229,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
               let item = pipelineHistory.first(where: { $0.id == id }) else { return }
         // 파일에도 동기화해서 앱 재시작 후 폴백 로딩 시에도 일관성 유지
         if let fileName = item.transcriptFileName {
-            let fileURL = Self.transcriptStorageDirectory().appendingPathComponent(fileName)
+            let fileURL = storageLayout.transcriptDirectory.appendingPathComponent(fileName)
             try? text.write(to: fileURL, atomically: true, encoding: .utf8)
         }
         let replacementSpokenLanguage: SpokenLanguageResolution?
@@ -7324,15 +7325,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let startedAt = Date()
         let importContextSummary = AudioImportOptions.importContextSummary(for: fileURL.lastPathComponent)
         pendingAudioImportJobIDs.insert(jobID)
+        let audioDirectory = storageLayout.audioDirectory
 
         Task { [weak self] in
-            guard let savedAudioFile = await Self.saveSecurityScopedAudioFileOffMain(from: fileURL) else {
+            guard let savedAudioFile = await Self.saveSecurityScopedAudioFileOffMain(
+                from: fileURL,
+                audioDirectory: audioDirectory
+            ) else {
                 self?.pendingAudioImportJobIDs.remove(jobID)
                 self?.errorMessage = localizedCatalogString("Unable to save the audio file. Check disk space or file permissions and try again.")
                 return
             }
             guard let self else {
-                Self.deleteAudioFile(savedAudioFile.fileName)
+                Self.deleteAudioFile(
+                    savedAudioFile.fileName,
+                    audioDirectory: audioDirectory
+                )
                 return
             }
 
@@ -7374,7 +7382,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 }
             } catch {
                 self.pendingAudioImportJobIDs.remove(jobID)
-                Self.deleteAudioFile(savedAudioFile.fileName)
+                Self.deleteAudioFile(
+                    savedAudioFile.fileName,
+                    audioDirectory: audioDirectory
+                )
                 let issue = self.userIssue(for: error)
                 self.errorMessage = issue.record.presentation().compactMessage
                 return
@@ -7547,11 +7558,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    func storedAudioURL(for item: PipelineHistoryItem) -> URL? {
+        guard let fileName = item.audioFileName else { return nil }
+        return storageLayout.audioDirectory.appendingPathComponent(fileName)
+    }
+
     @MainActor
     func noteBrowserStoredAudioURL(for item: PipelineHistoryItem) -> URL? {
-        guard let audioFileName = item.audioFileName else { return nil }
-        let audioURL = Self.audioStorageDirectory().appendingPathComponent(audioFileName)
-        guard FileManager.default.fileExists(atPath: audioURL.path) else { return nil }
+        guard let audioURL = storedAudioURL(for: item),
+              FileManager.default.fileExists(atPath: audioURL.path) else {
+            return nil
+        }
         return audioURL
     }
 
@@ -7613,8 +7630,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         retryingItemIDs.insert(item.id)
 
         let postProcessingService = makePostProcessingService()
-        let cloudDependencies = Self
-            .retryCloudTranscriptionDependenciesFactory()
+        let cloudDependencies = dependencies
+            .makeRetryCloudTranscriptionDependencies()
+        let transcriptDirectory = storageLayout.transcriptDirectory
 
         let task = Task { [weak self] in
             guard let self else { return }
@@ -7647,7 +7665,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 let transcriptFileName = snapshot.item.transcriptFileName == nil
                     ? Self.saveTranscriptFile(
                         rawTranscript: parsedTranscript.transcript,
-                        postProcessedTranscript: result.finalTranscript
+                        postProcessedTranscript: result.finalTranscript,
+                        transcriptDirectory: transcriptDirectory
                     )
                     : snapshot.item.transcriptFileName
                 updatedItem = self.makeRetryHistoryItem(
@@ -7700,7 +7719,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 ) else {
                     if snapshot.item.transcriptFileName == nil,
                        let transcriptFileName = updatedItem.transcriptFileName {
-                        Self.deleteTranscriptFile(transcriptFileName)
+                        Self.deleteTranscriptFile(
+                            transcriptFileName,
+                            transcriptDirectory: transcriptDirectory
+                        )
                     }
                     self.retryingItemIDs.remove(snapshot.item.id)
                     return
@@ -7730,7 +7752,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 } catch {
                     if snapshot.item.transcriptFileName == nil,
                        let transcriptFileName = updatedItem.transcriptFileName {
-                        Self.deleteTranscriptFile(transcriptFileName)
+                        Self.deleteTranscriptFile(
+                            transcriptFileName,
+                            transcriptDirectory: transcriptDirectory
+                        )
                     }
                     let issue = self.userIssue(for: error)
                     self.errorMessage = issue.record.presentation().compactMessage
@@ -8857,7 +8882,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         dismissTranscribingOverlay()
         cleanupActiveAudioRecordersIfIdle()
         if let audioFileName = job.audioFileName {
-            Self.deleteAudioFile(audioFileName)
+            Self.deleteAudioFile(audioFileName, audioDirectory: storageLayout.audioDirectory)
         }
         if let liveNoteID = job.liveNoteID {
             pipelineHistory.removeAll { $0.id == liveNoteID }
@@ -10471,6 +10496,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
         let capturedLiveTranscriber = liveTranscriber
         let capturedPressEnterCommandEnabled = isPressEnterVoiceCommandEnabled
+        let audioDirectory = storageLayout.audioDirectory
         liveTranscriber = nil
         setActiveRecorderPCMHandler(nil)
 
@@ -10491,7 +10517,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         )
                     )
                     let savedAudioFile = transcriber.recordedAudioURL.flatMap { url -> SavedAudioFile? in
-                        let saved = Self.saveAudioFile(from: url)
+                        let saved = Self.saveAudioFile(
+                            from: url,
+                            audioDirectory: audioDirectory
+                        )
                         try? FileManager.default.removeItem(at: url)
                         return saved
                     }
@@ -10542,7 +10571,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         inFlightContextTask: inFlightContextTask
                     )
                     let errorAudioFile = transcriber.recordedAudioURL.flatMap { url -> SavedAudioFile? in
-                        let saved = Self.saveAudioFile(from: url)
+                        let saved = Self.saveAudioFile(
+                            from: url,
+                            audioDirectory: audioDirectory
+                        )
                         try? FileManager.default.removeItem(at: url)
                         return saved
                     }
@@ -10631,7 +10663,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 return
             }
 
-            let savedAudioFile = Self.savedAudioFileForStoppedRecording(fileURL)
+            let savedAudioFile = Self.savedAudioFileForStoppedRecording(fileURL, audioDirectory: storageLayout.audioDirectory)
             let transcriptionFileURL = savedAudioFile?.fileURL ?? fileURL
             if let savedAudioFile {
                 let recoveryContext = sessionContext ?? self.fallbackContextAtStop()
@@ -10870,7 +10902,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             guard let self else { return }
             switch stoppedRecording {
             case .transcribable(let fileURL, _):
-                guard let savedAudioFile = Self.savedAudioFileForStoppedRecording(fileURL) else {
+                guard let savedAudioFile = Self.savedAudioFileForStoppedRecording(fileURL, audioDirectory: storageLayout.audioDirectory) else {
                     self.completeStoppedRecording(
                         .audioOnly(recordingID),
                         overlayID: overlayID
@@ -10954,7 +10986,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         let compatible = CloudTranscriptionStartupReconciler(
             store: cloudTranscriptionJobStore,
-            audioRoot: Self.audioStorageDirectory()
+            audioRoot: storageLayout.audioDirectory
         ).reconcile(
             history: pipelineHistory,
             runtime: runtime
@@ -10997,7 +11029,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
               let audioFileName = item.audioFileName else {
             return
         }
-        let audioURL = Self.audioStorageDirectory().appendingPathComponent(
+        let audioURL = storageLayout.audioDirectory.appendingPathComponent(
             audioFileName
         )
         retryingItemIDs.insert(item.id)
@@ -11564,7 +11596,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                    !history.contains(where: { $0.id == recordingID }) {
                     Self.deleteStoredFiles(
                         audioFileName: audioFileName,
-                        transcriptFileName: nil
+                        transcriptFileName: nil,
+                        storageLayout: storageLayout
                     )
                 }
             }
@@ -11866,7 +11899,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let previousTranscriptFileName = existingEntry?.transcriptFileName
         let transcriptFileName = Self.saveTranscriptFile(
             rawTranscript: rawTranscript,
-            postProcessedTranscript: postProcessedTranscript
+            postProcessedTranscript: postProcessedTranscript,
+            transcriptDirectory: storageLayout.transcriptDirectory
         )
         updateTranscriptionJob(jobID) {
             $0.liveNoteID = nil
@@ -11924,7 +11958,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 try pipelineHistoryStore.update(entry)
                 if let previousTranscriptFileName,
                    previousTranscriptFileName != transcriptFileName {
-                    Self.deleteTranscriptFile(previousTranscriptFileName)
+                    Self.deleteTranscriptFile(
+                        previousTranscriptFileName,
+                        transcriptDirectory: storageLayout.transcriptDirectory
+                    )
                 }
             } else {
                 let removedStoredFiles = try appendPipelineHistoryItem(entry)
@@ -11943,10 +11980,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
             if existingID == nil, !isJournalAudioFile {
                 Self.deleteStoredFiles(
                     audioFileName: audioFileName,
-                    transcriptFileName: transcriptFileName
+                    transcriptFileName: transcriptFileName,
+                    storageLayout: storageLayout
                 )
             } else if let transcriptFileName {
-                Self.deleteTranscriptFile(transcriptFileName)
+                Self.deleteTranscriptFile(
+                    transcriptFileName,
+                    transcriptDirectory: storageLayout.transcriptDirectory
+                )
             }
             let issue = self.userIssue(for: error)
             errorMessage = issue.record.presentation().compactMessage

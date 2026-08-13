@@ -138,6 +138,7 @@ struct AppStateTranscriptionConfigurationTests {
         try await testRetryPreservesMeetingSummaryMetadata()
         try await testAudioImportTimeoutPreservesRawTranscriptAndFailedOutcome()
         try await testRetryTimeoutPreservesRawTranscriptAndFailedOutcome()
+        try await testCreatedAppStateKeepsItsRetryDependencySnapshot()
         try await testRetryTranscriptionFailurePreservesExistingAIOutcome()
         try testRetryUsesCurrentPostProcessingAndAudioOnlyMetadata()
         try testAudioOnlyRetryCreatesTranscriptFileAndPreservesMetadata()
@@ -2542,7 +2543,7 @@ struct AppStateTranscriptionConfigurationTests {
         await MainActor.run {
             let appState = AppState()
             let fileName = "retry-model-setup-\(UUID().uuidString).wav"
-            let audioURL = AppState.audioStorageDirectory().appendingPathComponent(fileName)
+            let audioURL = appState.storageLayout.audioDirectory.appendingPathComponent(fileName)
             try! Data([0]).write(to: audioURL)
             defer { try? FileManager.default.removeItem(at: audioURL) }
             let item = retryHistoryItem(audioFileName: fileName)
@@ -2568,7 +2569,7 @@ struct AppStateTranscriptionConfigurationTests {
             appState.apiKey = "test-api-key"
             appState.setNoteBrowserTranscriptionChoice(.appleLive)
             let fileName = "retry-model-selection-\(UUID().uuidString).wav"
-            let audioURL = AppState.audioStorageDirectory().appendingPathComponent(fileName)
+            let audioURL = appState.storageLayout.audioDirectory.appendingPathComponent(fileName)
             try! Data([0]).write(to: audioURL)
             defer { try? FileManager.default.removeItem(at: audioURL) }
             let item = retryHistoryItem(audioFileName: fileName)
@@ -2586,7 +2587,7 @@ struct AppStateTranscriptionConfigurationTests {
                 .apiStandard(modelID: "whisper-large-v3")
             )
             let fileName = "retry-provider-setup-\(UUID().uuidString).wav"
-            let audioURL = AppState.audioStorageDirectory().appendingPathComponent(fileName)
+            let audioURL = appState.storageLayout.audioDirectory.appendingPathComponent(fileName)
             try! Data([0]).write(to: audioURL)
             defer { try? FileManager.default.removeItem(at: audioURL) }
             let item = retryHistoryItem(audioFileName: fileName)
@@ -2607,7 +2608,7 @@ struct AppStateTranscriptionConfigurationTests {
                 .apiStandard(modelID: "whisper-large-v3")
             )
             let fileName = "retry-ready-\(UUID().uuidString).wav"
-            let audioURL = AppState.audioStorageDirectory().appendingPathComponent(fileName)
+            let audioURL = appState.storageLayout.audioDirectory.appendingPathComponent(fileName)
             try! Data([0]).write(to: audioURL)
             defer { try? FileManager.default.removeItem(at: audioURL) }
             let item = retryHistoryItem(audioFileName: fileName)
@@ -2620,10 +2621,20 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testRetryPreservesMeetingSummaryMetadata() async throws {
         resetDefaults()
         let store = PipelineHistoryStore(inMemory: true)
+        let rootDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "quill-retry-summary-metadata-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: rootDirectory) }
+        let storageLayout = AppStateStorageLayout(rootDirectory: rootDirectory)
+        try FileManager.default.createDirectory(
+            at: storageLayout.audioDirectory,
+            withIntermediateDirectories: true
+        )
         let fileName = "retry-summary-metadata-\(UUID().uuidString).wav"
-        let audioURL = AppState.audioStorageDirectory().appendingPathComponent(fileName)
+        let audioURL = storageLayout.audioDirectory.appendingPathComponent(fileName)
         try Data([0]).write(to: audioURL)
-        defer { try? FileManager.default.removeItem(at: audioURL) }
 
         let attempt = MeetingSummaryAttempt(
             occurredAt: Date(timeIntervalSince1970: 2_100),
@@ -2646,12 +2657,13 @@ struct AppStateTranscriptionConfigurationTests {
         )
         _ = try store.append(item, maxCount: 10)
 
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        defer {
-            AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+        var dependencies = AppStateDependencies.live
+        dependencies.storageLayout = storageLayout
+        dependencies.makePipelineHistoryStore = { _ in store }
+        let configuredDependencies = dependencies
+        let appState = await MainActor.run {
+            AppState(dependencies: configuredDependencies)
         }
-        AppState.pipelineHistoryStoreFactory = { store }
-        let appState = await MainActor.run { AppState() }
 
         await MainActor.run {
             appState.transcriptionAPIKey = "test-api-key"
@@ -2680,17 +2692,18 @@ struct AppStateTranscriptionConfigurationTests {
     }
 
     private static func testAudioImportTimeoutPreservesRawTranscriptAndFailedOutcome() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try FileManager.default.createDirectory(
+                at: environment.storageLayout.audioDirectory,
+                withIntermediateDirectories: true
+            )
             resetDefaults()
             let rawTranscript = "가져온 원본 전사문"
             let replacementTranscript = "뒤늦게 설치된 다른 전사문"
-            let store = AppState.makeDefaultPipelineHistoryStore()
-            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-            defer {
-                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
-            }
-            AppState.pipelineHistoryStoreFactory = { store }
-            let sourceURL = rootDirectory.appendingPathComponent(
+            let store = PipelineHistoryStore(storeURL: environment.storageLayout.historyStoreURL)
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = { _ in store }
+            let sourceURL = environment.rootDirectory.appendingPathComponent(
                 "import-timeout-\(UUID().uuidString).wav"
             )
             try writeTestWAV(at: sourceURL)
@@ -2710,7 +2723,10 @@ struct AppStateTranscriptionConfigurationTests {
                 throw URLError(.timedOut)
             }
 
-            let appState = await MainActor.run { AppState() }
+            let configuredDependencies = dependencies
+        let appState = await MainActor.run {
+            AppState(dependencies: configuredDependencies)
+        }
             await MainActor.run {
                 appState.apiKey = "post-processing-key"
                 appState.transcriptionAPIKey = "transcription-key"
@@ -2772,18 +2788,21 @@ struct AppStateTranscriptionConfigurationTests {
     }
 
     private static func testRetryTimeoutPreservesRawTranscriptAndFailedOutcome() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { _ in
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try FileManager.default.createDirectory(
+                at: environment.storageLayout.audioDirectory,
+                withIntermediateDirectories: true
+            )
             resetDefaults()
             let rawTranscript = "재시도 원본 전사문"
-            let replacementTranscript = "뒤늦게 설치된 재시도 전사문"
-            let store = AppState.makeDefaultPipelineHistoryStore()
-            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-            defer {
-                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+            let store = PipelineHistoryStore(storeURL: environment.storageLayout.historyStoreURL)
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = { _ in store }
+            dependencies.makeRetryCloudTranscriptionDependencies = {
+                successfulCloudDependencies(transcript: rawTranscript)
             }
-            AppState.pipelineHistoryStoreFactory = { store }
             let fileName = "retry-timeout-\(UUID().uuidString).wav"
-            let audioURL = AppState.audioStorageDirectory()
+            let audioURL = environment.storageLayout.audioDirectory
                 .appendingPathComponent(fileName)
             try writeTestWAV(at: audioURL)
             let originalItem = retryHistoryItem(
@@ -2792,22 +2811,18 @@ struct AppStateTranscriptionConfigurationTests {
             )
             _ = try store.append(originalItem, maxCount: 10)
 
-            let originalRetryDependencies =
-                AppState.retryCloudTranscriptionDependenciesFactory
             let originalTransport = AppState.postProcessingTransport
             defer {
-                AppState.retryCloudTranscriptionDependenciesFactory =
-                    originalRetryDependencies
                 AppState.postProcessingTransport = originalTransport
-            }
-            AppState.retryCloudTranscriptionDependenciesFactory = {
-                successfulCloudDependencies(transcript: rawTranscript)
             }
             AppState.postProcessingTransport = { _ in
                 throw URLError(.timedOut)
             }
 
-            let appState = await MainActor.run { AppState() }
+            let configuredDependencies = dependencies
+            let appState = await MainActor.run {
+                AppState(dependencies: configuredDependencies)
+            }
             await MainActor.run {
                 appState.apiKey = "post-processing-key"
                 appState.transcriptionAPIKey = "transcription-key"
@@ -2823,11 +2838,6 @@ struct AppStateTranscriptionConfigurationTests {
                         == .ready
                 )
                 appState.retryTranscription(item: originalItem)
-                AppState.retryCloudTranscriptionDependenciesFactory = {
-                    successfulCloudDependencies(
-                        transcript: replacementTranscript
-                    )
-                }
                 precondition(
                     appState.retryingItemIDs.contains(originalItem.id)
                 )
@@ -2847,18 +2857,120 @@ struct AppStateTranscriptionConfigurationTests {
         }
     }
 
+    private static func testCreatedAppStateKeepsItsRetryDependencySnapshot() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { firstEnvironment in
+            try await AppStateTestStorage.withIsolatedStorage { secondEnvironment in
+                resetDefaults()
+                let firstTranscript = "첫 인스턴스의 재시도 전사문"
+                let secondTranscript = "두 번째 인스턴스의 재시도 전사문"
+                let firstStore = PipelineHistoryStore(
+                    storeURL: firstEnvironment.storageLayout.historyStoreURL
+                )
+                let secondStore = PipelineHistoryStore(
+                    storeURL: secondEnvironment.storageLayout.historyStoreURL
+                )
+                var dependencies = firstEnvironment.dependencies
+                dependencies.makePipelineHistoryStore = { _ in firstStore }
+                dependencies.makeRetryCloudTranscriptionDependencies = {
+                    successfulCloudDependencies(transcript: firstTranscript)
+                }
+                let firstItem = try retryHistoryItem(
+                    in: firstEnvironment.storageLayout,
+                    filePrefix: "first-retry-dependency"
+                )
+                _ = try firstStore.append(firstItem, maxCount: 10)
+
+                let firstDependencies = dependencies
+                let firstState = await MainActor.run {
+                    AppState(dependencies: firstDependencies)
+                }
+
+                dependencies.storageLayout = secondEnvironment.storageLayout
+                dependencies.makePipelineHistoryStore = { _ in secondStore }
+                dependencies.makeRetryCloudTranscriptionDependencies = {
+                    successfulCloudDependencies(transcript: secondTranscript)
+                }
+                let secondItem = try retryHistoryItem(
+                    in: secondEnvironment.storageLayout,
+                    filePrefix: "second-retry-dependency"
+                )
+                _ = try secondStore.append(secondItem, maxCount: 10)
+                let secondDependencies = dependencies
+                let secondState = await MainActor.run {
+                    AppState(dependencies: secondDependencies)
+                }
+
+                await MainActor.run {
+                    for (appState, item) in [
+                        (firstState, firstItem),
+                        (secondState, secondItem)
+                    ] {
+                        appState.transcriptionAPIKey = "transcription-key"
+                        appState.transcriptionAPIURL = "https://api.example.com/openai/v1"
+                        appState.setNoteBrowserTranscriptionChoice(
+                            .apiStandard(modelID: "whisper-large-v3")
+                        )
+                        appState.disablePostProcessing = true
+                        precondition(
+                            appState.noteBrowserRetryAvailability(for: item)
+                                == .ready
+                        )
+                        appState.retryTranscription(item: item)
+                        precondition(
+                            appState.retryingItemIDs.contains(item.id)
+                        )
+                    }
+                }
+
+                await waitUntil {
+                    !firstState.retryingItemIDs.contains(firstItem.id)
+                        && !secondState.retryingItemIDs.contains(secondItem.id)
+                }
+                let firstPersisted = try requireHistoryItem(
+                    withID: firstItem.id,
+                    in: firstStore.loadAllHistory()
+                )
+                let secondPersisted = try requireHistoryItem(
+                    withID: secondItem.id,
+                    in: secondStore.loadAllHistory()
+                )
+                precondition(firstPersisted.rawTranscript == firstTranscript)
+                precondition(secondPersisted.rawTranscript == secondTranscript)
+            }
+        }
+    }
+
+    private static func retryHistoryItem(
+        in storageLayout: AppStateStorageLayout,
+        filePrefix: String
+    ) throws -> PipelineHistoryItem {
+        try FileManager.default.createDirectory(
+            at: storageLayout.audioDirectory,
+            withIntermediateDirectories: true
+        )
+        let fileName = "\(filePrefix)-\(UUID().uuidString).wav"
+        try writeTestWAV(
+            at: storageLayout.audioDirectory.appendingPathComponent(fileName)
+        )
+        return retryHistoryItem(audioFileName: fileName)
+    }
+
     private static func testRetryTranscriptionFailurePreservesExistingAIOutcome() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { _ in
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try FileManager.default.createDirectory(
+                at: environment.storageLayout.audioDirectory,
+                withIntermediateDirectories: true
+            )
             resetDefaults()
             let previousOutcome = "failed:previous-processing-error"
-            let store = AppState.makeDefaultPipelineHistoryStore()
-            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-            defer {
-                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+            let store = PipelineHistoryStore(storeURL: environment.storageLayout.historyStoreURL)
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = { _ in store }
+            dependencies.makeRetryCloudTranscriptionDependencies = {
+                failingCloudDependencies()
             }
-            AppState.pipelineHistoryStoreFactory = { store }
             let fileName = "retry-failure-\(UUID().uuidString).wav"
-            let audioURL = AppState.audioStorageDirectory()
+            let audioURL = environment.storageLayout.audioDirectory
                 .appendingPathComponent(fileName)
             try writeTestWAV(at: audioURL)
             let originalItem = retryHistoryItem(
@@ -2867,17 +2979,10 @@ struct AppStateTranscriptionConfigurationTests {
             )
             _ = try store.append(originalItem, maxCount: 10)
 
-            let originalRetryDependencies =
-                AppState.retryCloudTranscriptionDependenciesFactory
-            defer {
-                AppState.retryCloudTranscriptionDependenciesFactory =
-                    originalRetryDependencies
+            let configuredDependencies = dependencies
+            let appState = await MainActor.run {
+                AppState(dependencies: configuredDependencies)
             }
-            AppState.retryCloudTranscriptionDependenciesFactory = {
-                failingCloudDependencies()
-            }
-
-            let appState = await MainActor.run { AppState() }
             await MainActor.run {
                 appState.transcriptionAPIKey = "transcription-key"
                 appState.transcriptionAPIURL =
@@ -3026,21 +3131,25 @@ struct AppStateTranscriptionConfigurationTests {
     }
 
     private static func testResumedRetryPersistsAIProcessingOutcome() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try FileManager.default.createDirectory(
+                at: environment.storageLayout.audioDirectory,
+                withIntermediateDirectories: true
+            )
             resetDefaults()
             let rawTranscript = "재실행 후 복구된 원본 전사문"
             let historyID = UUID()
             let fileName = "\(historyID.uuidString).wav"
-            let audioURL = AppState.audioStorageDirectory()
+            let audioURL = environment.storageLayout.audioDirectory
                 .appendingPathComponent(fileName)
             try writeTestWAV(at: audioURL)
 
-            let store = AppState.makeDefaultPipelineHistoryStore()
-            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-            defer {
-                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+            let store = PipelineHistoryStore(storeURL: environment.storageLayout.historyStoreURL)
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = { _ in store }
+            dependencies.makeRetryCloudTranscriptionDependencies = {
+                successfulCloudDependencies(transcript: rawTranscript)
             }
-            AppState.pipelineHistoryStoreFactory = { store }
             let originalItem = PipelineHistoryItem(
                 id: historyID,
                 timestamp: Date(timeIntervalSince1970: 1),
@@ -3064,12 +3173,8 @@ struct AppStateTranscriptionConfigurationTests {
             _ = try store.append(originalItem, maxCount: 10)
 
             let jobStore = CloudTranscriptionJobStore(
-                jobsDirectory: rootDirectory
-                    .appendingPathComponent(
-                        "cloud-transcription/jobs",
-                        isDirectory: true
-                    ),
-                temporaryRoot: rootDirectory
+                jobsDirectory: environment.storageLayout.cloudTranscriptionJobsDirectory,
+                temporaryRoot: environment.rootDirectory
                     .appendingPathComponent(
                         "cloud-transcription/tmp",
                         isDirectory: true
@@ -3112,22 +3217,18 @@ struct AppStateTranscriptionConfigurationTests {
                 account: "transcription_api_url"
             )
 
-            let originalRetryDependencies =
-                AppState.retryCloudTranscriptionDependenciesFactory
             let originalTransport = AppState.postProcessingTransport
             defer {
-                AppState.retryCloudTranscriptionDependenciesFactory =
-                    originalRetryDependencies
                 AppState.postProcessingTransport = originalTransport
-            }
-            AppState.retryCloudTranscriptionDependenciesFactory = {
-                successfulCloudDependencies(transcript: rawTranscript)
             }
             AppState.postProcessingTransport = { _ in
                 throw URLError(.timedOut)
             }
 
-            let appState = await MainActor.run { AppState() }
+            let configuredDependencies = dependencies
+            let appState = await MainActor.run {
+                AppState(dependencies: configuredDependencies)
+            }
             await waitUntil(timeoutNanoseconds: 3_000_000_000) {
                 store.loadAllHistory().contains {
                     $0.id == historyID
@@ -3243,7 +3344,10 @@ struct AppStateTranscriptionConfigurationTests {
         for cleanup in [staleGuard, storeUpdate] {
             assert(cleanup.contains("snapshot.item.transcriptFileName == nil"))
             assert(cleanup.contains("let transcriptFileName = updatedItem.transcriptFileName"))
-            assert(cleanup.contains("Self.deleteTranscriptFile(transcriptFileName)"))
+            let compactCleanup = cleanup.filter { !$0.isWhitespace }
+            assert(compactCleanup.contains(
+                "Self.deleteTranscriptFile(transcriptFileName,transcriptDirectory:transcriptDirectory)"
+            ))
         }
     }
 

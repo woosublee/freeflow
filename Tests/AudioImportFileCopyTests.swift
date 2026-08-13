@@ -16,14 +16,25 @@ struct AudioImportFileCopyTests {
         let sourceURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("quill-audio-import-copy-source-\(ProcessInfo.processInfo.globallyUniqueString)")
             .appendingPathExtension("m4a")
+        let destinationDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("quill-audio-import-copy-destination-\(ProcessInfo.processInfo.globallyUniqueString)")
         let contents = Data("audio import copy test".utf8)
         try contents.write(to: sourceURL)
-        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        try FileManager.default.createDirectory(
+            at: destinationDirectory,
+            withIntermediateDirectories: true
+        )
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: destinationDirectory)
+        }
 
-        guard let saved = await AppState.saveSecurityScopedAudioFileOffMain(from: sourceURL) else {
+        guard let saved = await AppState.saveSecurityScopedAudioFileOffMain(
+            from: sourceURL,
+            audioDirectory: destinationDirectory
+        ) else {
             preconditionFailure("Expected off-main audio copy to succeed")
         }
-        defer { try? FileManager.default.removeItem(at: saved.fileURL) }
 
         precondition(saved.fileName.hasSuffix(".m4a"), "Expected copied file to preserve supported extension")
         let copied = try Data(contentsOf: saved.fileURL)
@@ -34,8 +45,13 @@ struct AudioImportFileCopyTests {
         let missingURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("quill-missing-audio-import-\(ProcessInfo.processInfo.globallyUniqueString)")
             .appendingPathExtension("mp3")
+        let destinationDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("quill-missing-audio-destination-\(ProcessInfo.processInfo.globallyUniqueString)")
 
-        let saved = await AppState.saveSecurityScopedAudioFileOffMain(from: missingURL)
+        let saved = await AppState.saveSecurityScopedAudioFileOffMain(
+            from: missingURL,
+            audioDirectory: destinationDirectory
+        )
 
         precondition(saved == nil, "Expected missing source file to fail off-main copy")
     }
@@ -43,11 +59,17 @@ struct AudioImportFileCopyTests {
     private static func testImportAudioFileUsesOffMainSecurityScopedCopy() throws {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
 
-        assertContains(source, "static func saveSecurityScopedAudioFileOffMain(from fileURL: URL) async -> SavedAudioFile?")
+        assertContains(
+            source,
+            "static func saveSecurityScopedAudioFileOffMain(\n        from fileURL: URL,\n        audioDirectory: URL\n    ) async -> SavedAudioFile?"
+        )
         assertContains(source, "await Task.detached(priority: .userInitiated)")
         assertContains(source, "let accessGranted = fileURL.startAccessingSecurityScopedResource()")
         assertContains(source, "fileURL.stopAccessingSecurityScopedResource()")
-        assertContains(source, "guard let savedAudioFile = await Self.saveSecurityScopedAudioFileOffMain(from: fileURL)")
+        assertContains(
+            source,
+            "guard let savedAudioFile = await Self.saveSecurityScopedAudioFileOffMain(\n                from: fileURL,\n                audioDirectory: audioDirectory"
+        )
         assertDoesNotContain(importAudioFileBody(in: source), "Self.saveAudioFile(from: fileURL)")
         assertDoesNotContain(importAudioFileBody(in: source), "startAccessingSecurityScopedResource()")
     }

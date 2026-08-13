@@ -46,7 +46,10 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         ] {
             precondition(!startupRecoveryBody.contains(forbidden))
         }
-        let initializerBody = try body(startingWith: "init()", in: source)
+        let initializerBody = try body(
+            startingWith: "init(dependencies: AppStateDependencies = .live)",
+            in: source
+        )
         let recoveryRange = try requiredRange(
             of: "recoverRecordingJournalsBeforeHistoryLoad(",
             in: initializerBody
@@ -346,7 +349,7 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         assert(helper.contains("case .recoveredWithoutTranscription"))
         assert(helper.contains("case .preservedForRecovery"))
         assert(helper.contains("case .empty"))
-        assert(helper.contains("savedAudioFileForStoppedRecording"))
+        assert(helper.contains("savedAudioFileForStoppedRecording(fileURL, audioDirectory: storageLayout.audioDirectory)"))
         assert(helper.contains("persistAudioOnlyRecording("))
         assert(persist.contains("PipelineHistoryItem.audioOnly("))
         assert(!helper.contains("PipelineHistoryItem.audioOnly("))
@@ -397,7 +400,7 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         assert(catchBody.contains("Self.deleteStoredFiles("))
         assert(catchBody.contains("audioFileName: audioFileName"))
         assert(catchBody.contains("transcriptFileName: nil"))
-        assert(!catchBody.contains("Self.deleteAudioFile(audioFileName)"))
+        assert(!catchBody.contains("Self.deleteAudioFile(audioFileName, audioDirectory: storageLayout.audioDirectory)"))
     }
 
     private static func testAudioOnlyCompletionOwnsForegroundUIAndTermination() throws {

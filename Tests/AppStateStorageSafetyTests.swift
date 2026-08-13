@@ -3,6 +3,9 @@ import Foundation
 
 struct AppStateStorageSafetyTests {
     static func main() async throws {
+        try verifiesDefaultAppStateUsesLiveStorageLayout()
+        try await verifiesAppStateInstancesKeepIndependentHistoryLayouts()
+        try await verifiesArchiveUsesOriginatingHistoryStoreFactory()
         try await verifiesHistoryCreatedAfterAssetsDoesNotSweep()
         try await verifiesHistoryRowsLostAfterSnapshotDoesNotSweep()
         try await verifiesUnavailableHistoryBlocksMutatingActions()
@@ -13,18 +16,19 @@ struct AppStateStorageSafetyTests {
         try await verifiesMissingSnapshotWithUnreferencedAudioDoesNotSweep()
         try await verifiesMatchingHistorySnapshotSweepsOrphansAtStartup()
         try await verifiesTrustedHistorySweepsOrphans()
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
-            let fallbackAudioURL = try await verifiesFallbackHistoryDoesNotSweepStoredAudio()
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            let fallbackAudioURL = try await verifiesFallbackHistoryDoesNotSweepStoredAudio(
+                environment: environment
+            )
             try await verifiesMissingHistoryDoesNotSweepStoredAudio(
                 audioURL: fallbackAudioURL,
-                rootDirectory: rootDirectory
+                environment: environment
             )
 
-            let audioDirectory = AppState.audioStorageDirectory()
-                .standardizedFileURL
-            let transcriptDirectory = AppState.transcriptStorageDirectory()
-                .standardizedFileURL
-            let rootPath = rootDirectory.standardizedFileURL.path + "/"
+            let audioDirectory = environment.storageLayout.audioDirectory.standardizedFileURL
+            let transcriptDirectory = environment.storageLayout.transcriptDirectory.standardizedFileURL
+            let rootPath = environment.rootDirectory.standardizedFileURL.path + "/"
 
             try expect(
                 audioDirectory.path.hasPrefix(rootPath),
@@ -38,18 +42,147 @@ struct AppStateStorageSafetyTests {
         print("AppStateStorageSafetyTests passed")
     }
 
+    private static func verifiesDefaultAppStateUsesLiveStorageLayout() throws {
+        let appState = AppState()
+        try expect(
+            appState.storageLayout.rootDirectory == AppName.applicationSupportDirectory,
+            "default AppState keeps the production storage root"
+        )
+    }
+
+    private static func verifiesAppStateInstancesKeepIndependentHistoryLayouts() async throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("quill-instance-layouts-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let firstLayout = AppStateStorageLayout(
+            rootDirectory: parent.appendingPathComponent("first", isDirectory: true)
+        )
+        let secondLayout = AppStateStorageLayout(
+            rootDirectory: parent.appendingPathComponent("second", isDirectory: true)
+        )
+        for layout in [firstLayout, secondLayout] {
+            try FileManager.default.createDirectory(
+                at: layout.rootDirectory,
+                withIntermediateDirectories: true
+            )
+        }
+        let firstItem = PipelineHistoryItem(
+            timestamp: Date(timeIntervalSince1970: 1),
+            rawTranscript: "first",
+            postProcessedTranscript: "first",
+            postProcessingPrompt: nil,
+            contextSummary: "",
+            contextScreenshotDataURL: nil,
+            contextScreenshotStatus: "No screenshot",
+            postProcessingStatus: "succeeded",
+            debugStatus: "",
+            customVocabulary: ""
+        )
+        let secondItem = PipelineHistoryItem(
+            timestamp: Date(timeIntervalSince1970: 2),
+            rawTranscript: "second",
+            postProcessedTranscript: "second",
+            postProcessingPrompt: nil,
+            contextSummary: "",
+            contextScreenshotDataURL: nil,
+            contextScreenshotStatus: "No screenshot",
+            postProcessingStatus: "succeeded",
+            debugStatus: "",
+            customVocabulary: ""
+        )
+        _ = try PipelineHistoryStore(storeURL: firstLayout.historyStoreURL)
+            .upsert(firstItem, maxCount: 10, requiresDurableStore: true)
+        _ = try PipelineHistoryStore(storeURL: secondLayout.historyStoreURL)
+            .upsert(secondItem, maxCount: 10, requiresDurableStore: true)
+
+        var firstDependencies = AppStateDependencies.live
+        firstDependencies.storageLayout = firstLayout
+        var secondDependencies = AppStateDependencies.live
+        secondDependencies.storageLayout = secondLayout
+        let configuredFirstDependencies = firstDependencies
+        let configuredSecondDependencies = secondDependencies
+        let firstState = await MainActor.run {
+            AppState(dependencies: configuredFirstDependencies)
+        }
+        let secondState = await MainActor.run {
+            AppState(dependencies: configuredSecondDependencies)
+        }
+
+        try expect(firstState.pipelineHistory.map(\.id) == [firstItem.id],
+                   "first AppState loads only its history layout")
+        try expect(secondState.pipelineHistory.map(\.id) == [secondItem.id],
+                   "second AppState loads only its history layout")
+    }
+
+    private static func verifiesArchiveUsesOriginatingHistoryStoreFactory() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            let layout = environment.storageLayout
+            try Data("unavailable canonical history".utf8).write(to: layout.historyStoreURL)
+            let unavailableStore = PipelineHistoryStore(
+                storeURL: layout.historyStoreURL,
+                persistentStoreLoader: { _ in
+                    TestFailure("Injected unavailable history for factory ownership")
+                }
+            )
+            let originatingRecorder = HistoryStoreURLRecorder()
+            let laterRecorder = HistoryStoreURLRecorder()
+            let startupFactory = UnavailableStartupStoreFactoryState(
+                startupURL: layout.historyStoreURL
+            )
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = { url in
+                originatingRecorder.record(url)
+                return startupFactory.makeStore(
+                    for: url,
+                    unavailableStore: unavailableStore
+                )
+            }
+
+            let configuredDependencies = dependencies
+            let appState = await MainActor.run {
+                AppState(dependencies: configuredDependencies)
+            }
+            dependencies.makePipelineHistoryStore = { url in
+                laterRecorder.record(url)
+                return PipelineHistoryStore(storeURL: url)
+            }
+            let archiveAccepted = await MainActor.run {
+                appState.archiveOldHistoryAndStartFresh()
+            }
+
+            try expect(archiveAccepted, "factory ownership archive is accepted")
+            try await waitForArchiveCompletion(appState)
+            try expect(
+                originatingRecorder.contains(layout.historyStoreURL),
+                "archive replacement uses the originating AppState factory"
+            )
+            try expect(
+                originatingRecorder.count(of: layout.historyStoreURL) >= 5,
+                "originating factory receives startup, archive probe, and replacement requests"
+            )
+            try expect(
+                laterRecorder.isEmpty,
+                "later dependency mutation cannot redirect archive work"
+            )
+            try expect(
+                !appState.isHistoryUnavailable,
+                "originating factory installs the verified fresh active store"
+            )
+        }
+    }
+
     private static func verifiesHistoryCreatedAfterAssetsDoesNotSweep() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
-            let audioURL = AppState.audioStorageDirectory()
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            let audioURL = environment.storageLayout.audioDirectory
                 .appendingPathComponent("history-lost.wav")
             try Data("fixture".utf8).write(to: audioURL)
             try setOldModificationDate(of: audioURL)
             try await Task.sleep(nanoseconds: 1_200_000_000)
-            _ = PipelineHistoryStore(
-                storeURL: rootDirectory.appendingPathComponent("PipelineHistory.sqlite")
-            )
+            _ = PipelineHistoryStore(storeURL: environment.storageLayout.historyStoreURL)
 
-            _ = await MainActor.run { AppState() }
+            _ = await MainActor.run { AppState(dependencies: environment.dependencies) }
             try await Task.sleep(nanoseconds: 1_200_000_000)
             try expect(
                 FileManager.default.fileExists(atPath: audioURL.path),
@@ -59,11 +192,12 @@ struct AppStateStorageSafetyTests {
     }
 
     private static func verifiesHistoryRowsLostAfterSnapshotDoesNotSweep() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
             let historyStore = PipelineHistoryStore(
-                storeURL: rootDirectory.appendingPathComponent("PipelineHistory.sqlite")
+                storeURL: environment.storageLayout.historyStoreURL
             )
-            let audioURL = AppState.audioStorageDirectory()
+            let audioURL = environment.storageLayout.audioDirectory
                 .appendingPathComponent("history-row-lost.wav")
             try Data("fixture".utf8).write(to: audioURL)
             try setOldModificationDate(of: audioURL)
@@ -72,7 +206,7 @@ struct AppStateStorageSafetyTests {
                 transcriptFileNames: []
             )
 
-            _ = await MainActor.run { AppState() }
+            _ = await MainActor.run { AppState(dependencies: environment.dependencies) }
             try await Task.sleep(nanoseconds: 1_200_000_000)
             try expect(
                 FileManager.default.fileExists(atPath: audioURL.path),
@@ -82,23 +216,25 @@ struct AppStateStorageSafetyTests {
     }
 
     private static func verifiesUnavailableHistoryBlocksMutatingActions() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
-            let audioURL = AppState.audioStorageDirectory()
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            let audioURL = environment.storageLayout.audioDirectory
                 .appendingPathComponent("protected-audio.wav")
-            let transcriptURL = AppState.transcriptStorageDirectory()
+            let transcriptURL = environment.storageLayout.transcriptDirectory
                 .appendingPathComponent("protected-transcript.txt")
             try Data("audio".utf8).write(to: audioURL)
             try Data("original transcript".utf8).write(to: transcriptURL)
             let unavailableStore = PipelineHistoryStore(
-                storeURL: rootDirectory.appendingPathComponent("PipelineHistory.sqlite"),
+                storeURL: environment.storageLayout.historyStoreURL,
                 persistentStoreLoader: { _ in
                     TestFailure("Injected protected history failure")
                 }
             )
-            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-            AppState.pipelineHistoryStoreFactory = { unavailableStore }
-            defer {
-                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = { url in
+                url == environment.storageLayout.historyStoreURL
+                    ? unavailableStore
+                    : PipelineHistoryStore(storeURL: url)
             }
 
             let item = PipelineHistoryItem(
@@ -115,7 +251,10 @@ struct AppStateStorageSafetyTests {
                 audioFileName: audioURL.lastPathComponent,
                 transcriptFileName: transcriptURL.lastPathComponent
             )
-            let appState = await MainActor.run { AppState() }
+            let configuredDependencies = dependencies
+            let appState = await MainActor.run {
+                AppState(dependencies: configuredDependencies)
+            }
             await MainActor.run {
                 appState.pipelineHistory = [item]
                 appState.clearPipelineHistory()
@@ -142,14 +281,15 @@ struct AppStateStorageSafetyTests {
     }
 
     private static func verifiesExplicitArchiveCreatesFreshSeparatedHistory() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
-            let storeURL = rootDirectory.appendingPathComponent("PipelineHistory.sqlite")
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            let storeURL = environment.storageLayout.historyStoreURL
             let originalSQLiteBytes = Data("unreadable original SQLite".utf8)
             try originalSQLiteBytes.write(to: storeURL)
-            let audioURL = AppState.audioStorageDirectory().appendingPathComponent("archived.wav")
-            let transcriptURL = AppState.transcriptStorageDirectory().appendingPathComponent("archived.txt")
-            let cloudJobURL = rootDirectory
-                .appendingPathComponent("cloud-transcription/jobs/archived.json")
+            let audioURL = environment.storageLayout.audioDirectory.appendingPathComponent("archived.wav")
+            let transcriptURL = environment.storageLayout.transcriptDirectory.appendingPathComponent("archived.txt")
+            let cloudJobURL = environment.storageLayout.cloudTranscriptionJobsDirectory
+                .appendingPathComponent("archived.json")
             try Data("archived audio".utf8).write(to: audioURL)
             try Data("archived transcript".utf8).write(to: transcriptURL)
             try FileManager.default.createDirectory(
@@ -164,13 +304,16 @@ struct AppStateStorageSafetyTests {
                     TestFailure("Injected unavailable history for explicit archive")
                 }
             )
-            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-            AppState.pipelineHistoryStoreFactory = { unavailableStore }
-            defer {
-                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
-            }
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = makeUnavailableStartupStoreFactory(
+                unavailableStore,
+                startupURL: environment.storageLayout.historyStoreURL
+            )
 
-            let appState = await MainActor.run { AppState() }
+            let configuredDependencies = dependencies
+            let appState = await MainActor.run {
+                AppState(dependencies: configuredDependencies)
+            }
             let archiveSucceeded = await MainActor.run {
                 appState.archiveOldHistoryAndStartFresh(postAction: .openRecovery)
             }
@@ -192,7 +335,7 @@ struct AppStateStorageSafetyTests {
             )
             try expect(appState.pipelineHistory.isEmpty, "fresh history starts with no old notes")
 
-            let recoveryDirectory = rootDirectory.appendingPathComponent("Recovery", isDirectory: true)
+            let recoveryDirectory = environment.rootDirectory.appendingPathComponent("Recovery", isDirectory: true)
             guard let snapshotDirectory = try FileManager.default.contentsOfDirectory(
                 at: recoveryDirectory,
                 includingPropertiesForKeys: nil,
@@ -246,11 +389,13 @@ struct AppStateStorageSafetyTests {
                 customVocabulary: ""
             )
             _ = try freshStore.upsert(freshItem, maxCount: Int.max)
-            AppState.pipelineHistoryStoreFactory = {
-                AppState.makeDefaultPipelineHistoryStore()
-            }
+            var relaunchDependencies = AppStateDependencies.live
+            relaunchDependencies.storageLayout = environment.storageLayout
+            let configuredRelaunchDependencies = relaunchDependencies
 
-            let relaunchedAppState = await MainActor.run { AppState() }
+            let relaunchedAppState = await MainActor.run {
+                AppState(dependencies: configuredRelaunchDependencies)
+            }
             try expect(
                 !relaunchedAppState.isHistoryUnavailable,
                 "published archive does not turn the fresh active store into protection mode"
@@ -263,10 +408,11 @@ struct AppStateStorageSafetyTests {
     }
 
     private static func verifiesArchivedNoteImportsIntoFreshHistory() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
-            let storeURL = rootDirectory.appendingPathComponent("PipelineHistory.sqlite")
-            let audioURL = AppState.audioStorageDirectory().appendingPathComponent("source.wav")
-            let transcriptURL = AppState.transcriptStorageDirectory().appendingPathComponent("source.txt")
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            let storeURL = environment.storageLayout.historyStoreURL
+            let audioURL = environment.storageLayout.audioDirectory.appendingPathComponent("source.wav")
+            let transcriptURL = environment.storageLayout.transcriptDirectory.appendingPathComponent("source.txt")
             try Data("source audio".utf8).write(to: audioURL)
             try Data("source transcript".utf8).write(to: transcriptURL)
             let sourceItem = PipelineHistoryItem(
@@ -297,13 +443,16 @@ struct AppStateStorageSafetyTests {
                     TestFailure("Injected unavailable history for import recovery")
                 }
             )
-            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-            AppState.pipelineHistoryStoreFactory = { unavailableStore }
-            defer {
-                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
-            }
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = makeUnavailableStartupStoreFactory(
+                unavailableStore,
+                startupURL: environment.storageLayout.historyStoreURL
+            )
 
-            let appState = await MainActor.run { AppState() }
+            let configuredDependencies = dependencies
+            let appState = await MainActor.run {
+                AppState(dependencies: configuredDependencies)
+            }
             let archiveAccepted = await MainActor.run {
                 appState.archiveOldHistoryAndStartFresh()
             }
@@ -332,10 +481,10 @@ struct AppStateStorageSafetyTests {
                     && importedItem.transcriptFileName != sourceItem.transcriptFileName,
                 "AppState recovery import remaps active asset ownership"
             )
-            let copiedAudioURL = AppState.audioStorageDirectory().appendingPathComponent(
+            let copiedAudioURL = environment.storageLayout.audioDirectory.appendingPathComponent(
                 try required(importedItem.audioFileName)
             )
-            let copiedTranscriptURL = AppState.transcriptStorageDirectory().appendingPathComponent(
+            let copiedTranscriptURL = environment.storageLayout.transcriptDirectory.appendingPathComponent(
                 try required(importedItem.transcriptFileName)
             )
             let copiedAudio = try Data(contentsOf: copiedAudioURL)
@@ -378,8 +527,9 @@ struct AppStateStorageSafetyTests {
     }
 
     private static func verifiesRecoverySettingsAutomaticallyInspectsSnapshots() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
-            let storeURL = rootDirectory.appendingPathComponent("PipelineHistory.sqlite")
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            let storeURL = environment.storageLayout.historyStoreURL
             let sourceItem = PipelineHistoryItem(
                 id: UUID(uuidString: "4B5A73C8-59D4-4FDF-ABF7-2CD61094E3A8")!,
                 timestamp: Date(timeIntervalSince1970: 1_754_010_203),
@@ -406,13 +556,16 @@ struct AppStateStorageSafetyTests {
                     TestFailure("Injected unavailable history for automatic inspection")
                 }
             )
-            let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-            AppState.pipelineHistoryStoreFactory = { unavailableStore }
-            defer {
-                AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
-            }
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = makeUnavailableStartupStoreFactory(
+                unavailableStore,
+                startupURL: environment.storageLayout.historyStoreURL
+            )
 
-            let appState = await MainActor.run { AppState() }
+            let configuredDependencies = dependencies
+            let appState = await MainActor.run {
+                AppState(dependencies: configuredDependencies)
+            }
             let archiveAccepted = await MainActor.run {
                 appState.archiveOldHistoryAndStartFresh(postAction: .openRecovery)
             }
@@ -447,11 +600,10 @@ struct AppStateStorageSafetyTests {
     }
 
     private static func verifiesInterruptedArchiveKeepsHistoryProtected() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
-            _ = PipelineHistoryStore(
-                storeURL: rootDirectory.appendingPathComponent("PipelineHistory.sqlite")
-            )
-            let transactionDirectory = rootDirectory
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            _ = PipelineHistoryStore(storeURL: environment.storageLayout.historyStoreURL)
+            let transactionDirectory = environment.rootDirectory
                 .appendingPathComponent("Recovery/.transactions", isDirectory: true)
             try FileManager.default.createDirectory(
                 at: transactionDirectory,
@@ -461,7 +613,9 @@ struct AppStateStorageSafetyTests {
                 to: transactionDirectory.appendingPathComponent("interrupted.json")
             )
 
-            let appState = await MainActor.run { AppState() }
+            let appState = await MainActor.run {
+                AppState(dependencies: environment.dependencies)
+            }
 
             try expect(
                 appState.historyArchiveSafety == .unresolvedInterruptedTransaction,
@@ -479,13 +633,14 @@ struct AppStateStorageSafetyTests {
     }
 
     private static func verifiesMissingSnapshotWithUnreferencedAudioDoesNotSweep() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
             let historyStore = PipelineHistoryStore(
-                storeURL: rootDirectory.appendingPathComponent("PipelineHistory.sqlite")
+                storeURL: environment.storageLayout.historyStoreURL
             )
-            let referencedAudioURL = AppState.audioStorageDirectory()
+            let referencedAudioURL = environment.storageLayout.audioDirectory
                 .appendingPathComponent("still-referenced.wav")
-            let unreferencedAudioURL = AppState.audioStorageDirectory()
+            let unreferencedAudioURL = environment.storageLayout.audioDirectory
                 .appendingPathComponent("history-row-lost-without-snapshot.wav")
             for fileURL in [referencedAudioURL, unreferencedAudioURL] {
                 try Data("fixture".utf8).write(to: fileURL)
@@ -508,9 +663,9 @@ struct AppStateStorageSafetyTests {
                 maxCount: 10
             )
 
-            _ = await MainActor.run { AppState() }
+            _ = await MainActor.run { AppState(dependencies: environment.dependencies) }
             try await Task.sleep(nanoseconds: 1_200_000_000)
-            _ = await MainActor.run { AppState() }
+            _ = await MainActor.run { AppState(dependencies: environment.dependencies) }
             try await Task.sleep(nanoseconds: 1_200_000_000)
             try expect(
                 FileManager.default.fileExists(atPath: unreferencedAudioURL.path),
@@ -520,20 +675,21 @@ struct AppStateStorageSafetyTests {
     }
 
     private static func verifiesMatchingHistorySnapshotSweepsOrphansAtStartup() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
             let historyStore = PipelineHistoryStore(
-                storeURL: rootDirectory.appendingPathComponent("PipelineHistory.sqlite")
+                storeURL: environment.storageLayout.historyStoreURL
             )
             try historyStore.saveAssetReferenceSnapshot(
                 audioFileNames: [],
                 transcriptFileNames: []
             )
-            let audioURL = AppState.audioStorageDirectory()
+            let audioURL = environment.storageLayout.audioDirectory
                 .appendingPathComponent("known-orphan.wav")
             try Data("fixture".utf8).write(to: audioURL)
             try setOldModificationDate(of: audioURL)
 
-            _ = await MainActor.run { AppState() }
+            _ = await MainActor.run { AppState(dependencies: environment.dependencies) }
             try await waitForFileRemoval(at: audioURL)
             try expect(
                 !FileManager.default.fileExists(atPath: audioURL.path),
@@ -543,16 +699,17 @@ struct AppStateStorageSafetyTests {
     }
 
     private static func verifiesTrustedHistorySweepsOrphans() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { rootDirectory in
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
             let historyStore = PipelineHistoryStore(
-                storeURL: rootDirectory.appendingPathComponent("PipelineHistory.sqlite")
+                storeURL: environment.storageLayout.historyStoreURL
             )
             try expect(
                 historyStore.referenceTrust == .complete,
                 "new persistent history is trusted before recording files exist"
             )
-            let audioDirectory = AppState.audioStorageDirectory()
-            let transcriptDirectory = AppState.transcriptStorageDirectory()
+            let audioDirectory = environment.storageLayout.audioDirectory
+            let transcriptDirectory = environment.storageLayout.transcriptDirectory
             let audioURL = audioDirectory.appendingPathComponent("trusted-orphan.wav")
             let transcriptURL = transcriptDirectory.appendingPathComponent("trusted-orphan.txt")
             for fileURL in [audioURL, transcriptURL] {
@@ -579,26 +736,29 @@ struct AppStateStorageSafetyTests {
         }
     }
 
-    private static func verifiesFallbackHistoryDoesNotSweepStoredAudio() async throws -> URL {
-        let audioURL = AppState.audioStorageDirectory()
+    private static func verifiesFallbackHistoryDoesNotSweepStoredAudio(
+        environment: AppStateTestEnvironment
+    ) async throws -> URL {
+        let audioURL = environment.storageLayout.audioDirectory
             .appendingPathComponent("fallback-history.wav")
         try Data("fixture".utf8).write(to: audioURL)
         try setOldModificationDate(of: audioURL)
 
         let fallbackStore = PipelineHistoryStore(
-            storeURL: AppState.appStorageRootDirectory()
-                .appendingPathComponent("FallbackHistory.sqlite"),
+            storeURL: environment.rootDirectory.appendingPathComponent("FallbackHistory.sqlite"),
             persistentStoreLoader: { _ in
                 TestFailure("Injected history load failure")
             }
         )
-        let originalHistoryStoreFactory = AppState.pipelineHistoryStoreFactory
-        AppState.pipelineHistoryStoreFactory = { fallbackStore }
-        defer {
-            AppState.pipelineHistoryStoreFactory = originalHistoryStoreFactory
+        var dependencies = environment.dependencies
+        dependencies.makePipelineHistoryStore = { url in
+            url == environment.storageLayout.historyStoreURL
+                ? fallbackStore
+                : PipelineHistoryStore(storeURL: url)
         }
 
-        _ = await MainActor.run { AppState() }
+        let configuredDependencies = dependencies
+        _ = await MainActor.run { AppState(dependencies: configuredDependencies) }
         try await Task.sleep(nanoseconds: 1_200_000_000)
         try expect(
             FileManager.default.fileExists(atPath: audioURL.path),
@@ -609,9 +769,9 @@ struct AppStateStorageSafetyTests {
 
     private static func verifiesMissingHistoryDoesNotSweepStoredAudio(
         audioURL: URL,
-        rootDirectory: URL
+        environment: AppStateTestEnvironment
     ) async throws {
-        _ = await MainActor.run { AppState() }
+        _ = await MainActor.run { AppState(dependencies: environment.dependencies) }
         try await Task.sleep(nanoseconds: 1_200_000_000)
         try expect(
             FileManager.default.fileExists(atPath: audioURL.path),
@@ -619,7 +779,7 @@ struct AppStateStorageSafetyTests {
         )
         try expect(
             FileManager.default.fileExists(
-                atPath: rootDirectory
+                atPath: environment.rootDirectory
                     .appendingPathComponent(
                         "History Recovery/asset-references-incomplete",
                         isDirectory: true
@@ -627,6 +787,31 @@ struct AppStateStorageSafetyTests {
             ),
             "missing history records persistent incomplete-reference evidence"
         )
+    }
+
+    private static func makeUnavailableStartupStoreFactory(
+        _ unavailableStore: PipelineHistoryStore,
+        startupURL: URL
+    ) -> @Sendable (URL) -> PipelineHistoryStore {
+        let state = UnavailableStartupStoreFactoryState(startupURL: startupURL)
+        return { url in
+            state.makeStore(for: url, unavailableStore: unavailableStore)
+        }
+    }
+
+    private static func prepareStorageDirectories(
+        for storageLayout: AppStateStorageLayout
+    ) throws {
+        for directory in [
+            storageLayout.audioDirectory,
+            storageLayout.transcriptDirectory,
+            storageLayout.cloudTranscriptionJobsDirectory
+        ] {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+        }
     }
 
     private static func waitForArchiveCompletion(_ appState: AppState) async throws {
@@ -704,6 +889,50 @@ struct AppStateStorageSafetyTests {
         _ label: String
     ) throws {
         guard condition() else { throw TestFailure(label) }
+    }
+
+    private final class HistoryStoreURLRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var urls: [URL] = []
+
+        var isEmpty: Bool {
+            lock.withLock { urls.isEmpty }
+        }
+
+        func record(_ url: URL) {
+            lock.withLock { urls.append(url) }
+        }
+
+        func contains(_ url: URL) -> Bool {
+            lock.withLock { urls.contains(url) }
+        }
+
+        func count(of url: URL) -> Int {
+            lock.withLock { urls.filter { $0 == url }.count }
+        }
+    }
+
+    private final class UnavailableStartupStoreFactoryState: @unchecked Sendable {
+        private let lock = NSLock()
+        private let startupURL: URL
+        private var didReturnUnavailableStore = false
+
+        init(startupURL: URL) {
+            self.startupURL = startupURL
+        }
+
+        func makeStore(
+            for url: URL,
+            unavailableStore: PipelineHistoryStore
+        ) -> PipelineHistoryStore {
+            lock.lock()
+            defer { lock.unlock() }
+            guard url == startupURL, !didReturnUnavailableStore else {
+                return PipelineHistoryStore(storeURL: url)
+            }
+            didReturnUnavailableStore = true
+            return unavailableStore
+        }
     }
 
     private struct TestFailure: Error, CustomStringConvertible {
