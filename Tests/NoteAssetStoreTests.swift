@@ -14,6 +14,9 @@ struct NoteAssetStoreTests {
         try await testSaveSecurityScopedAudioThrowsWhenSourceFileIsMissing()
         try testDeleteAudioIsIdempotentForMissingFile()
         try testDeleteAssetsRemovesBothFiles()
+        try testDeleteTranscriptPropagatesNonMissingFileErrors()
+        try testDeleteAudioPropagatesNonMissingFileErrors()
+        try testDeleteAssetsStillDeletesTranscriptWhenAudioDeleteFails()
         try testStoredAudioURLResolvesFromItem()
         try testStoredAudioURLIsNilWithoutAudioFileName()
         try testPrepareDirectoriesCreatesAudioAndTranscriptDirectories()
@@ -61,7 +64,7 @@ struct NoteAssetStoreTests {
 
     private static func testDeleteTranscriptIsIdempotentForMissingFile() throws {
         try withTemporaryStore { store in
-            store.deleteTranscript(fileName: "missing-\(UUID().uuidString).txt")
+            try store.deleteTranscript(fileName: "missing-\(UUID().uuidString).txt")
         }
     }
 
@@ -110,7 +113,7 @@ struct NoteAssetStoreTests {
 
     private static func testDeleteAudioIsIdempotentForMissingFile() throws {
         try withTemporaryStore { store in
-            store.deleteAudio(fileName: "missing-\(UUID().uuidString).wav")
+            try store.deleteAudio(fileName: "missing-\(UUID().uuidString).wav")
         }
     }
 
@@ -126,7 +129,7 @@ struct NoteAssetStoreTests {
             defer { try? FileManager.default.removeItem(at: sourceURL) }
             let savedAudio = try store.saveAudio(from: sourceURL)
 
-            store.deleteAssets(
+            try store.deleteAssets(
                 audioFileName: savedAudio.fileName,
                 transcriptFileName: transcriptFileName
             )
@@ -140,6 +143,127 @@ struct NoteAssetStoreTests {
             try expect(
                 !FileManager.default.fileExists(atPath: transcriptURL.path),
                 "deleteAssets removes the saved transcript file"
+            )
+        }
+    }
+
+    private static func testDeleteTranscriptPropagatesNonMissingFileErrors() throws {
+        try withTemporaryStore { store in
+            let fileName = try store.saveTranscript(
+                rawTranscript: "blocked delete",
+                postProcessedTranscript: ""
+            )
+            let directory = store.storageLayout.transcriptDirectory
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o555],
+                ofItemAtPath: directory.path
+            )
+            defer {
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o755],
+                    ofItemAtPath: directory.path
+                )
+            }
+
+            do {
+                try store.deleteTranscript(fileName: fileName)
+                throw TestFailure(
+                    "expected deleteTranscript to propagate a permission failure"
+                )
+            } catch let error as TestFailure {
+                throw error
+            } catch is NoteAssetStoreError {
+                throw TestFailure(
+                    "deleteTranscript should propagate the underlying FileManager error directly"
+                )
+            } catch {
+                // expected: the underlying FileManager error propagates directly
+            }
+        }
+    }
+
+    private static func testDeleteAudioPropagatesNonMissingFileErrors() throws {
+        try withTemporaryStore { store in
+            let sourceURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("note-asset-store-blocked-delete-\(UUID().uuidString).wav")
+            try Data("fixture".utf8).write(to: sourceURL)
+            defer { try? FileManager.default.removeItem(at: sourceURL) }
+            let saved = try store.saveAudio(from: sourceURL)
+
+            let directory = store.storageLayout.audioDirectory
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o555],
+                ofItemAtPath: directory.path
+            )
+            defer {
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o755],
+                    ofItemAtPath: directory.path
+                )
+            }
+
+            do {
+                try store.deleteAudio(fileName: saved.fileName)
+                throw TestFailure(
+                    "expected deleteAudio to propagate a permission failure"
+                )
+            } catch let error as TestFailure {
+                throw error
+            } catch is NoteAssetStoreError {
+                throw TestFailure(
+                    "deleteAudio should propagate the underlying FileManager error directly"
+                )
+            } catch {
+                // expected: the underlying FileManager error propagates directly
+            }
+        }
+    }
+
+    private static func testDeleteAssetsStillDeletesTranscriptWhenAudioDeleteFails() throws {
+        try withTemporaryStore { store in
+            let transcriptFileName = try store.saveTranscript(
+                rawTranscript: "still deleted",
+                postProcessedTranscript: ""
+            )
+            let sourceURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("note-asset-store-partial-\(UUID().uuidString).wav")
+            try Data("fixture".utf8).write(to: sourceURL)
+            defer { try? FileManager.default.removeItem(at: sourceURL) }
+            let savedAudio = try store.saveAudio(from: sourceURL)
+
+            let audioDirectory = store.storageLayout.audioDirectory
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o555],
+                ofItemAtPath: audioDirectory.path
+            )
+            defer {
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o755],
+                    ofItemAtPath: audioDirectory.path
+                )
+            }
+
+            do {
+                try store.deleteAssets(
+                    audioFileName: savedAudio.fileName,
+                    transcriptFileName: transcriptFileName
+                )
+                throw TestFailure("expected deleteAssets to propagate the audio deletion failure")
+            } catch let error as TestFailure {
+                throw error
+            } catch {
+                // expected: the blocked audio deletion still surfaces a failure
+            }
+
+            let transcriptURL = store.storageLayout.transcriptDirectory
+                .appendingPathComponent(transcriptFileName)
+            try expect(
+                !FileManager.default.fileExists(atPath: transcriptURL.path),
+                "deleteAssets still deletes the transcript even when the audio deletion fails"
+            )
+            try expect(
+                FileManager.default.fileExists(atPath: savedAudio.fileURL.path),
+                "the blocked audio file remains because its directory could not be modified"
             )
         }
     }
