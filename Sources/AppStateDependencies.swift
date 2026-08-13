@@ -36,9 +36,84 @@ struct AppStateStorageLayout: Sendable {
     }
 }
 
+struct AppStateLocalAIDependencies {
+    typealias InstallStarter = (
+        LocalAIModel,
+        @escaping (LocalAIDownloadProgress) -> Void,
+        @escaping (Result<Void, LocalAIInstallerError>) -> Void
+    ) -> LocalAIInstallTask
+
+    var makeServerManager: () -> LocalAIServerManager
+    var idleShutdownSleep: @Sendable (UInt64) async throws -> Void
+    var installStatus: @Sendable (LocalAIModel) -> LocalAIInstallStatus
+    var startInstall: InstallStarter
+    var progressSchedule:
+        LatestValueProgressCoalescer<LocalAIDownloadProgress>.Schedule
+    var deleteModel: @Sendable (LocalAIModel) throws -> Void
+    var deletePartialModel: @Sendable (LocalAIModel) throws -> Void
+    var processingAvailability: () -> LocalAIProcessingAvailability
+
+    static var live: AppStateLocalAIDependencies {
+        let store = LocalAIModelStore()
+        return AppStateLocalAIDependencies(
+            makeServerManager: { LocalAIServerManager(store: store) },
+            idleShutdownSleep: { try await Task.sleep(nanoseconds: $0) },
+            installStatus: { store.installStatus(for: $0) },
+            startInstall: { model, progress, completion in
+                LocalAIInstaller(store: store).install(
+                    model: model,
+                    progress: progress,
+                    completion: completion
+                )
+            },
+            progressSchedule:
+                LatestValueProgressCoalescer<LocalAIDownloadProgress>
+                    .mainQueueSchedule,
+            deleteModel: { try store.deleteModel($0) },
+            deletePartialModel: { try store.deletePartialModel($0) },
+            processingAvailability: { .live() }
+        )
+    }
+}
+
+struct AppStateNativeWhisperDependencies {
+    typealias InstallStarter = (
+        NativeWhisperModel,
+        @escaping (NativeWhisperDownloadProgress) -> Void,
+        @escaping (Result<Void, NativeWhisperInstallerError>) -> Void
+    ) -> NativeWhisperInstallTask
+
+    var installStatus:
+        @Sendable (NativeWhisperModel) -> NativeWhisperInstallStatus
+    var startInstall: InstallStarter
+    var progressSchedule:
+        LatestValueProgressCoalescer<NativeWhisperDownloadProgress>.Schedule
+    var deleteModel: @Sendable (NativeWhisperModel) throws -> Void
+
+    static var live: AppStateNativeWhisperDependencies {
+        let store = NativeWhisperModelStore()
+        return AppStateNativeWhisperDependencies(
+            installStatus: { store.installStatus(for: $0) },
+            startInstall: { model, progress, completion in
+                NativeWhisperInstaller(store: store).install(
+                    model: model,
+                    progress: progress,
+                    completion: completion
+                )
+            },
+            progressSchedule:
+                LatestValueProgressCoalescer<NativeWhisperDownloadProgress>
+                    .mainQueueSchedule,
+            deleteModel: { try store.deleteModel($0) }
+        )
+    }
+}
+
 struct AppStateDependencies {
     var storageLayout: AppStateStorageLayout
     var credentialStorageLayout: CredentialStorageLayout
+    var localAI: AppStateLocalAIDependencies
+    var nativeWhisper: AppStateNativeWhisperDependencies
     var makePipelineHistoryStore:
         @Sendable (URL) -> PipelineHistoryStore
     var makeMeetingSummaryGenerator:
@@ -50,6 +125,8 @@ struct AppStateDependencies {
         AppStateDependencies(
             storageLayout: .live,
             credentialStorageLayout: .live,
+            localAI: .live,
+            nativeWhisper: .live,
             makePipelineHistoryStore: { PipelineHistoryStore(storeURL: $0) },
             makeMeetingSummaryGenerator: { appState in
                 appState.makeMeetingSummaryService()
