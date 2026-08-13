@@ -9,14 +9,6 @@ struct AppStateAIProcessingBackendTests {
     static func main() async throws {
         let defaultsSnapshot = UserDefaultsSnapshot()
         let originalSettingsDirectory = AppSettingsStorage.storageDirectoryOverride
-        let originalLocalAIInstallStatusProvider =
-            AppState.localAIInstallStatusProvider
-        let suiteStatusHarness = LocalAIStatusHarness(
-            defaultStatus: .notInstalled
-        )
-        AppState.localAIInstallStatusProvider = {
-            suiteStatusHarness.status(for: $0)
-        }
         let isolatedSettingsDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "quill-app-state-ai-processing-tests-\(ProcessInfo.processInfo.globallyUniqueString)",
@@ -26,8 +18,6 @@ struct AppStateAIProcessingBackendTests {
         defer {
             defaultsSnapshot.restore()
             AppSettingsStorage.storageDirectoryOverride = originalSettingsDirectory
-            AppState.localAIInstallStatusProvider =
-                originalLocalAIInstallStatusProvider
             try? FileManager.default.removeItem(at: isolatedSettingsDirectory)
         }
 
@@ -80,6 +70,8 @@ struct AppStateAIProcessingBackendTests {
         await testCloudSelectionPublishesContextChoiceOnce()
         await testSelectionWaitsForInitialStatusRefresh()
         await testBackgroundStatusRefreshIgnoresStaleGeneration()
+        await testAppStateInstancesKeepIndependentLocalAIEnvironments()
+        await testExecutorUsesOriginatingLocalAIAvailability()
         try await testDeleteDuringInstallWaitsAndCannotAutoSelect()
         try await testDeleteFailureAndSuccessStateReset()
         try await testDeletingOnlyLocalModelDoesNotSubstituteCloud()
@@ -244,10 +236,9 @@ struct AppStateAIProcessingBackendTests {
     private static func testStoredLocalChoicesPreserveRememberedCloudModels() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .ready)
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
         let defaults = UserDefaults.standard
         defaults.set("remembered/post", forKey: "post_processing_model")
         defaults.set("remembered/context", forKey: "context_model")
@@ -260,7 +251,7 @@ struct AppStateAIProcessingBackendTests {
         storeChoice(postChoice, forKey: "post_processing_backend_choice")
         storeChoice(contextChoice, forKey: "context_backend_choice")
 
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
 
         await MainActor.run {
             assert(appState.postProcessingBackendChoice == postChoice)
@@ -275,10 +266,9 @@ struct AppStateAIProcessingBackendTests {
     private static func testIncompatibleLegacyContextSelectionIsPreservedAndDisabled() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .ready)
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let legacyChoice = AIProcessingBackendChoice.localAI(
             modelID: LocalAIModelCatalog.quality.id
@@ -286,7 +276,7 @@ struct AppStateAIProcessingBackendTests {
         storeChoice(legacyChoice, forKey: "context_backend_choice")
         UserDefaults.standard.set(false, forKey: "disable_context_capture")
 
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             precondition(
                 appState.disableContextCapture,
@@ -329,17 +319,16 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let legacyChoice = AIProcessingBackendChoice.localAI(
             modelID: LocalAIModelCatalog.quality.id
         )
         storeChoice(legacyChoice, forKey: "context_backend_choice")
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             precondition(appState.disableContextCapture)
             precondition(appState.contextBackendChoice == legacyChoice)
@@ -370,10 +359,9 @@ struct AppStateAIProcessingBackendTests {
     private static func testStartupPreservesUnavailableCompatibleLocalChoiceWithoutCloudFallback() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let localChoice = AIProcessingBackendChoice.localAI(
             modelID: LocalAIModelCatalog.quality.id
@@ -381,7 +369,7 @@ struct AppStateAIProcessingBackendTests {
         storeChoice(localChoice, forKey: "post_processing_backend_choice")
         AppSettingsStorage.save("configured-key", account: "groq_api_key")
 
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             precondition(
                 appState.postProcessingBackendChoice == localChoice,
@@ -397,15 +385,14 @@ struct AppStateAIProcessingBackendTests {
     private static func testSettingsDismissalPreservesUnavailableLocalChoiceWithoutCloudFallback() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let localChoice = AIProcessingBackendChoice.localAI(
             modelID: LocalAIModelCatalog.quality.id
         )
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.apiKey = "configured-key"
             appState.postProcessingBackendChoice = localChoice
@@ -431,15 +418,14 @@ struct AppStateAIProcessingBackendTests {
         )
         let installHarness = LocalAIInstallHarness()
         let deletionHarness = LocalAIDeletionHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIModelDelete = { model in
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.deleteModel = { model in
             deletionHarness.record(modelID: model.id, managerWasStopped: true)
         }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
         defer {
-            seams.restore()
             AppSettingsStorage.delete(account: "groq_api_key")
         }
 
@@ -449,7 +435,7 @@ struct AppStateAIProcessingBackendTests {
         storeChoice(retiredChoice, forKey: "context_backend_choice")
         AppSettingsStorage.save("configured-cloud-key", account: "groq_api_key")
 
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             precondition(appState.postProcessingBackendChoice == retiredChoice)
             precondition(appState.contextBackendChoice == retiredChoice)
@@ -514,13 +500,12 @@ struct AppStateAIProcessingBackendTests {
             statuses: [LocalAIModelCatalog.quality.id: .ready],
             defaultStatus: .notInstalled
         )
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
         storeChoice(retiredChoice, forKey: "post_processing_backend_choice")
 
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             precondition(appState.postProcessingBackendChoice == retiredChoice)
             precondition(appState.disablePostProcessing)
@@ -621,12 +606,11 @@ struct AppStateAIProcessingBackendTests {
     private static func testMeetingSummaryDraftFallsBackOrTurnsOffOnDismissal() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.apiKey = ""
             appState.disableMeetingSummary = false
@@ -648,13 +632,12 @@ struct AppStateAIProcessingBackendTests {
     private static func testDiscardUndownloadedSelectionsRestoresActiveChoices() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.apiKey = "configured-key"
             appState.disablePostProcessing = false
@@ -696,14 +679,13 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.selectAIProcessingBackendChoice(
                 .localAI(modelID: model.id),
@@ -725,12 +707,11 @@ struct AppStateAIProcessingBackendTests {
     private static func testSettingsDismissalDisablesAIWithoutReadyModels() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.apiKey = ""
             appState.disablePostProcessing = false
@@ -746,14 +727,13 @@ struct AppStateAIProcessingBackendTests {
     private static func testSettingsDismissalFallsBackToReadyLocalAIModel() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
-        let seams = LocalAISeamSnapshot()
+        var dependencies = modelTestDependencies()
         let model = LocalAIModelCatalog.quality
         statusHarness.set(.ready, for: model)
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.apiKey = ""
             appState.postProcessingBackendChoice = .cloud(
@@ -784,14 +764,13 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             let originalPostChoice = appState.postProcessingBackendChoice
             let originalContextChoice = appState.contextBackendChoice
@@ -854,7 +833,7 @@ struct AppStateAIProcessingBackendTests {
         let statusHarness = NativeWhisperStatusHarness(status: .notInstalled)
         let installHarness = ControlledNativeWhisperInstallHarness()
         let scheduler = ProgressScheduleHarness()
-        let seams = LocalAISeamSnapshot()
+        var dependencies = modelTestDependencies()
         AppState.nativeWhisperInstallStatusProvider = {
             statusHarness.installStatus(for: $0)
         }
@@ -866,9 +845,8 @@ struct AppStateAIProcessingBackendTests {
             )
         }
         AppState.nativeWhisperProgressSchedule = scheduler.schedule
-        defer { seams.restore() }
 
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { AppState(dependencies: dependencies) }
         await MainActor.run {
             appState.installNativeWhisperModel()
         }
@@ -920,15 +898,14 @@ struct AppStateAIProcessingBackendTests {
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
         let scheduler = ProgressScheduleHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        AppState.localAIProgressSchedule = scheduler.schedule
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
+        dependencies.localAI.progressSchedule = scheduler.schedule
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.installLocalAIModel(model)
         }
@@ -974,14 +951,13 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.selectAIProcessingBackendChoice(
                 .localAI(modelID: model.id),
@@ -1027,14 +1003,13 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         let originalPostChoice = await MainActor.run {
             let originalPostChoice = appState.postProcessingBackendChoice
             appState.selectAIProcessingBackendChoice(
@@ -1071,14 +1046,13 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.selectAIProcessingBackendChoice(
                 .localAI(modelID: model.id),
@@ -1122,20 +1096,19 @@ struct AppStateAIProcessingBackendTests {
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
         let partialDeletionHarness = LocalAIDeletionHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIPartialModelDelete = { model in
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.deletePartialModel = { model in
             partialDeletionHarness.record(
                 modelID: model.id,
                 managerWasStopped: false
             )
         }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         let originalChoices = await MainActor.run { () -> (AIProcessingBackendChoice, AIProcessingBackendChoice) in
             let choices = (
                 appState.postProcessingBackendChoice,
@@ -1231,16 +1204,15 @@ struct AppStateAIProcessingBackendTests {
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true }
         )
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIServerManagerFactory = { manager }
-        AppState.localAIIdleShutdownSleep = { nanoseconds in
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.makeServerManager = { manager }
+        dependencies.localAI.idleShutdownSleep = { nanoseconds in
             try await sleepHarness.sleep(nanoseconds: nanoseconds)
         }
-        defer { seams.restore() }
 
         _ = try await manager.withBaseURL(for: LocalAIModelCatalog.quality) { $0 }
         precondition(process.isRunning)
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
 
         await MainActor.run {
             appState.startLocalAIIdleShutdownMonitoring()
@@ -1265,15 +1237,14 @@ struct AppStateAIProcessingBackendTests {
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
         let completion = LockedBox(false)
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIPartialModelDelete = { _ in }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.deletePartialModel = { _ in }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.installLocalAIModel(model)
         }
@@ -1309,23 +1280,22 @@ struct AppStateAIProcessingBackendTests {
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true }
         )
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIPartialModelDelete = { model in
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.deletePartialModel = { model in
             partialDeletionHarness.record(
                 modelID: model.id,
                 managerWasStopped: !process.isRunning
             )
         }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        AppState.localAIServerManagerFactory = { manager }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
+        dependencies.localAI.makeServerManager = { manager }
         AppState.modelDownloadQuitAlertPresenter = { .alertFirstButtonReturn }
         AppState.applicationTerminationReply = replyHarness.reply
-        defer { seams.restore() }
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         _ = try await manager.withBaseURL(for: LocalAIModelCatalog.quality) { $0 }
         await MainActor.run {
             appState.selectAIProcessingBackendChoice(
@@ -1379,7 +1349,7 @@ struct AppStateAIProcessingBackendTests {
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true }
         )
-        let seams = LocalAISeamSnapshot()
+        var dependencies = modelTestDependencies()
         AppState.nativeWhisperInstallStatusProvider = {
             nativeStatusHarness.installStatus(for: $0)
         }
@@ -1390,12 +1360,11 @@ struct AppStateAIProcessingBackendTests {
                 completion: completion
             )
         }
-        AppState.localAIServerManagerFactory = { manager }
+        dependencies.localAI.makeServerManager = { manager }
         AppState.modelDownloadQuitAlertPresenter = { .alertFirstButtonReturn }
         AppState.applicationTerminationReply = replyHarness.reply
-        defer { seams.restore() }
 
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         _ = try await manager.withBaseURL(for: LocalAIModelCatalog.quality) { $0 }
         await MainActor.run {
             appState.installNativeWhisperModel(autoSelectWhenReady: true)
@@ -1437,16 +1406,16 @@ struct AppStateAIProcessingBackendTests {
             terminationGracePeriod: 0,
             waitForProcessExit: { _, _ in true }
         )
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { localStatusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = localInstallHarness.start
-        AppState.localAIPartialModelDelete = { model in
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { localStatusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = localInstallHarness.start
+        dependencies.localAI.deletePartialModel = { model in
             partialDeletionHarness.record(
                 modelID: model.id,
                 managerWasStopped: !process.isRunning
             )
         }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
         AppState.nativeWhisperInstallStatusProvider = {
             nativeStatusHarness.installStatus(for: $0)
         }
@@ -1457,13 +1426,12 @@ struct AppStateAIProcessingBackendTests {
                 completion: completion
             )
         }
-        AppState.localAIServerManagerFactory = { manager }
+        dependencies.localAI.makeServerManager = { manager }
         AppState.modelDownloadQuitAlertPresenter = { .alertFirstButtonReturn }
         AppState.applicationTerminationReply = replyHarness.reply
-        defer { seams.restore() }
 
         let localModel = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         _ = try await manager.withBaseURL(for: LocalAIModelCatalog.quality) { $0 }
         await MainActor.run {
             appState.installNativeWhisperModel(autoSelectWhenReady: false)
@@ -1506,11 +1474,11 @@ struct AppStateAIProcessingBackendTests {
         let nativeStatusHarness = NativeWhisperStatusHarness(status: .notInstalled)
         let nativeInstallHarness = ControlledNativeWhisperInstallHarness()
         let replyHarness = TerminationReplyHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { localStatusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = localInstallHarness.start
-        AppState.localAIPartialModelDelete = { _ in }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { localStatusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = localInstallHarness.start
+        dependencies.localAI.deletePartialModel = { _ in }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
         AppState.nativeWhisperInstallStatusProvider = {
             nativeStatusHarness.installStatus(for: $0)
         }
@@ -1523,11 +1491,10 @@ struct AppStateAIProcessingBackendTests {
         }
         AppState.modelDownloadQuitAlertPresenter = { .alertFirstButtonReturn }
         AppState.applicationTerminationReply = replyHarness.reply
-        defer { seams.restore() }
 
         let activeModel = LocalAIModelCatalog.quality
         let blockedModel = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.installLocalAIModel(activeModel)
             precondition(
@@ -1556,17 +1523,16 @@ struct AppStateAIProcessingBackendTests {
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
         let replyHarness = TerminationReplyHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIPartialModelDelete = { _ in }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.deletePartialModel = { _ in }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
         AppState.modelDownloadQuitAlertPresenter = { .alertSecondButtonReturn }
         AppState.applicationTerminationReply = replyHarness.reply
-        defer { seams.restore() }
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.installLocalAIModel(model)
             let reply = appState.requestTerminationAfterModelCleanup(
@@ -1592,17 +1558,16 @@ struct AppStateAIProcessingBackendTests {
             expectedBytes: LocalAIModelCatalog.quality.approximateBytes
         ))
         let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIPartialModelDelete = { _ in
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.deletePartialModel = { _ in
             throw TestLocalAILifecycleError.partialCleanupFailed
         }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.installLocalAIModel(model)
             appState.cancelLocalAIInstall(model)
@@ -1630,14 +1595,13 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         let originalChoice = await MainActor.run { () -> AIProcessingBackendChoice in
             let originalChoice = appState.postProcessingBackendChoice
             appState.selectAIProcessingBackendChoice(
@@ -1668,14 +1632,13 @@ struct AppStateAIProcessingBackendTests {
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
         let availability = LockedBox(supportedLocalAIAvailability())
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = { availability.value }
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = { availability.value }
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         let originalChoice = await MainActor.run { () -> AIProcessingBackendChoice in
             let originalChoice = appState.contextBackendChoice
             appState.selectAIProcessingBackendChoice(
@@ -1706,14 +1669,13 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.selectAIProcessingBackendChoice(
                 .localAI(modelID: model.id),
@@ -1741,14 +1703,13 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .ready)
         let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = unsupportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = unsupportedLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             let originalChoice = appState.postProcessingBackendChoice
             appState.selectAIProcessingBackendChoice(
@@ -1777,17 +1738,16 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .ready)
         let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = lowMemoryLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = lowMemoryLocalAIAvailability
 
         let model = LocalAIModelCatalog.quality
         let storedChoice = AIProcessingBackendChoice.localAI(modelID: model.id)
         storeChoice(storedChoice, forKey: "post_processing_backend_choice")
         UserDefaults.standard.set(false, forKey: "disable_post_processing")
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
 
         await MainActor.run {
             precondition(appState.postProcessingBackendChoice == storedChoice)
@@ -1815,11 +1775,10 @@ struct AppStateAIProcessingBackendTests {
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
         let deletionHarness = LocalAIDeletionHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
         let canonical = LocalAIModelCatalog.quality
         let forged = LocalAIModel(
@@ -1829,8 +1788,8 @@ struct AppStateAIProcessingBackendTests {
             artifacts: canonical.artifacts,
             approximateResidentRAMBytes: canonical.approximateResidentRAMBytes
         )
-        let appState = await makeRefreshedAppState()
-        AppState.localAIModelDelete = { model in
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
+        dependencies.localAI.deleteModel = { model in
             deletionHarness.record(modelID: model.id, managerWasStopped: true)
         }
         await MainActor.run {
@@ -1852,12 +1811,11 @@ struct AppStateAIProcessingBackendTests {
     private static func testAIProcessingChoiceDisplayMetadata() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        defer { seams.restore() }
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
 
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             let displays = appState.aiProcessingChoiceDisplays(for: .postProcessing)
             let cloud = displays.first { display in
@@ -2072,16 +2030,15 @@ struct AppStateAIProcessingBackendTests {
             subsequentResult: .ready
         )
         let installHarness = LocalAIInstallHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
         defer {
             statusHarness.releaseBlockedCall()
-            seams.restore()
         }
 
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { AppState(dependencies: dependencies) }
         statusHarness.waitUntilBlockedCallEntered()
         await MainActor.run {
             appState.selectAIProcessingBackendChoice(
@@ -2114,15 +2071,14 @@ struct AppStateAIProcessingBackendTests {
             blockedResult: .ready,
             subsequentResult: .notInstalled
         )
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
         defer {
             statusHarness.releaseBlockedCall()
-            seams.restore()
         }
 
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { AppState(dependencies: dependencies) }
         statusHarness.waitUntilBlockedCallEntered()
         await MainActor.run {
             appState.refreshAllLocalAIInstallStates()
@@ -2144,34 +2100,91 @@ struct AppStateAIProcessingBackendTests {
         precondition(statusHarness.mainThreadCallCount == 0)
     }
 
+    private static func testAppStateInstancesKeepIndependentLocalAIEnvironments() async {
+        resetAIProcessingDefaults()
+        let firstStatus = LocalAIStatusHarness(defaultStatus: .ready)
+        let secondStatus = LocalAIStatusHarness(defaultStatus: .notInstalled)
+        let firstManager = LocalAIServerManager()
+        let secondManager = LocalAIServerManager()
+        var firstDependencies = AppStateDependencies.live
+        firstDependencies.localAI.installStatus = firstStatus.status
+        firstDependencies.localAI.processingAvailability = supportedLocalAIAvailability
+        firstDependencies.localAI.makeServerManager = { firstManager }
+        var secondDependencies = AppStateDependencies.live
+        secondDependencies.localAI.installStatus = secondStatus.status
+        secondDependencies.localAI.processingAvailability = unsupportedLocalAIAvailability
+        secondDependencies.localAI.makeServerManager = { secondManager }
+
+        let instances = await MainActor.run {
+            (
+                AppState(dependencies: firstDependencies),
+                AppState(dependencies: secondDependencies)
+            )
+        }
+        await instances.0.waitForLocalAIInstallStateRefresh()
+        await instances.1.waitForLocalAIInstallStateRefresh()
+
+        await MainActor.run {
+            precondition(
+                instances.0.localAIInstallState(for: LocalAIModelCatalog.quality).status
+                    == .ready
+            )
+            precondition(
+                instances.1.localAIInstallState(for: LocalAIModelCatalog.quality).status
+                    == .notInstalled
+            )
+            precondition(instances.0.isLocalAIModelAvailable(LocalAIModelCatalog.quality))
+            precondition(!instances.1.isLocalAIModelAvailable(LocalAIModelCatalog.quality))
+            precondition(instances.0.localAIServerManager === firstManager)
+            precondition(instances.1.localAIServerManager === secondManager)
+        }
+    }
+
+    private static func testExecutorUsesOriginatingLocalAIAvailability() async {
+        resetAIProcessingDefaults()
+        var dependencies = AppStateDependencies.live
+        dependencies.localAI.installStatus = { _ in .ready }
+        dependencies.localAI.processingAvailability = unsupportedLocalAIAvailability
+        let appState = await MainActor.run {
+            AppState(dependencies: dependencies)
+        }
+        await appState.waitForLocalAIInstallStateRefresh()
+
+        await MainActor.run {
+            let executor = appState.makeAIProcessingBackendExecutor(
+                choice: .localAI(modelID: LocalAIModelCatalog.quality.id)
+            )
+            precondition(!executor.isConfigured)
+        }
+    }
+
     private static func testDeleteDuringInstallWaitsAndCannotAutoSelect() async throws {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
         let partialDeletionHarness = LocalAIDeletionHarness()
         let deletionHarness = LocalAIDeletionHarness()
-        let seams = LocalAISeamSnapshot()
+        var dependencies = modelTestDependencies()
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (TestLocalAIServerProcess(), port) },
             pollHealth: { _ in true },
             readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready }
         )
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIInstallStarter = installHarness.start
-        AppState.localAIPartialModelDelete = { model in
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.startInstall = installHarness.start
+        dependencies.localAI.deletePartialModel = { model in
             partialDeletionHarness.record(modelID: model.id, managerWasStopped: false)
         }
-        AppState.localAIModelDelete = { model in
+        dependencies.localAI.deleteModel = { model in
             deletionHarness.record(modelID: model.id, managerWasStopped: true)
             statusHarness.set(.notInstalled, for: model)
         }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        AppState.localAIServerManagerFactory = { manager }
-        defer { seams.restore() }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
+        dependencies.localAI.makeServerManager = { manager }
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         let originalChoices = await MainActor.run { () -> (AIProcessingBackendChoice, AIProcessingBackendChoice) in
             let choices = (
                 appState.postProcessingBackendChoice,
@@ -2228,24 +2241,23 @@ struct AppStateAIProcessingBackendTests {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .ready)
         let deletionHarness = LocalAIDeletionHarness()
-        let seams = LocalAISeamSnapshot()
+        var dependencies = modelTestDependencies()
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (TestLocalAIServerProcess(), port) },
             pollHealth: { _ in true },
             readinessProbe: successfulReadinessProbe,
             validateModel: { _ in .ready }
         )
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIModelDelete = { model in
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.deleteModel = { model in
             deletionHarness.record(modelID: model.id, managerWasStopped: true)
             throw TestLocalAILifecycleError.fullDeleteFailed
         }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        AppState.localAIServerManagerFactory = { manager }
-        defer { seams.restore() }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
+        dependencies.localAI.makeServerManager = { manager }
 
         let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
             appState.postProcessingBackendChoice = .localAI(modelID: model.id)
             appState.deleteLocalAIModel(model)
@@ -2279,16 +2291,15 @@ struct AppStateAIProcessingBackendTests {
             defaultStatus: .notInstalled
         )
         let deletionHarness = LocalAIDeletionHarness()
-        let seams = LocalAISeamSnapshot()
-        AppState.localAIInstallStatusProvider = { statusHarness.status(for: $0) }
-        AppState.localAIProcessingAvailabilityProvider = supportedLocalAIAvailability
-        AppState.localAIModelDelete = { model in
+        var dependencies = modelTestDependencies()
+        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
+        dependencies.localAI.deleteModel = { model in
             deletionHarness.record(modelID: model.id, managerWasStopped: true)
             statusHarness.set(.notInstalled, for: model)
         }
-        defer { seams.restore() }
 
-        let appState = await makeRefreshedAppState()
+        let appState = await makeRefreshedAppState(dependencies: dependencies)
         let retainedChoice = AIProcessingBackendChoice.localAI(
             modelID: LocalAIModelCatalog.quality.id
         )
@@ -2327,8 +2338,24 @@ struct AppStateAIProcessingBackendTests {
         precondition(deletionHarness.deletedModelIDs == [LocalAIModelCatalog.quality.id])
     }
 
+    private static func modelTestDependencies() -> AppStateDependencies {
+        var dependencies = AppStateDependencies.live
+        dependencies.localAI.installStatus = { _ in .notInstalled }
+        dependencies.localAI.processingAvailability = supportedLocalAIAvailability
+        dependencies.nativeWhisper.installStatus = { _ in .notInstalled }
+        return dependencies
+    }
+
     private static func makeRefreshedAppState() async -> AppState {
-        let appState = await MainActor.run { AppState() }
+        await makeRefreshedAppState(dependencies: modelTestDependencies())
+    }
+
+    private static func makeRefreshedAppState(
+        dependencies: AppStateDependencies
+    ) async -> AppState {
+        let appState = await MainActor.run {
+            AppState(dependencies: dependencies)
+        }
         await appState.waitForLocalAIInstallStateRefresh()
         return appState
     }
@@ -2657,14 +2684,6 @@ private struct LocalAISeamSnapshot {
     let nativeWhisperInstallStatusProvider = AppState.nativeWhisperInstallStatusProvider
     let nativeWhisperInstallStarter = AppState.nativeWhisperInstallStarter
     let nativeWhisperProgressSchedule = AppState.nativeWhisperProgressSchedule
-    let installStatusProvider = AppState.localAIInstallStatusProvider
-    let installStarter = AppState.localAIInstallStarter
-    let localAIProgressSchedule = AppState.localAIProgressSchedule
-    let modelDelete = AppState.localAIModelDelete
-    let partialModelDelete = AppState.localAIPartialModelDelete
-    let availabilityProvider = AppState.localAIProcessingAvailabilityProvider
-    let serverManagerFactory = AppState.localAIServerManagerFactory
-    let idleShutdownSleep = AppState.localAIIdleShutdownSleep
     let modelDownloadQuitAlertPresenter = AppState.modelDownloadQuitAlertPresenter
     let applicationTerminationReply = AppState.applicationTerminationReply
 
@@ -2672,14 +2691,6 @@ private struct LocalAISeamSnapshot {
         AppState.nativeWhisperInstallStatusProvider = nativeWhisperInstallStatusProvider
         AppState.nativeWhisperInstallStarter = nativeWhisperInstallStarter
         AppState.nativeWhisperProgressSchedule = nativeWhisperProgressSchedule
-        AppState.localAIInstallStatusProvider = installStatusProvider
-        AppState.localAIInstallStarter = installStarter
-        AppState.localAIProgressSchedule = localAIProgressSchedule
-        AppState.localAIModelDelete = modelDelete
-        AppState.localAIPartialModelDelete = partialModelDelete
-        AppState.localAIProcessingAvailabilityProvider = availabilityProvider
-        AppState.localAIServerManagerFactory = serverManagerFactory
-        AppState.localAIIdleShutdownSleep = idleShutdownSleep
         AppState.modelDownloadQuitAlertPresenter = modelDownloadQuitAlertPresenter
         AppState.applicationTerminationReply = applicationTerminationReply
     }

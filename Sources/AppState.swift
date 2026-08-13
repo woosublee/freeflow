@@ -367,12 +367,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     static var nativeWhisperInstallStatusProvider: (NativeWhisperModel) -> NativeWhisperInstallStatus = { model in
         NativeWhisperModelStore().installStatus(for: model)
     }
-    static var localAIServerManagerFactory: () -> LocalAIServerManager = {
-        LocalAIServerManager()
-    }
-    static var localAIIdleShutdownSleep: @Sendable (UInt64) async throws -> Void = {
-        try await Task.sleep(nanoseconds: $0)
-    }
     static var modelDownloadQuitAlertPresenter: @MainActor () -> NSApplication.ModalResponse = {
         let alert = NSAlert()
         alert.messageText = localizedCatalogString("Quit while models are downloading?")
@@ -390,32 +384,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
     static var applicationTerminationReply: @MainActor (Bool) -> Void = {
         NSApp.reply(toApplicationShouldTerminate: $0)
-    }
-    static var localAIInstallStatusProvider: @Sendable (LocalAIModel) -> LocalAIInstallStatus = {
-        LocalAIModelStore().installStatus(for: $0)
-    }
-    static var localAIInstallStarter: (
-        LocalAIModel,
-        @escaping (LocalAIDownloadProgress) -> Void,
-        @escaping (Result<Void, LocalAIInstallerError>) -> Void
-    ) -> LocalAIInstallTask = { model, progress, completion in
-        LocalAIInstaller().install(
-            model: model,
-            progress: progress,
-            completion: completion
-        )
-    }
-    static var localAIProgressSchedule:
-        LatestValueProgressCoalescer<LocalAIDownloadProgress>.Schedule =
-            LatestValueProgressCoalescer<LocalAIDownloadProgress>.mainQueueSchedule
-    static var localAIModelDelete: @Sendable (LocalAIModel) throws -> Void = {
-        try LocalAIModelStore().deleteModel($0)
-    }
-    static var localAIPartialModelDelete: @Sendable (LocalAIModel) throws -> Void = {
-        try LocalAIModelStore().deletePartialModel($0)
-    }
-    static var localAIProcessingAvailabilityProvider: () -> LocalAIProcessingAvailability = {
-        .live()
     }
     static var nativeWhisperInstallStarter: (
         NativeWhisperModel,
@@ -2647,7 +2615,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             defaults: .standard,
             key: meetingSummaryBackendChoiceStorageKey
         )
-        let localAIServerManager = Self.localAIServerManagerFactory()
+        let localAIServerManager = dependencies.localAI.makeServerManager()
         let shortcuts = Self.loadShortcutConfiguration(
             holdKey: holdShortcutStorageKey,
             toggleKey: toggleShortcutStorageKey,
@@ -2978,7 +2946,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             baseURL: apiBaseURL,
             customContextPrompt: customContextPrompt,
             contextScreenshotMaxDimension: contextScreenshotMaxDimension,
-            localServerManager: localAIServerManager
+            localServerManager: localAIServerManager,
+            localAIAvailability: dependencies.localAI.processingAvailability()
         )
         self.hasCompletedSetup = hasCompletedSetup
         self.transcriptionEnabled = transcriptionEnabled
@@ -3174,7 +3143,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     func startLocalAIIdleShutdownMonitoring() {
         guard localAIIdleShutdownTask == nil else { return }
         let manager = localAIServerManager
-        let sleep = Self.localAIIdleShutdownSleep
+        let sleep = dependencies.localAI.idleShutdownSleep
         localAIIdleShutdownTask = Task {
             while !Task.isCancelled {
                 do {
@@ -3216,7 +3185,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 )
             }
             let generation = nextLocalAIStatusRefreshGeneration(for: model)
-            let statusProvider = Self.localAIInstallStatusProvider
+            let statusProvider = dependencies.localAI.installStatus
             let appStateReference = WeakAppStateReference(self)
             Task.detached(priority: .utility) {
                 let status = statusProvider(model)
@@ -3582,7 +3551,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard LocalAIModelCatalog.model(id: model.id) == model else {
             return false
         }
-        return Self.localAIProcessingAvailabilityProvider().isModelSupported(model)
+        return dependencies.localAI.processingAvailability().isModelSupported(model)
     }
 
     @MainActor
@@ -3666,7 +3635,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return currentChoice
         }
 
-        let availability = Self.localAIProcessingAvailabilityProvider()
+        let availability = dependencies.localAI.processingAvailability()
         if hasCompletedLocalAIStatusRefresh, availability.isSupported {
             let readyModels = availability.availableModels.filter {
                 $0.capabilities.supports(feature.modelFeature)
@@ -3774,7 +3743,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let unavailableLocalDisplays = unavailableLocalAIChoiceDisplay(
             for: feature
         ).map { [$0] } ?? []
-        let availability = Self.localAIProcessingAvailabilityProvider()
+        let availability = dependencies.localAI.processingAvailability()
         let localDisplays = LocalAIModelCatalog.all.compactMap {
             model -> AIProcessingChoiceDisplay? in
             let choice = AIProcessingBackendChoice.localAI(modelID: model.id)
@@ -3906,7 +3875,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         localAIInstallStates[model.id] = state
 
         let progressCoalescer = LatestValueProgressCoalescer<LocalAIDownloadProgress>(
-            schedule: Self.localAIProgressSchedule
+            schedule: dependencies.localAI.progressSchedule
         ) { [weak self] progress in
             MainActor.assumeIsolated {
                 guard let self,
@@ -3922,9 +3891,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         localAIProgressCoalescers[model.id] = progressCoalescer
 
-        let statusProvider = Self.localAIInstallStatusProvider
-        let partialModelDelete = Self.localAIPartialModelDelete
-        localAIInstallTasks[model.id] = Self.localAIInstallStarter(
+        let statusProvider = dependencies.localAI.installStatus
+        let partialModelDelete = dependencies.localAI.deletePartialModel
+        let startInstall = dependencies.localAI.startInstall
+        localAIInstallTasks[model.id] = startInstall(
             model,
             { progress in
                 progressCoalescer.submit(progress)
@@ -4119,7 +4089,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             guard let selectedModel = LocalAIModelCatalog.model(id: modelID) else {
                 return nil
             }
-            let availability = Self.localAIProcessingAvailabilityProvider()
+            let availability = dependencies.localAI.processingAvailability()
             guard availability.isModelSupported(selectedModel) else {
                 return nil
             }
@@ -4210,8 +4180,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         localAIStatusRefreshPendingModelIDs.insert(model.id)
         _ = nextLocalAIStatusRefreshGeneration(for: model)
         let manager = localAIServerManager
-        let modelDelete = Self.localAIModelDelete
-        let statusProvider = Self.localAIInstallStatusProvider
+        let modelDelete = dependencies.localAI.deleteModel
+        let statusProvider = dependencies.localAI.installStatus
         Task { [weak self] in
             let outcome: LocalAIModelDeletionOutcome
             do {
@@ -4470,7 +4440,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             choice: choice,
             cloudBaseURL: apiBaseURL,
             cloudAPIKey: apiKey,
-            localServerManager: localAIServerManager
+            localServerManager: localAIServerManager,
+            localAIAvailability: dependencies.localAI.processingAvailability()
         )
     }
 
@@ -4491,14 +4462,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
         baseURL: String,
         cloudFallbackModelID: String,
         instructionExecutionGuardEnabled: Bool,
-        localServerManager: LocalAIServerManager
+        localServerManager: LocalAIServerManager,
+        localAIAvailability: LocalAIProcessingAvailability
     ) -> PostProcessingService {
         PostProcessingService(
             backendExecutor: AIProcessingBackendExecutor(
                 choice: choice,
                 cloudBaseURL: baseURL,
                 cloudAPIKey: apiKey,
-                localServerManager: localServerManager
+                localServerManager: localServerManager,
+                localAIAvailability: localAIAvailability
             ),
             cloudFallbackModelID: choice.isLocal ? nil : cloudFallbackModelID,
             instructionExecutionGuardEnabled: instructionExecutionGuardEnabled,
@@ -4515,7 +4488,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             baseURL: apiBaseURL,
             cloudFallbackModelID: postProcessingFallbackModel,
             instructionExecutionGuardEnabled: instructionExecutionGuardEnabled,
-            localServerManager: localAIServerManager
+            localServerManager: localAIServerManager,
+            localAIAvailability: dependencies.localAI.processingAvailability()
         )
     }
 
@@ -4525,14 +4499,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
         baseURL: String,
         customContextPrompt: String,
         contextScreenshotMaxDimension: Int,
-        localServerManager: LocalAIServerManager
+        localServerManager: LocalAIServerManager,
+        localAIAvailability: LocalAIProcessingAvailability
     ) -> AppContextService {
         AppContextService(
             backendExecutor: AIProcessingBackendExecutor(
                 choice: choice,
                 cloudBaseURL: baseURL,
                 cloudAPIKey: apiKey,
-                localServerManager: localServerManager
+                localServerManager: localServerManager,
+                localAIAvailability: localAIAvailability
             ),
             customContextPrompt: customContextPrompt,
             contextModel: choice.modelID,
@@ -4553,7 +4529,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             baseURL: apiBaseURL,
             customContextPrompt: customContextPrompt,
             contextScreenshotMaxDimension: contextScreenshotMaxDimension,
-            localServerManager: localAIServerManager
+            localServerManager: localAIServerManager,
+            localAIAvailability: dependencies.localAI.processingAvailability()
         )
     }
 
