@@ -14,6 +14,7 @@ struct CredentialStoreTests {
         try testSaveThrowsWhenDirectoryIsUnavailable()
         try testDeleteThrowsWhenDirectoryIsUnavailable()
         try testSettingsFileHasOwnerOnlyPermissions()
+        try testErrorDescriptionSurfacesTheUnderlyingFailure()
         print("CredentialStoreTests passed")
     }
 
@@ -106,6 +107,27 @@ struct CredentialStoreTests {
             throw TestFailure("expected save to throw when its directory cannot be created")
         } catch is CredentialStoreError {
             // expected
+        }
+    }
+
+    private static func testErrorDescriptionSurfacesTheUnderlyingFailure() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("credential-store-error-description-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("settings-dir", isDirectory: true)
+        try Data().write(to: directory)
+        let store = CredentialStore(layout: CredentialStorageLayout(directory: directory))
+
+        do {
+            try store.save("unwritable", account: "blocked_account")
+            throw TestFailure("expected save to throw when its directory cannot be created")
+        } catch let error as CredentialStoreError {
+            let description = error.localizedDescription
+            try expect(
+                !description.contains("CredentialStoreError"),
+                "the error description surfaces the underlying failure, not the generic enum-case fallback"
+            )
         }
     }
 

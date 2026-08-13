@@ -4296,10 +4296,26 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private func persistAPIKey(_ value: String) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            try? credentialStore.delete(account: apiKeyStorageKey)
-        } else {
-            try? credentialStore.save(trimmed, account: apiKeyStorageKey)
+        persistCredential(prefix: "Unable to save API key") {
+            if trimmed.isEmpty {
+                try credentialStore.delete(account: apiKeyStorageKey)
+            } else {
+                try credentialStore.save(trimmed, account: apiKeyStorageKey)
+            }
+        }
+    }
+
+    private func persistCredential(
+        prefix: String,
+        _ operation: () throws -> Void
+    ) {
+        do {
+            try operation()
+        } catch {
+            errorMessage = LocalizedUserMessage.providerFailure(
+                prefix: localizedCatalogString(prefix),
+                providerDetail: error.localizedDescription
+            )
         }
     }
 
@@ -4547,19 +4563,23 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private func persistAPIBaseURL(_ value: String) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty || trimmed == Self.defaultAPIBaseURL {
-            try? credentialStore.delete(account: apiBaseURLStorageKey)
-        } else {
-            try? credentialStore.save(trimmed, account: apiBaseURLStorageKey)
+        persistCredential(prefix: "Unable to save API base URL") {
+            if trimmed.isEmpty || trimmed == Self.defaultAPIBaseURL {
+                try credentialStore.delete(account: apiBaseURLStorageKey)
+            } else {
+                try credentialStore.save(trimmed, account: apiBaseURLStorageKey)
+            }
         }
     }
 
     private func persistOptionalAPIValue(_ value: String, account: String) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            try? credentialStore.delete(account: account)
-        } else {
-            try? credentialStore.save(trimmed, account: account)
+        persistCredential(prefix: "Unable to save the provider value") {
+            if trimmed.isEmpty {
+                try credentialStore.delete(account: account)
+            } else {
+                try credentialStore.save(trimmed, account: account)
+            }
         }
     }
 

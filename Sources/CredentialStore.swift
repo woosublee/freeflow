@@ -1,7 +1,14 @@
 import Foundation
 
-enum CredentialStoreError: Error {
+enum CredentialStoreError: LocalizedError {
     case writeFailed(underlying: Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .writeFailed(let underlying):
+            underlying.localizedDescription
+        }
+    }
 }
 
 /// A focused, instance-owned boundary over the on-disk credential/settings

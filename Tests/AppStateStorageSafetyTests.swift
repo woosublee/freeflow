@@ -171,6 +171,11 @@ struct AppStateStorageSafetyTests {
             firstState.apiKey = "first-instance-updated-key"
         }
         try expect(
+            CredentialStore(layout: firstCredentialLayout)
+                .load(account: "groq_api_key") == "first-instance-updated-key",
+            "updating the first AppState's API key persists to its own credential layout"
+        )
+        try expect(
             CredentialStore(layout: secondCredentialLayout)
                 .load(account: "groq_api_key") == "second-instance-key",
             "updating the first AppState's API key does not affect the second instance's stored credential"
