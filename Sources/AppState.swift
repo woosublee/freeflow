@@ -4420,13 +4420,29 @@ final class AppState: ObservableObject, @unchecked Sendable {
             : defaultContextScreenshotMaxDimension
     }
 
-    func makeAIProcessingBackendExecutor(
-        choice: AIProcessingBackendChoice
+    static func makeAIProcessingBackendExecutor(
+        choice: AIProcessingBackendChoice,
+        apiKey: String,
+        baseURL: String,
+        localServerManager: LocalAIServerManager,
+        localAIAvailability: LocalAIProcessingAvailability
     ) -> AIProcessingBackendExecutor {
         AIProcessingBackendExecutor(
             choice: choice,
-            cloudBaseURL: apiBaseURL,
+            cloudBaseURL: baseURL,
             cloudAPIKey: apiKey,
+            localServerManager: localServerManager,
+            localAIAvailability: localAIAvailability
+        )
+    }
+
+    func makeAIProcessingBackendExecutor(
+        choice: AIProcessingBackendChoice
+    ) -> AIProcessingBackendExecutor {
+        Self.makeAIProcessingBackendExecutor(
+            choice: choice,
+            apiKey: apiKey,
+            baseURL: apiBaseURL,
             localServerManager: localAIServerManager,
             localAIAvailability: dependencies.localAI.processingAvailability()
         )
@@ -4453,10 +4469,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         localAIAvailability: LocalAIProcessingAvailability
     ) -> PostProcessingService {
         PostProcessingService(
-            backendExecutor: AIProcessingBackendExecutor(
+            backendExecutor: makeAIProcessingBackendExecutor(
                 choice: choice,
-                cloudBaseURL: baseURL,
-                cloudAPIKey: apiKey,
+                apiKey: apiKey,
+                baseURL: baseURL,
                 localServerManager: localServerManager,
                 localAIAvailability: localAIAvailability
             ),
@@ -4490,10 +4506,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         localAIAvailability: LocalAIProcessingAvailability
     ) -> AppContextService {
         AppContextService(
-            backendExecutor: AIProcessingBackendExecutor(
+            backendExecutor: makeAIProcessingBackendExecutor(
                 choice: choice,
-                cloudBaseURL: baseURL,
-                cloudAPIKey: apiKey,
+                apiKey: apiKey,
+                baseURL: baseURL,
                 localServerManager: localServerManager,
                 localAIAvailability: localAIAvailability
             ),

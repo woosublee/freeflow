@@ -1449,143 +1449,132 @@ struct AppStateTranscriptionConfigurationTests {
         }
     }
 
-    private static func testNativeWhisperInstallLeavesAppleActiveUntilCompletion() async {
-        resetDefaults()
-        let harness = NativeWhisperInstallHarness()
-        let statusHarness = NativeWhisperModelDependencyHarness(
+    private struct NativeWhisperInstallFixture {
+        let installer: NativeWhisperInstallHarness
+        let status: NativeWhisperModelDependencyHarness
+        let appState: AppState
+    }
+
+    private static func makeNativeWhisperInstallFixture()
+        -> NativeWhisperInstallFixture {
+        let installer = NativeWhisperInstallHarness()
+        let status = NativeWhisperModelDependencyHarness(
             status: .notInstalled
         )
         var dependencies = transcriptionTestDependencies(
-            status: statusHarness.installStatus
+            status: { status.installStatus(for: $0) }
         )
-        dependencies.nativeWhisper.startInstall = harness.start
+        dependencies.nativeWhisper.startInstall = {
+            installer.start(
+                model: $0,
+                progress: $1,
+                completion: $2
+            )
+        }
+        return NativeWhisperInstallFixture(
+            installer: installer,
+            status: status,
+            appState: makeAppState(dependencies: dependencies)
+        )
+    }
+
+    private static func testNativeWhisperInstallLeavesAppleActiveUntilCompletion() async {
+        resetDefaults()
+        let fixture = makeNativeWhisperInstallFixture()
 
         await MainActor.run {
-            let appState = makeAppState(dependencies: dependencies)
-            appState.setNoteBrowserTranscriptionChoice(.appleLive)
-            appState.installNativeWhisperModel(autoSelectWhenReady: true)
+            fixture.appState.setNoteBrowserTranscriptionChoice(.appleLive)
+            fixture.appState.installNativeWhisperModel(autoSelectWhenReady: true)
 
-            precondition(appState.currentNoteBrowserTranscriptionChoice == .appleLive)
-            precondition(appState.willAutoSelectNativeWhisperWhenReady)
-            precondition(appState.isInstallingNativeWhisper)
+            precondition(fixture.appState.currentNoteBrowserTranscriptionChoice == .appleLive)
+            precondition(fixture.appState.willAutoSelectNativeWhisperWhenReady)
+            precondition(fixture.appState.isInstallingNativeWhisper)
         }
     }
 
     private static func testInstallCallWhileAlreadyInstallingStillArmsAutoSelection() async {
         resetDefaults()
-        let harness = NativeWhisperInstallHarness()
-        let statusHarness = NativeWhisperModelDependencyHarness(
-            status: .notInstalled
-        )
-        var dependencies = transcriptionTestDependencies(
-            status: statusHarness.installStatus
-        )
-        dependencies.nativeWhisper.startInstall = harness.start
+        let fixture = makeNativeWhisperInstallFixture()
 
         await MainActor.run {
-            let appState = makeAppState(dependencies: dependencies)
-            appState.setNoteBrowserTranscriptionChoice(.appleLive)
-            appState.installNativeWhisperModel(autoSelectWhenReady: false)
-            appState.cancelNativeWhisperAutoSelection()
-            precondition(appState.isInstallingNativeWhisper)
-            precondition(!appState.willAutoSelectNativeWhisperWhenReady)
+            fixture.appState.setNoteBrowserTranscriptionChoice(.appleLive)
+            fixture.appState.installNativeWhisperModel(autoSelectWhenReady: false)
+            fixture.appState.cancelNativeWhisperAutoSelection()
+            precondition(fixture.appState.isInstallingNativeWhisper)
+            precondition(!fixture.appState.willAutoSelectNativeWhisperWhenReady)
 
-            appState.installNativeWhisperModel(autoSelectWhenReady: true)
+            fixture.appState.installNativeWhisperModel(autoSelectWhenReady: true)
 
-            precondition(appState.isInstallingNativeWhisper)
-            precondition(appState.willAutoSelectNativeWhisperWhenReady)
+            precondition(fixture.appState.isInstallingNativeWhisper)
+            precondition(fixture.appState.willAutoSelectNativeWhisperWhenReady)
         }
     }
 
     private static func testNativeWhisperInstallAutoSelectsOnSuccess() async {
         resetDefaults()
-        let harness = NativeWhisperInstallHarness()
-        let statusHarness = NativeWhisperModelDependencyHarness(
-            status: .notInstalled
-        )
-        var dependencies = transcriptionTestDependencies(
-            status: statusHarness.installStatus
-        )
-        dependencies.nativeWhisper.startInstall = harness.start
+        let fixture = makeNativeWhisperInstallFixture()
 
-        let appState = await MainActor.run { () -> AppState in
-            let appState = makeAppState(dependencies: dependencies)
-            appState.setNoteBrowserTranscriptionChoice(.appleLive)
-            appState.installNativeWhisperModel(autoSelectWhenReady: true)
-            return appState
+        await MainActor.run {
+            fixture.appState.setNoteBrowserTranscriptionChoice(.appleLive)
+            fixture.appState.installNativeWhisperModel(autoSelectWhenReady: true)
         }
 
-        statusHarness.setStatus(.ready)
-        harness.completion?(.success(()))
-        await waitUntil { !appState.isInstallingNativeWhisper }
+        fixture.status.setStatus(.ready)
+        fixture.installer.completion?(.success(()))
+        await waitUntil { !fixture.appState.isInstallingNativeWhisper }
 
         await MainActor.run {
             precondition(
-                appState.currentNoteBrowserTranscriptionChoice
+                fixture.appState.currentNoteBrowserTranscriptionChoice
                     == .nativeWhisper(modelID: NativeWhisperModelCatalog.recommended.id)
             )
-            precondition(!appState.willAutoSelectNativeWhisperWhenReady)
+            precondition(!fixture.appState.willAutoSelectNativeWhisperWhenReady)
         }
     }
 
     private static func testExplicitBackendChoiceCancelsAutoSelectionOnly() async {
         resetDefaults()
-        let harness = NativeWhisperInstallHarness()
-        let statusHarness = NativeWhisperModelDependencyHarness(
-            status: .notInstalled
-        )
-        var dependencies = transcriptionTestDependencies(
-            status: statusHarness.installStatus
-        )
-        dependencies.nativeWhisper.startInstall = harness.start
+        let fixture = makeNativeWhisperInstallFixture()
 
-        let appState = await MainActor.run { () -> AppState in
-            let appState = makeAppState(dependencies: dependencies)
-            appState.apiKey = "test-api-key"
-            appState.setNoteBrowserTranscriptionChoice(.appleLive)
-            appState.installNativeWhisperModel(autoSelectWhenReady: true)
-            appState.cancelNativeWhisperAutoSelection()
-            appState.setNoteBrowserTranscriptionChoice(.apiStandard(modelID: "custom-model"))
+        await MainActor.run {
+            fixture.appState.apiKey = "test-api-key"
+            fixture.appState.setNoteBrowserTranscriptionChoice(.appleLive)
+            fixture.appState.installNativeWhisperModel(autoSelectWhenReady: true)
+            fixture.appState.cancelNativeWhisperAutoSelection()
+            fixture.appState.setNoteBrowserTranscriptionChoice(
+                .apiStandard(modelID: "custom-model")
+            )
 
-            precondition(appState.isInstallingNativeWhisper)
-            precondition(!appState.willAutoSelectNativeWhisperWhenReady)
-            return appState
+            precondition(fixture.appState.isInstallingNativeWhisper)
+            precondition(!fixture.appState.willAutoSelectNativeWhisperWhenReady)
         }
 
-        statusHarness.setStatus(.ready)
-        harness.completion?(.success(()))
-        await waitUntil { !appState.isInstallingNativeWhisper }
+        fixture.status.setStatus(.ready)
+        fixture.installer.completion?(.success(()))
+        await waitUntil { !fixture.appState.isInstallingNativeWhisper }
 
         await MainActor.run {
             precondition(
-                appState.currentNoteBrowserTranscriptionChoice
+                fixture.appState.currentNoteBrowserTranscriptionChoice
                     == .apiStandard(modelID: "custom-model")
             )
-            precondition(!appState.willAutoSelectNativeWhisperWhenReady)
+            precondition(!fixture.appState.willAutoSelectNativeWhisperWhenReady)
         }
     }
 
     private static func testNativeWhisperCancellationClearsAutoSelection() async {
         resetDefaults()
-        let harness = NativeWhisperInstallHarness()
-        let statusHarness = NativeWhisperModelDependencyHarness(
-            status: .notInstalled
-        )
-        var dependencies = transcriptionTestDependencies(
-            status: statusHarness.installStatus
-        )
-        dependencies.nativeWhisper.startInstall = harness.start
+        let fixture = makeNativeWhisperInstallFixture()
 
         await MainActor.run {
-            let appState = makeAppState(dependencies: dependencies)
-            appState.setNoteBrowserTranscriptionChoice(.appleLive)
-            appState.installNativeWhisperModel(autoSelectWhenReady: true)
-            precondition(appState.willAutoSelectNativeWhisperWhenReady)
+            fixture.appState.setNoteBrowserTranscriptionChoice(.appleLive)
+            fixture.appState.installNativeWhisperModel(autoSelectWhenReady: true)
+            precondition(fixture.appState.willAutoSelectNativeWhisperWhenReady)
 
-            appState.cancelNativeWhisperInstall()
+            fixture.appState.cancelNativeWhisperInstall()
 
-            precondition(!appState.willAutoSelectNativeWhisperWhenReady)
-            precondition(appState.nativeWhisperInstallProgress.isCancelled)
+            precondition(!fixture.appState.willAutoSelectNativeWhisperWhenReady)
+            precondition(fixture.appState.nativeWhisperInstallProgress.isCancelled)
         }
     }
 
