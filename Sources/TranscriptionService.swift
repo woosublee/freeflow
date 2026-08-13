@@ -72,7 +72,7 @@ class TranscriptionService {
     private let requestedLanguageCode: String
     private let cloudDependencies: CloudTranscriptionDependencies
     private let cloudExecutionContext: CloudTranscriptionExecutionContext?
-    private let nativeWhisperExecution: NativeWhisperExecutionSnapshot
+    private let nativeWhisperExecution: NativeWhisperExecutionSnapshot?
     private var transcriptionResponseFormat: String {
         Self.responseFormat(forModel: transcriptionModel)
     }
@@ -92,7 +92,7 @@ class TranscriptionService {
         localTranscriptionModel: TranscriptionModel = .default,
         transcriptionModel: String = AppState.defaultTranscriptionModel,
         language: String? = nil,
-        nativeWhisperExecution: NativeWhisperExecutionSnapshot = .live(),
+        nativeWhisperExecution: NativeWhisperExecutionSnapshot? = nil,
         cloudDependencies: CloudTranscriptionDependencies = .live,
         cloudExecutionContext: CloudTranscriptionExecutionContext? = nil
     ) throws {
@@ -353,7 +353,7 @@ class TranscriptionService {
     }
 
     private func transcribeWithNativeWhisper(fileURL: URL) async throws -> TranscriptionResult {
-        let execution = nativeWhisperExecution
+        let execution = nativeWhisperExecution ?? .live()
         guard execution.modelIsReady() else {
             throw QuillUserIssueError.local(
                 code: .localModelMissing,
@@ -1085,7 +1085,7 @@ extension TranscriptionExecutionSnapshot {
                 useLegacyMlxWhisper: local.useLegacyMlxWhisper,
                 transcriptionLanguage: local.language,
                 localTranscriptionModel: local.model,
-                nativeWhisperExecution: local.nativeWhisperExecution ?? .live(),
+                nativeWhisperExecution: local.nativeWhisperExecution,
                 cloudDependencies: cloudDependencies,
                 cloudExecutionContext: nil
             )

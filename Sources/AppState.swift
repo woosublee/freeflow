@@ -203,7 +203,7 @@ private struct AudioImportTaskConfiguration {
             transcriptionLanguage: transcriptionLanguage,
             localTranscriptionModel: localTranscriptionModel,
             transcriptionModel: transcriptionModel,
-            nativeWhisperExecution: nativeWhisperExecution ?? .live(),
+            nativeWhisperExecution: nativeWhisperExecution,
             cloudDependencies: cloudDependencies,
             cloudExecutionContext: cloudExecutionContext
         )
@@ -4823,7 +4823,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 useLocalTranscription: useLocalTranscription,
                 localTranscriptionModel: localTranscriptionModel,
                 useLegacyMlxWhisper: useLegacyMlxWhisper
-            ) ?? .live()
+            )
         )
     }
 
@@ -10812,8 +10812,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             transcriptionLanguage: capturedTranscriptionLanguage,
                             localTranscriptionModel: capturedLocalTranscriptionModel,
                             transcriptionModel: capturedTranscriptionModel,
-                            nativeWhisperExecution:
-                                capturedNativeWhisperExecution ?? .live(),
+                            nativeWhisperExecution: capturedNativeWhisperExecution,
                             cloudExecutionContext: cloudExecutionContext
                         )
                         transcription = try await Self.resolveRawTranscript(

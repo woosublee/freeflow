@@ -182,6 +182,10 @@ struct AppStateTranscriptionConfigurationTests {
         assert(configuration.localTranscriptionModelID == "apple-speech")
         assert(configuration.transcriptionLanguageCode == "en")
         assert(configuration.localWhisperPath == "/tmp/quill-test-mlx-whisper")
+        let execution = Mirror(reflecting: service)
+            .descendant("nativeWhisperExecution")
+            as? NativeWhisperExecutionSnapshot
+        assert(execution == nil)
     }
 
     private static func testMakeTranscriptionServiceMapsEmptyLocalWhisperPathToNil() throws {
@@ -1136,7 +1140,12 @@ struct AppStateTranscriptionConfigurationTests {
         precondition(capture.lowerBound < task.lowerBound)
         precondition(
             stoppedRecordingBody.contains(
-                "capturedNativeWhisperExecution ?? .live(),"
+                "nativeWhisperExecution: capturedNativeWhisperExecution,"
+            )
+        )
+        precondition(
+            !stoppedRecordingBody.contains(
+                "capturedNativeWhisperExecution ?? .live()"
             )
         )
     }
