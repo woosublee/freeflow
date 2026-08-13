@@ -51,10 +51,10 @@ struct MeetingSummaryAppStateTests {
         let firstItem = makeItem()
         let secondItem = makeItem()
         let firstGenerator = MeetingSummaryGeneratorStub { _ in
-            generationResult(overview: "first generator")
+            makeGenerationResult(overview: "first generator")
         }
         let secondGenerator = MeetingSummaryGeneratorStub { _ in
-            generationResult(overview: "second generator")
+            makeGenerationResult(overview: "second generator")
         }
         let firstState = try await configuredAppState(
             item: firstItem,
@@ -85,49 +85,60 @@ struct MeetingSummaryAppStateTests {
     }
 
     private static func testCreatedAppStateKeepsItsSummaryDependencySnapshot() async throws {
-        let fixture = try configuredAppStateFixture()
-        defer { fixture.cleanup() }
-        let item = makeItem()
-        _ = try fixture.store.upsert(
-            item,
+        let firstFixture = try configuredAppStateFixture()
+        defer { firstFixture.cleanup() }
+        let secondFixture = try configuredAppStateFixture()
+        defer { secondFixture.cleanup() }
+        let firstItem = makeItem()
+        let secondItem = makeItem()
+        _ = try firstFixture.store.upsert(
+            firstItem,
+            maxCount: 10,
+            requiresDurableStore: true
+        )
+        _ = try secondFixture.store.upsert(
+            secondItem,
             maxCount: 10,
             requiresDurableStore: true
         )
         let firstGenerator = MeetingSummaryGeneratorStub { _ in
-            generationResult(overview: "first generator")
+            makeGenerationResult(overview: "first generator")
         }
         let secondGenerator = MeetingSummaryGeneratorStub { _ in
-            generationResult(overview: "second generator")
+            makeGenerationResult(overview: "second generator")
         }
         var dependencies = AppStateDependencies.live
-        dependencies.storageLayout = fixture.storageLayout
-        dependencies.makePipelineHistoryStore = { _ in fixture.store }
+        dependencies.storageLayout = firstFixture.storageLayout
+        dependencies.makePipelineHistoryStore = { _ in firstFixture.store }
         dependencies.makeMeetingSummaryGenerator = { _ in firstGenerator }
-        let configuredDependencies = dependencies
-        let appState = await MainActor.run {
-            AppState(dependencies: configuredDependencies)
+        let firstDependencies = dependencies
+        let firstState = await MainActor.run {
+            let appState = AppState(dependencies: firstDependencies)
+            configureSummaryGeneration(appState)
+            return appState
         }
+
+        dependencies.storageLayout = secondFixture.storageLayout
+        dependencies.makePipelineHistoryStore = { _ in secondFixture.store }
         dependencies.makeMeetingSummaryGenerator = { _ in secondGenerator }
-        await MainActor.run {
-            appState.apiKey = "configured-key"
-            appState.selectAIProcessingBackendChoice(
-                .cloud(modelID: "summary/model"),
-                for: .meetingSummary
-            )
-            appState.disableMeetingSummary = false
-            precondition(
-                appState.meetingSummaryAvailability(for: appState.pipelineHistory[0])
-                    == .available,
-                "test requires an available summary source"
-            )
+        let secondDependencies = dependencies
+        let secondState = await MainActor.run {
+            let appState = AppState(dependencies: secondDependencies)
+            configureSummaryGeneration(appState)
+            return appState
         }
 
-        try await appState.generateMeetingSummary(id: item.id)
+        try await firstState.generateMeetingSummary(id: firstItem.id)
+        try await secondState.generateMeetingSummary(id: secondItem.id)
 
         await MainActor.run {
             precondition(
-                appState.pipelineHistory[0].meetingSummary?.content.overview.text
+                firstState.pipelineHistory[0].meetingSummary?.content.overview.text
                     == "first generator"
+            )
+            precondition(
+                secondState.pipelineHistory[0].meetingSummary?.content.overview.text
+                    == "second generator"
             )
         }
     }
@@ -1670,7 +1681,7 @@ struct MeetingSummaryAppStateTests {
         backendKind: .cloud
     )
 
-    private static func generationResult(
+    private static func makeGenerationResult(
         overview: String
     ) -> MeetingSummaryGenerationResult {
         MeetingSummaryGenerationResult(

@@ -2858,64 +2858,101 @@ struct AppStateTranscriptionConfigurationTests {
     }
 
     private static func testCreatedAppStateKeepsItsRetryDependencySnapshot() async throws {
-        try await AppStateTestStorage.withIsolatedStorage { environment in
-            try FileManager.default.createDirectory(
-                at: environment.storageLayout.audioDirectory,
-                withIntermediateDirectories: true
-            )
-            resetDefaults()
-            let rawTranscript = "인스턴스가 보존한 재시도 전사문"
-            let replacementTranscript = "생성 후 교체된 재시도 전사문"
-            let store = PipelineHistoryStore(
-                storeURL: environment.storageLayout.historyStoreURL
-            )
-            var dependencies = environment.dependencies
-            dependencies.makePipelineHistoryStore = { _ in store }
-            dependencies.makeRetryCloudTranscriptionDependencies = {
-                successfulCloudDependencies(transcript: rawTranscript)
-            }
-            let fileName = "retry-dependency-snapshot-\(UUID().uuidString).wav"
-            let audioURL = environment.storageLayout.audioDirectory
-                .appendingPathComponent(fileName)
-            try writeTestWAV(at: audioURL)
-            let originalItem = retryHistoryItem(audioFileName: fileName)
-            _ = try store.append(originalItem, maxCount: 10)
-
-            let retainedDependencies = dependencies
-            let appState = await MainActor.run {
-                AppState(dependencies: retainedDependencies)
-            }
-            dependencies.makeRetryCloudTranscriptionDependencies = {
-                successfulCloudDependencies(transcript: replacementTranscript)
-            }
-
-            await MainActor.run {
-                appState.transcriptionAPIKey = "transcription-key"
-                appState.transcriptionAPIURL = "https://api.example.com/openai/v1"
-                appState.setNoteBrowserTranscriptionChoice(
-                    .apiStandard(modelID: "whisper-large-v3")
+        try await AppStateTestStorage.withIsolatedStorage { firstEnvironment in
+            try await AppStateTestStorage.withIsolatedStorage { secondEnvironment in
+                resetDefaults()
+                let firstTranscript = "첫 인스턴스의 재시도 전사문"
+                let secondTranscript = "두 번째 인스턴스의 재시도 전사문"
+                let firstStore = PipelineHistoryStore(
+                    storeURL: firstEnvironment.storageLayout.historyStoreURL
                 )
-                appState.disablePostProcessing = true
-                precondition(
-                    appState.noteBrowserRetryAvailability(for: originalItem)
-                        == .ready
+                let secondStore = PipelineHistoryStore(
+                    storeURL: secondEnvironment.storageLayout.historyStoreURL
                 )
-                appState.retryTranscription(item: originalItem)
-                precondition(
-                    appState.retryingItemIDs.contains(originalItem.id)
+                var dependencies = firstEnvironment.dependencies
+                dependencies.makePipelineHistoryStore = { _ in firstStore }
+                dependencies.makeRetryCloudTranscriptionDependencies = {
+                    successfulCloudDependencies(transcript: firstTranscript)
+                }
+                let firstItem = try retryHistoryItem(
+                    in: firstEnvironment.storageLayout,
+                    filePrefix: "first-retry-dependency"
                 )
-            }
+                _ = try firstStore.append(firstItem, maxCount: 10)
 
-            await waitUntil {
-                !appState.retryingItemIDs.contains(originalItem.id)
+                let firstDependencies = dependencies
+                let firstState = await MainActor.run {
+                    AppState(dependencies: firstDependencies)
+                }
+
+                dependencies.storageLayout = secondEnvironment.storageLayout
+                dependencies.makePipelineHistoryStore = { _ in secondStore }
+                dependencies.makeRetryCloudTranscriptionDependencies = {
+                    successfulCloudDependencies(transcript: secondTranscript)
+                }
+                let secondItem = try retryHistoryItem(
+                    in: secondEnvironment.storageLayout,
+                    filePrefix: "second-retry-dependency"
+                )
+                _ = try secondStore.append(secondItem, maxCount: 10)
+                let secondDependencies = dependencies
+                let secondState = await MainActor.run {
+                    AppState(dependencies: secondDependencies)
+                }
+
+                await MainActor.run {
+                    for (appState, item) in [
+                        (firstState, firstItem),
+                        (secondState, secondItem)
+                    ] {
+                        appState.transcriptionAPIKey = "transcription-key"
+                        appState.transcriptionAPIURL = "https://api.example.com/openai/v1"
+                        appState.setNoteBrowserTranscriptionChoice(
+                            .apiStandard(modelID: "whisper-large-v3")
+                        )
+                        appState.disablePostProcessing = true
+                        precondition(
+                            appState.noteBrowserRetryAvailability(for: item)
+                                == .ready
+                        )
+                        appState.retryTranscription(item: item)
+                        precondition(
+                            appState.retryingItemIDs.contains(item.id)
+                        )
+                    }
+                }
+
+                await waitUntil {
+                    !firstState.retryingItemIDs.contains(firstItem.id)
+                        && !secondState.retryingItemIDs.contains(secondItem.id)
+                }
+                let firstPersisted = try requireHistoryItem(
+                    withID: firstItem.id,
+                    in: firstStore.loadAllHistory()
+                )
+                let secondPersisted = try requireHistoryItem(
+                    withID: secondItem.id,
+                    in: secondStore.loadAllHistory()
+                )
+                precondition(firstPersisted.rawTranscript == firstTranscript)
+                precondition(secondPersisted.rawTranscript == secondTranscript)
             }
-            let persisted = try requireHistoryItem(
-                withID: originalItem.id,
-                in: store.loadAllHistory()
-            )
-            precondition(persisted.rawTranscript == rawTranscript)
-            precondition(persisted.rawTranscript != replacementTranscript)
         }
+    }
+
+    private static func retryHistoryItem(
+        in storageLayout: AppStateStorageLayout,
+        filePrefix: String
+    ) throws -> PipelineHistoryItem {
+        try FileManager.default.createDirectory(
+            at: storageLayout.audioDirectory,
+            withIntermediateDirectories: true
+        )
+        let fileName = "\(filePrefix)-\(UUID().uuidString).wav"
+        try writeTestWAV(
+            at: storageLayout.audioDirectory.appendingPathComponent(fileName)
+        )
+        return retryHistoryItem(audioFileName: fileName)
     }
 
     private static func testRetryTranscriptionFailurePreservesExistingAIOutcome() async throws {
