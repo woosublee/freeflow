@@ -7,6 +7,8 @@ struct AppStateDependenciesTests {
     static func main() throws {
         try verifiesStorageLayoutPreservesCanonicalPaths()
         try verifiesLiveDependenciesReturnFreshValues()
+        try verifiesLocalAIDependenciesAreIndependentValues()
+        try verifiesNativeWhisperDependenciesAreIndependentValues()
         print("AppStateDependenciesTests passed")
     }
 
@@ -40,6 +42,45 @@ struct AppStateDependenciesTests {
 
         try expect(second.storageLayout.rootDirectory == AppName.applicationSupportDirectory,
                    "mutating one dependency value does not alter a later live value")
+    }
+
+    private static func verifiesLocalAIDependenciesAreIndependentValues() throws {
+        var first = AppStateDependencies.live
+        let second = AppStateDependencies.live
+        first.localAI.installStatus = { _ in .ready }
+        first.localAI.processingAvailability = {
+            LocalAIProcessingAvailability(
+                isAppleSilicon: false,
+                runnerIsExecutable: false,
+                physicalMemory: 0
+            )
+        }
+
+        try expect(
+            first.localAI.installStatus(LocalAIModelCatalog.quality) == .ready,
+            "the overridden Local AI value is used by the first dependency copy"
+        )
+        try expect(
+            second.localAI.processingAvailability()
+                != first.localAI.processingAvailability(),
+            "mutating one Local AI dependency value does not alter another"
+        )
+    }
+
+    private static func verifiesNativeWhisperDependenciesAreIndependentValues() throws {
+        var first = AppStateDependencies.live
+        let second = AppStateDependencies.live
+        let originalSecondStatus = second.nativeWhisper.installStatus(.recommended)
+        first.nativeWhisper.installStatus = { _ in .ready }
+
+        try expect(
+            first.nativeWhisper.installStatus(.recommended) == .ready,
+            "the overridden Native Whisper value is used by the first dependency copy"
+        )
+        try expect(
+            second.nativeWhisper.installStatus(.recommended) == originalSecondStatus,
+            "mutating one Native Whisper dependency value does not alter another"
+        )
     }
 
     private static func expect(
