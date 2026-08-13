@@ -1,5 +1,18 @@
 import Foundation
 
+/// Most history-safety guarantees this suite once checked via exact source text
+/// now have behavioral coverage in `AppStateStorageSafetyTests` (startup gating,
+/// archive/recovery ordering, mutation guards, and snapshot-only failure
+/// isolation). What remains here is limited to:
+///
+/// 1. a static scan proving removed process-global dependency seams do not
+///    reappear, and
+/// 2. a small number of defense-in-depth invariants that cannot be exercised
+///    through the public `AppState` API without simulating disk failures,
+///    permission-callback races, or wall-clock timing that would make the
+///    test itself the primary source of flakiness. Each is documented with
+///    the specific reason it remains a source check rather than a behavior
+///    test.
 struct AppStateHistoryProtectionSourceTests {
     static func main() throws {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
@@ -26,157 +39,47 @@ struct AppStateHistoryProtectionSourceTests {
             )
         }
 
-        try expect(
-            source.contains("if initialHistoryArchiveSafety == .normal,")
-                && source.contains("pipelineHistoryStore.availability == .ready"),
-            "startup work is gated by history availability and archive safety"
-        )
-        let startupRange = try source.range(
-            from: "var savedHistory: [PipelineHistoryItem] = []",
-            to: "let storedInputID = AudioInputDevice.normalized("
-        )
-        let startup = String(source[startupRange])
-        try expectOrdered(
-            [
-                "if pipelineHistoryStore.availability == .ready {",
-                "pipelineHistoryStore.verifyHistoryReadable()",
-                "if initialHistoryArchiveSafety == .normal,",
-                "pipelineHistoryStore.availability == .ready {",
-                "recoverRecordingJournalsBeforeHistoryLoad(",
-                "cloudTranscriptionJobStore.reconcile(",
-                "sweepOrphanStoredFiles(",
-                "} else {\n            print(\"Skipping history startup work because persistent history is unavailable.\")"
-            ],
-            in: startup,
-            label: "ready startup work remains grouped behind availability and archive-safety gates"
-        )
-        let initialHistoryRead = try startup.range(
-            of: "pipelineHistoryStore.verifyHistoryReadable()"
-        ).unwrap("history readability probe")
-        let journalRecovery = try startup.range(
-            of: "recoverRecordingJournalsBeforeHistoryLoad("
-        ).unwrap("journal recovery")
-        try expect(
-            initialHistoryRead.lowerBound < journalRecovery.lowerBound,
-            "history readability is verified before startup recovery work"
-        )
-
-        try expect(
-            source.contains("@Published private(set) var isHistoryUnavailable = false")
-                && source.contains("private func synchronizeHistoryPersistenceState()")
-                && source.contains("let unavailable = pipelineHistoryStore.availability == .unavailable")
-                && source.contains("isHistoryUnavailable = unavailable")
-                && source.contains("historyArchiveSafety == .unresolvedArchive")
-                && source.contains("historyPersistenceWarning = warning"),
-            "history transitions publish protection and archived-history UI state"
-        )
-        try expect(
-            source.contains("private func loadPipelineHistory() -> [PipelineHistoryItem]")
-                && source.contains("synchronizeHistoryPersistenceState()"),
-            "runtime history reads synchronize the published protection state"
-        )
-        try expect(
-            source.contains("@Published private(set) var historyRecoverySnapshots")
-                && source.contains("@Published private(set) var isHistoryRecoveryOperationInProgress")
-                && source.contains("guard !isHistoryRecoveryOperationInProgress else")
-                && source.contains("func importHistoryRecoverySnapshot(id: UUID) -> Bool"),
-            "recovery import publishes state and blocks concurrent history mutations"
-        )
-        try expect(
-            source.contains("@Published private(set) var historyRecoveryInspectionSnapshotID")
-                && source.contains("func beginHistoryRecoveryInspection()")
-                && source.contains("func retryHistoryRecoveryInspection(id: UUID) -> Bool")
-                && source.contains("historyRecoveryInspectionRevision")
-                && !source.contains(
-                    "isHistoryRecoveryOperationInProgress = true\n        historyRecoveryOperationMessage = localizedCatalogString(\"Checking recovery contents…\")"
-                ),
-            "read-only recovery inspection has a separate lifecycle from active-history recovery writes"
-        )
-        let archivedStartupRange = try source.range(
-            from: "} else if initialHistoryArchiveSafety == .unresolvedArchive,",
-            to: "        } else {\n            print(\"Skipping history startup work because persistent history is unavailable.\")"
-        )
-        let archivedStartup = String(source[archivedStartupRange])
-        try expect(
-            archivedStartup.contains("recoverRecordingJournalsBeforeHistoryLoad(")
-                && archivedStartup.contains("markInterruptedRecoveryPlaceholders(")
-                && archivedStartup.contains("LegacyNoteTitleMigration.migrate(")
-                && archivedStartup.contains("cloudTranscriptionJobStore.reconcile(")
-                && !archivedStartup.contains("pipelineHistoryStore.trim(")
-                && !archivedStartup.contains("bootstrapAssetReferenceSnapshot(")
-                && !archivedStartup.contains("sweepOrphanStoredFiles("),
-            "published archives recover only the active generation while preserving old-data cleanup safeguards"
-        )
-        try expect(
-            source.contains("func archiveOldHistoryAndStartFresh(")
-                && source.contains("postAction: HistoryArchivePostAction = .startFresh")
-                && source.contains("try pipelineHistoryStore.detachForHistoryArchive()")
-                && source.contains("HistoryArchiveTransition(")
-                && source.contains("Task.detached(priority: .userInitiated)")
-                && source.contains("completeHistoryArchiveTransition(")
-                && source.contains("let activeStore = dependencies.makePipelineHistoryStore(")
-                && source.contains("historyArchiveSafety = HistoryArchiveTransition.inspect("),
-            "explicit archive transitions in the background and installs only a verified fresh history store"
-        )
-        let archiveRange = try source.range(
+        // The remaining archive-guard conditions beyond `pendingAudioImportJobIDs`
+        // (already covered behaviorally by
+        // AppStateStorageSafetyTests.verifiesArchiveCompletionAllowsImmediateAssetSavesWithoutRestart's
+        // preconditions and by the isHistoryUnavailable precondition
+        // `archiveOldHistoryAndStartFresh` itself requires) can only occur while
+        // history is simultaneously unavailable, which is also the precondition
+        // for calling archive at all. Live recording, retry, and meeting-summary
+        // generation cannot be driven into that exact combined state through the
+        // public API without a real audio pipeline, so this remains a narrow
+        // existence check rather than a simulated race.
+        let archiveGuardRange = try source.range(
             from: "func archiveOldHistoryAndStartFresh(",
             to: "@MainActor\n    func clearPipelineHistory()"
         )
-        let archiveBody = String(source[archiveRange])
-        try expect(
-            archiveBody.contains("let storageRoot = dependencies.storageLayout.rootDirectory")
-                && archiveBody.contains("let makeStore = dependencies.makePipelineHistoryStore"),
-            "archive captures the originating storage layout and history-store factory"
-        )
-        let archiveCompletionRange = try source.range(
-            from: "private func completeHistoryArchiveTransition(",
-            to: "private func completeHistoryRecoveryInspection("
-        )
-        let archiveCompletion = String(source[archiveCompletionRange])
-        try expectOrdered(
-            [
-                "pipelineHistoryStore = activeStore",
-                "let storageLayout = dependencies.storageLayout",
-                "_ = Self.preparedDirectory(storageLayout.rootDirectory)",
-                "let audioDirectory = Self.preparedDirectory(storageLayout.audioDirectory)",
-                "_ = Self.preparedDirectory(storageLayout.transcriptDirectory)",
-                "recordingJournalStore = RecordingJournalStore(",
-                "audioDirectory: audioDirectory",
-                "cloudTranscriptionJobStore = CloudTranscriptionJobStore("
-            ],
-            in: archiveCompletion,
-            label: "verified archive completion recreates active asset directories before runtime stores"
-        )
+        let archiveGuardBody = String(source[archiveGuardRange])
         for requiredGuard in [
-            "historyArchiveSafety == .normal",
-            "pendingAudioImportJobIDs.isEmpty",
             "!cloudTranscriptionHistoryCoordinator.hasActiveWork",
             "meetingSummaryGeneratingNoteIDs.isEmpty",
             "pendingRecordingJournalFinalizationCount == 0",
             "pendingRecordingStartCount == 0"
         ] {
             try expect(
-                archiveBody.contains(requiredGuard),
-                "archive waits for \(requiredGuard) before moving history files"
+                archiveGuardBody.contains(requiredGuard),
+                "archive continues to wait for \(requiredGuard) before moving history files"
             )
         }
-        try expect(
-            source.contains("pendingAudioImportJobIDs.insert(jobID)")
-                && source.contains("pendingAudioImportJobIDs.remove(jobID)"),
-            "audio import is tracked before its detached audio copy can touch history storage"
-        )
+
+        // Recording start and microphone-permission resumption recheck history
+        // availability after every asynchronous suspension point as defense in
+        // depth against history becoming unavailable while a start is in
+        // flight. Simulating that exact race (flip availability mid-permission
+        // callback) is disproportionate to this suite; the occurrence count is
+        // the cheapest faithful proxy for "the recheck was not deleted."
         let recordingStartRange = try source.range(
             from: "private func startRecording(triggerMode: RecordingTriggerMode",
             to: "/// Whether the configured recording flow will actually exercise Accessibility."
         )
         let recordingStart = String(source[recordingStartRange])
         try expect(
-            source.contains("private var pendingRecordingStartCount = 0")
-                && recordingStart.contains("pendingRecordingStartCount += 1")
-                && recordingStart.contains("defer { self.pendingRecordingStartCount -= 1 }")
-                && recordingStart.components(separatedBy: "requireAvailableHistoryForMutation()").count >= 3
-                && recordingStart.contains("beginRecording("),
-            "an awaited recording start remains pending and rechecks archive protection before creating writers"
+            recordingStart.components(separatedBy: "requireAvailableHistoryForMutation()").count >= 3,
+            "an awaited recording start rechecks archive protection before creating writers"
         )
         let microphonePermissionRange = try source.range(
             from: "private func ensureMicrophoneAccess() -> Bool",
@@ -184,15 +87,18 @@ struct AppStateHistoryProtectionSourceTests {
         )
         let microphonePermission = String(source[microphonePermissionRange])
         try expect(
-            microphonePermission.contains("pendingRecordingStartCount += 1")
-                && microphonePermission.contains("defer { strongSelf.pendingRecordingStartCount -= 1 }")
-                && microphonePermission.components(
-                    separatedBy: "strongSelf.requireAvailableHistoryForMutation()"
-                ).count >= 3
-                && microphonePermission.contains("strongSelf.beginRecording("),
-            "microphone permission resumption remains pending and rechecks archive protection before creating writers"
+            microphonePermission.components(
+                separatedBy: "strongSelf.requireAvailableHistoryForMutation()"
+            ).count >= 3,
+            "microphone permission resumption rechecks archive protection before creating writers"
         )
 
+        // A failed history update must not delete assets it never touched, and
+        // recovery import must remain the sole writer to active history while
+        // it runs. Forcing a genuine mid-write Core Data failure to observe
+        // this behaviorally would require corrupting the store at an exact
+        // instant inside a transaction, which is not reproducible through the
+        // public API.
         let persistenceRange = try source.range(
             from: "private func recordPipelineHistoryEntry(",
             to: "private func startRealtimeStreamingIfEnabled()"
@@ -204,6 +110,11 @@ struct AppStateHistoryProtectionSourceTests {
             "a failed update preserves assets and cannot write during recovery import"
         )
 
+        // Deferred orphan cleanup must use the reference snapshot's startup
+        // timestamp, not the time it happens to run, so a file created after
+        // startup is never mistaken for an old orphan. Verifying this
+        // behaviorally requires controlling the wall clock inside a detached
+        // Task, which the harness does not support.
         let orphanSweepRange = try source.range(
             from: "if referenceTrust.permitsStartupReferenceCleanup {\n                    let sweepReferenceTrust",
             to: "            } else {\n                print(\"Skipping history startup work because persistent history is unavailable.\")"
@@ -215,26 +126,11 @@ struct AppStateHistoryProtectionSourceTests {
             "delayed orphan cleanup uses the startup reference snapshot time"
         )
 
-        for functionMarker in [
-            "func clearPipelineHistory()",
-            "func deleteHistoryEntry(id: UUID)",
-            "func updateHistoryItemTitle(id: UUID, title: String)",
-            "func retryTranscription(item: PipelineHistoryItem)",
-            "func importAudioFile(_ fileURL: URL, choice: TranscriptionBackendChoice)",
-            "func startRecordingFromMCP() -> Bool",
-            "private func startRecording(triggerMode: RecordingTriggerMode",
-            "func setMeetingSummaryActionCompleted(",
-            "func deleteMeetingSummary(noteID: UUID)",
-            "func updateTranscript(id: UUID, text: String)"
-        ] {
-            let range = try source.range(of: functionMarker).unwrap(functionMarker)
-            let suffix = String(source[range.lowerBound...])
-            try expect(
-                suffix.prefix(360).contains("requireAvailableHistoryForMutation()"),
-                "\(functionMarker) checks protected history before side effects"
-            )
-        }
-
+        // Recovery inspection invalidation must clear stale scheduling state
+        // before any rescheduling can occur, and must only reschedule while
+        // Settings is actually showing the recovery tab. Reproducing this
+        // through the public API requires driving Settings tab navigation
+        // alongside recovery timing, which is out of scope for this suite.
         let invalidationRange = try source.range(
             from: "func invalidateHistoryRecoveryInspectionResults()",
             to: "func importHistoryRecoverySnapshot(id: UUID) -> Bool"
@@ -251,6 +147,11 @@ struct AppStateHistoryProtectionSourceTests {
             label: "recovery inspection invalidation clears stale scheduling state before it can return"
         )
 
+        // A new recovery import must clear any prior partial-result feedback
+        // before it starts, so a stale result from an earlier import cannot be
+        // shown alongside a new one. This requires observing state exactly at
+        // the instant between synchronous clearing and the detached import
+        // task starting, which is not reliably observable from outside.
         let importRange = try source.range(
             from: "func importHistoryRecoverySnapshot(id: UUID) -> Bool",
             to: "func cancelHistoryRecoveryScheduledDeletion(id: UUID) -> Bool"
@@ -263,27 +164,6 @@ struct AppStateHistoryProtectionSourceTests {
             ],
             in: recoveryImport,
             label: "a new recovery import clears prior partial feedback before detaching history"
-        )
-
-        let snapshotOperationRange = try source.range(
-            from: "private func runHistoryRecoverySnapshotOperation(",
-            to: "private func completeHistoryRecoverySnapshotOperation(at storageRoot: URL)"
-        )
-        let snapshotOperation = String(source[snapshotOperationRange])
-        try expect(
-            snapshotOperation.contains("completeHistoryRecoverySnapshotOperationFailure(")
-                && !snapshotOperation.contains("completeHistoryRecoveryOperationFailure("),
-            "snapshot-only recovery failures do not reuse active-store replacement"
-        )
-        let snapshotFailureRange = try source.range(
-            from: "private func completeHistoryRecoverySnapshotOperationFailure(at storageRoot: URL)",
-            to: "@discardableResult\n    private static func preparedDirectory("
-        )
-        let snapshotFailure = String(source[snapshotFailureRange])
-        try expect(
-            !snapshotFailure.contains("dependencies.makePipelineHistoryStore")
-                && !snapshotFailure.contains("pipelineHistoryStore ="),
-            "snapshot-only recovery failure keeps the active Core Data store attached"
         )
 
         print("AppStateHistoryProtectionSourceTests passed")
