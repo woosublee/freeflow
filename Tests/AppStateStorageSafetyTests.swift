@@ -6,6 +6,9 @@ struct AppStateStorageSafetyTests {
         try verifiesDefaultAppStateUsesLiveStorageLayout()
         try await verifiesAppStateInstancesKeepIndependentHistoryLayouts()
         try await verifiesAppStateInstancesKeepIndependentCredentialStores()
+        try await verifiesDeleteHistoryEntryRemovesOwnedAssets()
+        try await verifiesClearHistoryRemovesOwnedAssets()
+        try await verifiesSharedAssetsRemainWhileHistoryStillReferencesThem()
         try await verifiesArchiveUsesOriginatingHistoryStoreFactory()
         try await verifiesHistoryCreatedAfterAssetsDoesNotSweep()
         try await verifiesHistoryRowsLostAfterSnapshotDoesNotSweep()
@@ -179,6 +182,173 @@ struct AppStateStorageSafetyTests {
             CredentialStore(layout: secondCredentialLayout)
                 .load(account: "groq_api_key") == "second-instance-key",
             "updating the first AppState's API key does not affect the second instance's stored credential"
+        )
+    }
+
+    private static func verifiesDeleteHistoryEntryRemovesOwnedAssets() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            let assetStore = NoteAssetStore(
+                storageLayout: environment.storageLayout
+            )
+            let sourceURL = environment.rootDirectory
+                .appendingPathComponent("delete-owned-source.wav")
+            try Data("owned audio".utf8).write(to: sourceURL)
+            let audio = try assetStore.saveAudio(from: sourceURL)
+            let transcriptFileName = try assetStore.saveTranscript(
+                rawTranscript: "owned transcript",
+                postProcessedTranscript: ""
+            )
+            let item = makeHistoryItem(
+                audioFileName: audio.fileName,
+                transcriptFileName: transcriptFileName
+            )
+            let historyStore = PipelineHistoryStore(
+                storeURL: environment.storageLayout.historyStoreURL
+            )
+            _ = try historyStore.append(item, maxCount: Int.max)
+
+            let appState = await MainActor.run {
+                AppState(dependencies: environment.dependencies)
+            }
+            await MainActor.run {
+                appState.deleteHistoryEntry(id: item.id)
+            }
+
+            let transcriptURL = environment.storageLayout.transcriptDirectory
+                .appendingPathComponent(transcriptFileName)
+            try expect(
+                !FileManager.default.fileExists(atPath: audio.fileURL.path),
+                "deleting a history entry removes its owned audio"
+            )
+            try expect(
+                !FileManager.default.fileExists(atPath: transcriptURL.path),
+                "deleting a history entry removes its owned transcript"
+            )
+        }
+    }
+
+    private static func verifiesClearHistoryRemovesOwnedAssets() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            let assetStore = NoteAssetStore(
+                storageLayout: environment.storageLayout
+            )
+            let historyStore = PipelineHistoryStore(
+                storeURL: environment.storageLayout.historyStoreURL
+            )
+            var audioURLs: [URL] = []
+            var transcriptURLs: [URL] = []
+            for index in 0..<2 {
+                let sourceURL = environment.rootDirectory
+                    .appendingPathComponent("clear-owned-source-\(index).wav")
+                try Data("audio \(index)".utf8).write(to: sourceURL)
+                let audio = try assetStore.saveAudio(from: sourceURL)
+                let transcriptFileName = try assetStore.saveTranscript(
+                    rawTranscript: "transcript \(index)",
+                    postProcessedTranscript: ""
+                )
+                let item = makeHistoryItem(
+                    audioFileName: audio.fileName,
+                    transcriptFileName: transcriptFileName,
+                    timestamp: Date(timeIntervalSince1970: TimeInterval(index))
+                )
+                _ = try historyStore.append(item, maxCount: Int.max)
+                audioURLs.append(audio.fileURL)
+                transcriptURLs.append(
+                    environment.storageLayout.transcriptDirectory
+                        .appendingPathComponent(transcriptFileName)
+                )
+            }
+
+            let appState = await MainActor.run {
+                AppState(dependencies: environment.dependencies)
+            }
+            await MainActor.run {
+                appState.clearPipelineHistory()
+            }
+
+            for fileURL in audioURLs + transcriptURLs {
+                try expect(
+                    !FileManager.default.fileExists(atPath: fileURL.path),
+                    "clearing history removes every deleted entry asset"
+                )
+            }
+        }
+    }
+
+    private static func verifiesSharedAssetsRemainWhileHistoryStillReferencesThem() async throws {
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try prepareStorageDirectories(for: environment.storageLayout)
+            let assetStore = NoteAssetStore(
+                storageLayout: environment.storageLayout
+            )
+            let sourceURL = environment.rootDirectory
+                .appendingPathComponent("shared-source.wav")
+            try Data("shared audio".utf8).write(to: sourceURL)
+            let audio = try assetStore.saveAudio(from: sourceURL)
+            let transcriptFileName = try assetStore.saveTranscript(
+                rawTranscript: "shared transcript",
+                postProcessedTranscript: ""
+            )
+            let removedItem = makeHistoryItem(
+                audioFileName: audio.fileName,
+                transcriptFileName: transcriptFileName,
+                timestamp: Date(timeIntervalSince1970: 1)
+            )
+            let survivingItem = makeHistoryItem(
+                audioFileName: audio.fileName,
+                transcriptFileName: transcriptFileName,
+                timestamp: Date(timeIntervalSince1970: 2)
+            )
+            let historyStore = PipelineHistoryStore(
+                storeURL: environment.storageLayout.historyStoreURL
+            )
+            _ = try historyStore.append(removedItem, maxCount: Int.max)
+            _ = try historyStore.append(survivingItem, maxCount: Int.max)
+
+            let appState = await MainActor.run {
+                AppState(dependencies: environment.dependencies)
+            }
+            await MainActor.run {
+                appState.deleteHistoryEntry(id: removedItem.id)
+            }
+
+            let transcriptURL = environment.storageLayout.transcriptDirectory
+                .appendingPathComponent(transcriptFileName)
+            try expect(
+                FileManager.default.fileExists(atPath: audio.fileURL.path),
+                "shared audio remains while surviving history references it"
+            )
+            try expect(
+                FileManager.default.fileExists(atPath: transcriptURL.path),
+                "shared transcript remains while surviving history references it"
+            )
+            try expect(
+                appState.pipelineHistory.map(\.id) == [survivingItem.id],
+                "only the selected shared-reference history entry is removed"
+            )
+        }
+    }
+
+    private static func makeHistoryItem(
+        audioFileName: String?,
+        transcriptFileName: String?,
+        timestamp: Date = Date()
+    ) -> PipelineHistoryItem {
+        PipelineHistoryItem(
+            timestamp: timestamp,
+            rawTranscript: "fixture",
+            postProcessedTranscript: "fixture",
+            postProcessingPrompt: nil,
+            contextSummary: "",
+            contextScreenshotDataURL: nil,
+            contextScreenshotStatus: "No screenshot",
+            postProcessingStatus: "succeeded",
+            debugStatus: "",
+            customVocabulary: "",
+            audioFileName: audioFileName,
+            transcriptFileName: transcriptFileName
         )
     }
 

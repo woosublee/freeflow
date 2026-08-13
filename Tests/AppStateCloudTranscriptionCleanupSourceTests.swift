@@ -22,13 +22,13 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         let cleanup = block(
             source,
             from: "private func cleanupDeletedPipelineHistoryAssets(",
-            to: "private static func deleteAudioFile("
+            to: "static func normalizeInterruptedHistoryItem("
         )
         try expectOrdered(
             [
                 "cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(",
                 "retryingItemIDs.remove(assets.historyID)",
-                "Self.deleteStoredFiles(assets, storageLayout: storageLayout)",
+                "try? noteAssetStore.deleteAssets(",
                 "cloudTranscriptionJobStore.delete("
             ],
             in: cleanup,
@@ -83,8 +83,9 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         try expectOrdered(
             [
                 "pipelineHistoryStore.trim(to: maxPipelineHistoryCount)",
+                "let noteAssetStore = NoteAssetStore(",
                 "cloudTranscriptionJobStore.invalidateSession(",
-                "Self.deleteStoredFiles(removedAssets, storageLayout: storageLayout)",
+                "try? noteAssetStore.deleteAssets(",
                 "cloudTranscriptionJobStore.delete("
             ],
             in: initializer,
