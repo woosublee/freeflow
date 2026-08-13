@@ -37,10 +37,15 @@ struct NoteAssetStore: Sendable {
         do {
             try? FileManager.default.removeItem(at: destURL)
             try FileManager.default.copyItem(at: tempURL, to: destURL)
-            try FileManager.default.setAttributes(
-                [.modificationDate: Date()],
-                ofItemAtPath: destURL.path
-            )
+            do {
+                try FileManager.default.setAttributes(
+                    [.modificationDate: Date()],
+                    ofItemAtPath: destURL.path
+                )
+            } catch {
+                try? FileManager.default.removeItem(at: destURL)
+                throw error
+            }
             return AppState.SavedAudioFile(fileName: fileName, fileURL: destURL)
         } catch {
             throw NoteAssetStoreError.audioSaveFailed(underlying: error)

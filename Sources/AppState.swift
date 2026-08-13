@@ -5251,10 +5251,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         artifact,
                         maxCount: Int.max
                     )
-                    if historyStore.referenceTrust.permitsStartupReferenceCleanup {
+                    if !removedAssets.isEmpty,
+                       historyStore.referenceTrust.permitsStartupReferenceCleanup {
+                        let survivingHistory = historyStore.loadAllHistory()
+                        guard historyStore.availability == .ready,
+                              historyStore.referenceTrust
+                            .permitsStartupReferenceCleanup else {
+                            continue
+                        }
                         let deletable = Self.deletableAssets(
                             removed: removedAssets,
-                            survivingHistory: historyStore.loadAllHistory()
+                            survivingHistory: survivingHistory
                         )
                         for assets in deletable {
                             try? noteAssetStore.deleteAssets(
@@ -5400,7 +5407,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func cleanupDeletedPipelineHistoryAssets(
-        _ assets: DeletedPipelineHistoryAssets
+        _ assets: DeletedPipelineHistoryAssets,
+        survivingHistory: [PipelineHistoryItem]? = nil
     ) {
         cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(
             historyID: assets.historyID,
@@ -5410,14 +5418,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
             forKey: assets.historyID
         )
         retryingItemIDs.remove(assets.historyID)
-        let survivingHistory = pipelineHistoryStore.loadAllHistory()
-        let canDeleteAssets = pipelineHistoryStore.availability == .ready
-            && pipelineHistoryStore.referenceTrust
-                .permitsStartupReferenceCleanup
+        let resolvedSurvivingHistory = survivingHistory
+            ?? pipelineHistoryStore.loadAllHistory()
+        let canDeleteAssets = survivingHistory != nil
+            || (
+                pipelineHistoryStore.availability == .ready
+                    && pipelineHistoryStore.referenceTrust
+                        .permitsStartupReferenceCleanup
+            )
         let deletable = canDeleteAssets
             ? Self.deletableAssets(
                 removed: [assets],
-                survivingHistory: survivingHistory
+                survivingHistory: resolvedSurvivingHistory
             )
             : []
         for assets in deletable {
@@ -6744,10 +6756,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     }
                 }
             )
-            for removedAssets in removedStoredFiles {
-                cleanupDeletedPipelineHistoryAssets(removedAssets)
-            }
             pipelineHistory = []
+            for removedAssets in removedStoredFiles {
+                cleanupDeletedPipelineHistoryAssets(
+                    removedAssets,
+                    survivingHistory: []
+                )
+            }
             forgetAllMeetingSummaryGenerationState()
             forgetAllWarningBannerState()
         } catch {
