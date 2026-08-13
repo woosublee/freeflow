@@ -364,9 +364,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     static var googleCalendarServiceFactory: () -> GoogleCalendarService = {
         GoogleCalendarService()
     }
-    static var nativeWhisperInstallStatusProvider: (NativeWhisperModel) -> NativeWhisperInstallStatus = { model in
-        NativeWhisperModelStore().installStatus(for: model)
-    }
     static var modelDownloadQuitAlertPresenter: @MainActor () -> NSApplication.ModalResponse = {
         let alert = NSAlert()
         alert.messageText = localizedCatalogString("Quit while models are downloading?")
@@ -385,21 +382,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     static var applicationTerminationReply: @MainActor (Bool) -> Void = {
         NSApp.reply(toApplicationShouldTerminate: $0)
     }
-    static var nativeWhisperInstallStarter: (
-        NativeWhisperModel,
-        @escaping (NativeWhisperDownloadProgress) -> Void,
-        @escaping (Result<Void, NativeWhisperInstallerError>) -> Void
-    ) -> NativeWhisperInstallTask = { model, progress, completion in
-        NativeWhisperInstaller().install(
-            model: model,
-            progress: progress,
-            completion: completion
-        )
-    }
-    static var nativeWhisperProgressSchedule:
-        LatestValueProgressCoalescer<NativeWhisperDownloadProgress>.Schedule =
-            LatestValueProgressCoalescer<NativeWhisperDownloadProgress>.mainQueueSchedule
-
     private final class WeakAppStateReference: @unchecked Sendable {
         weak var value: AppState?
 
@@ -1054,8 +1036,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    @Published private(set) var nativeWhisperInstallStatus: NativeWhisperInstallStatus =
-        AppState.nativeWhisperInstallStatusProvider(.recommended)
+    @Published private(set) var nativeWhisperInstallStatus: NativeWhisperInstallStatus
     @Published private(set) var nativeWhisperInstallProgress = NativeWhisperDownloadProgress(downloadedBytes: 0, totalBytes: NativeWhisperModelCatalog.recommended.approximateBytes)
     @Published private(set) var isInstallingNativeWhisper = false
     @Published private(set) var nativeWhisperInstallError: String?
@@ -1308,7 +1289,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func refreshNativeWhisperInstallStatus() {
-        nativeWhisperInstallStatus = Self.nativeWhisperInstallStatusProvider(.recommended)
+        nativeWhisperInstallStatus = dependencies.nativeWhisper.installStatus(
+            .recommended
+        )
         scheduleNoteBrowserTranscriptionModeNormalizationForProviderConfiguration()
     }
 
@@ -1326,14 +1309,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
         isInstallingNativeWhisper = true
         nativeWhisperInstallProgress = NativeWhisperDownloadProgress(downloadedBytes: 0, totalBytes: model.approximateBytes)
         let progressCoalescer = LatestValueProgressCoalescer<NativeWhisperDownloadProgress>(
-            schedule: Self.nativeWhisperProgressSchedule
+            schedule: dependencies.nativeWhisper.progressSchedule
         ) { [weak self] progress in
             MainActor.assumeIsolated {
                 self?.nativeWhisperInstallProgress = progress
             }
         }
         nativeWhisperProgressCoalescer = progressCoalescer
-        nativeWhisperInstallTask = Self.nativeWhisperInstallStarter(
+        let startInstall = dependencies.nativeWhisper.startInstall
+        nativeWhisperInstallTask = startInstall(
             model,
             { progress in
                 progressCoalescer.submit(progress)
@@ -1420,7 +1404,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @MainActor
     func deleteNativeWhisperModel() {
         do {
-            try NativeWhisperModelStore().deleteModel(.recommended)
+            try dependencies.nativeWhisper.deleteModel(.recommended)
             nativeWhisperInstallError = nil
             nativeWhisperInstallIssue = nil
         } catch {
@@ -2444,6 +2428,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     init(dependencies: AppStateDependencies = .live) {
         self.dependencies = dependencies
+        nativeWhisperInstallStatus = dependencies.nativeWhisper.installStatus(
+            .recommended
+        )
         let storageLayout = dependencies.storageLayout
         let storageRoot = Self.preparedDirectory(storageLayout.rootDirectory)
         let audioDirectory = Self.preparedDirectory(storageLayout.audioDirectory)

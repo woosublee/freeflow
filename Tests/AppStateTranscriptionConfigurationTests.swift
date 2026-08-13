@@ -7,14 +7,6 @@ import Foundation
 #endif
 struct AppStateTranscriptionConfigurationTests {
     static func main() async throws {
-        let originalNativeWhisperInstallStatusProvider =
-            AppState.nativeWhisperInstallStatusProvider
-        AppState.nativeWhisperInstallStatusProvider = { _ in .notInstalled }
-        defer {
-            AppState.nativeWhisperInstallStatusProvider =
-                originalNativeWhisperInstallStatusProvider
-        }
-
         try testMakeTranscriptionServiceUsesLocalConfiguration()
         try testMakeTranscriptionServiceMapsEmptyLocalWhisperPathToNil()
         try testMakeTranscriptionServiceDefaultsLegacyMlxWhisperOff()
@@ -91,6 +83,8 @@ struct AppStateTranscriptionConfigurationTests {
         await testNativeWhisperInstallAutoSelectsOnSuccess()
         await testExplicitBackendChoiceCancelsAutoSelectionOnly()
         await testNativeWhisperCancellationClearsAutoSelection()
+        await testAppStateInstancesKeepIndependentNativeWhisperEnvironments()
+        await testNativeWhisperDeletionUsesOriginatingDependency()
         await testSetupProcessingPresetsPreserveProviderConfiguration()
         try testSetupProcessingPresetUsesExistingChoiceSetter()
         try testNormalizationGuardsStayInsideMainActorIsolation()
@@ -151,9 +145,30 @@ struct AppStateTranscriptionConfigurationTests {
         print("AppStateTranscriptionConfigurationTests passed")
     }
 
+    private static func transcriptionTestDependencies(
+        from base: AppStateDependencies = .live,
+        status: @escaping @Sendable (NativeWhisperModel) -> NativeWhisperInstallStatus = {
+            _ in .notInstalled
+        }
+    ) -> AppStateDependencies {
+        var dependencies = base
+        dependencies.nativeWhisper.installStatus = status
+        return dependencies
+    }
+
+    private static func makeAppState() -> AppState {
+        makeAppState(dependencies: transcriptionTestDependencies())
+    }
+
+    private static func makeAppState(
+        dependencies: AppStateDependencies
+    ) -> AppState {
+        AppState(dependencies: dependencies)
+    }
+
     private static func testMakeTranscriptionServiceUsesLocalConfiguration() throws {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         appState.useLocalTranscription = true
         appState.localTranscriptionModel = .find(id: "apple-speech")
         appState.transcriptionLanguage = .find(code: "en")
@@ -170,7 +185,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testMakeTranscriptionServiceMapsEmptyLocalWhisperPathToNil() throws {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         appState.useLocalTranscription = true
         appState.localWhisperPath = ""
 
@@ -182,7 +197,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testMakeTranscriptionServiceDefaultsLegacyMlxWhisperOff() throws {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         appState.useLocalTranscription = true
         appState.localTranscriptionModel = .find(id: "mlx-community/whisper-large-v3-turbo")
 
@@ -194,7 +209,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testMakeTranscriptionServicePassesLegacyMlxWhisperToggle() throws {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         appState.isRecording = true
         appState.useLocalTranscription = true
         appState.useLegacyMlxWhisper = true
@@ -311,7 +326,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testContextModelDefaultsToQwen36() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
 
         assert(AppState.defaultContextModel == "qwen/qwen3.6-27b")
         assert(appState.contextModel == "qwen/qwen3.6-27b")
@@ -322,7 +337,7 @@ struct AppStateTranscriptionConfigurationTests {
         let defaults = UserDefaults.standard
         defaults.set("meta-llama/llama-4-scout-17b-16e-instruct", forKey: "context_model")
 
-        let appState = AppState()
+        let appState = makeAppState()
 
         assert(appState.contextModel == "qwen/qwen3.6-27b")
         assert(defaults.string(forKey: "context_model") == "qwen/qwen3.6-27b")
@@ -333,7 +348,7 @@ struct AppStateTranscriptionConfigurationTests {
         let defaults = UserDefaults.standard
         defaults.set("custom/context-model", forKey: "context_model")
 
-        let appState = AppState()
+        let appState = makeAppState()
 
         assert(appState.contextModel == "custom/context-model")
     }
@@ -367,18 +382,18 @@ struct AppStateTranscriptionConfigurationTests {
         let defaults = UserDefaults.standard
 
         assert(defaults.object(forKey: "note_browser_enabled") == nil)
-        assert(AppState().noteBrowserEnabled)
+        assert(makeAppState().noteBrowserEnabled)
     }
 
     private static func testNoteBrowserPreservesExplicitOptOut() {
         resetDefaults()
         let defaults = UserDefaults.standard
-        let appState = AppState()
+        let appState = makeAppState()
 
         appState.noteBrowserEnabled = false
 
         assert(defaults.object(forKey: "note_browser_enabled") as? Bool == false)
-        assert(!AppState().noteBrowserEnabled)
+        assert(!makeAppState().noteBrowserEnabled)
     }
 
     private static func testExistingInstallMigratesMissingTranscriptionPreferenceOn() async {
@@ -387,7 +402,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set(true, forKey: "hasCompletedSetup")
         defaults.removeObject(forKey: "transcription_enabled")
 
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { makeAppState() }
 
         await MainActor.run {
             precondition(appState.transcriptionEnabled)
@@ -402,7 +417,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set(true, forKey: "hasCompletedSetup")
         defaults.set(false, forKey: "transcription_enabled")
 
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { makeAppState() }
 
         await MainActor.run {
             precondition(!appState.transcriptionEnabled)
@@ -413,7 +428,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testRecordOnlyDoesNotRequireAccessibility() async {
         resetDefaults()
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { makeAppState() }
         await MainActor.run {
             appState.disableAutoPaste = false
             appState.isCommandModeEnabled = true
@@ -427,7 +442,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testTranscriptionOffPreservesRememberedBackend() async {
         resetDefaults()
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { makeAppState() }
 
         await MainActor.run {
             appState.apiKey = "global-key"
@@ -442,7 +457,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testTranscriptionOnPreservesRememberedBackendReadiness() async {
         resetDefaults()
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { makeAppState() }
 
         await MainActor.run {
             appState.apiKey = "global-key"
@@ -462,7 +477,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testNoteBrowserSelectionControlsTranscriptionWithoutForgettingModel() async {
         resetDefaults()
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { makeAppState() }
 
         await MainActor.run {
             appState.apiKey = "configured-key"
@@ -481,7 +496,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testNoteBrowserSelectionRejectsUnreadyChoice() async {
         resetDefaults()
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { makeAppState() }
 
         await MainActor.run {
             appState.transcriptionEnabled = false
@@ -498,7 +513,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testSettingsTranscriptionToggleRequiresReadyRememberedChoice() async {
         resetDefaults()
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { makeAppState() }
 
         await MainActor.run {
             appState.selectedMicrophoneID =
@@ -527,10 +542,8 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testSettingsDraftPreservesPreviousReadyTranscriptionChoice() async {
         resetDefaults()
-        let originalProvider = AppState.nativeWhisperInstallStatusProvider
-        AppState.nativeWhisperInstallStatusProvider = { _ in .ready }
-        defer { AppState.nativeWhisperInstallStatusProvider = originalProvider }
-        let appState = await MainActor.run { AppState() }
+        var dependencies = transcriptionTestDependencies(status: { _ in .ready })
+        let appState = await MainActor.run { makeAppState(dependencies: dependencies) }
 
         await MainActor.run {
             let previousChoice = TranscriptionBackendChoice.nativeWhisper(
@@ -557,7 +570,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testSettingsDismissalTurnsOffTranscriptionWithoutReadyModel() async {
         resetDefaults()
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { makeAppState() }
 
         await MainActor.run {
             appState.selectedMicrophoneID =
@@ -579,10 +592,8 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testSettingsDismissalFallsBackToReadyTranscriptionModel() async {
         resetDefaults()
-        let originalProvider = AppState.nativeWhisperInstallStatusProvider
-        AppState.nativeWhisperInstallStatusProvider = { _ in .ready }
-        defer { AppState.nativeWhisperInstallStatusProvider = originalProvider }
-        let appState = await MainActor.run { AppState() }
+        var dependencies = transcriptionTestDependencies(status: { _ in .ready })
+        let appState = await MainActor.run { makeAppState(dependencies: dependencies) }
 
         await MainActor.run {
             appState.selectedMicrophoneID =
@@ -610,7 +621,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set(false, forKey: "hasCompletedSetup")
         defaults.removeObject(forKey: "first_install_defaults_version")
 
-        _ = await MainActor.run { AppState() }
+        _ = await MainActor.run { makeAppState() }
 
         precondition(defaults.bool(forKey: "disable_auto_paste"))
         precondition(defaults.string(forKey: "transcription_language") == "auto")
@@ -626,7 +637,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set(true, forKey: "hasCompletedSetup")
         defaults.removeObject(forKey: "first_install_defaults_version")
 
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { makeAppState() }
 
         await MainActor.run {
             precondition(!appState.disableAutoPaste)
@@ -648,7 +659,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set("timeOnly", forKey: "overlay_waveform_display_mode")
         defaults.set(true, forKey: "press_enter_voice_command_enabled")
 
-        let appState = await MainActor.run { AppState() }
+        let appState = await MainActor.run { makeAppState() }
 
         await MainActor.run {
             precondition(!appState.disableAutoPaste)
@@ -678,7 +689,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testLegacyMlxWhisperOptionsDefaultToOff() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
 
         assert(appState.showLegacyMlxWhisperOptions == false)
         assert(appState.useLegacyMlxWhisper == false)
@@ -690,7 +701,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set(true, forKey: "show_legacy_mlx_whisper_options")
         defaults.set(false, forKey: "use_legacy_mlx_whisper")
 
-        let appState = AppState()
+        let appState = makeAppState()
 
         assert(appState.showLegacyMlxWhisperOptions == true)
         assert(appState.useLegacyMlxWhisper == false)
@@ -705,7 +716,7 @@ struct AppStateTranscriptionConfigurationTests {
         let defaults = UserDefaults.standard
         defaults.set(true, forKey: "use_legacy_mlx_whisper")
 
-        let appState = AppState()
+        let appState = makeAppState()
 
         assert(appState.useLegacyMlxWhisper == true)
         assert(appState.showLegacyMlxWhisperOptions == true)
@@ -714,7 +725,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testLegacyMlxWhisperOptionsStayVisibleWhenEngineIsTurnedOff() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         appState.showLegacyMlxWhisperOptions = true
         appState.useLegacyMlxWhisper = true
 
@@ -726,7 +737,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testPermissionStatusUpdateSkipsUnchangedValues() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         appState.updatePermissionStatus(accessibility: true, screenRecording: true)
 
         var changeCount = 0
@@ -746,7 +757,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.removeObject(forKey: "recording_overlay_layout")
         defaults.removeObject(forKey: "use_compact_overlay")
 
-        let appState = AppState()
+        let appState = makeAppState()
         appState.recordingOverlayLayout = .notchSides
 
         assert(defaults.string(forKey: "recording_overlay_layout") == "notchSides")
@@ -757,18 +768,18 @@ struct AppStateTranscriptionConfigurationTests {
         resetDefaults()
         UserDefaults.standard.removeObject(forKey: "recording_cancel_shortcut")
 
-        let appState = AppState()
+        let appState = makeAppState()
 
         assert(appState.recordingCancelShortcut == .defaultRecordingCancel)
     }
 
     private static func testRecordingCancelShortcutPersistsDisabled() {
         resetDefaults()
-        var appState = AppState()
+        var appState = makeAppState()
         let validation = appState.setRecordingCancelShortcut(.disabled)
         assert(validation == nil)
 
-        appState = AppState()
+        appState = makeAppState()
 
         assert(appState.recordingCancelShortcut == .disabled)
     }
@@ -783,11 +794,11 @@ struct AppStateTranscriptionConfigurationTests {
             preset: nil,
             exactModifierKeyCodes: [55]
         )
-        var appState = AppState()
+        var appState = makeAppState()
         let validation = appState.setRecordingCancelShortcut(custom)
         assert(validation == nil)
 
-        appState = AppState()
+        appState = makeAppState()
 
         assert(appState.recordingCancelShortcut == custom)
         assert(appState.savedRecordingCancelCustomShortcut == custom)
@@ -800,7 +811,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set(try! JSONEncoder().encode(escHold), forKey: "hold_shortcut")
         defaults.removeObject(forKey: "recording_cancel_shortcut")
 
-        let appState = AppState()
+        let appState = makeAppState()
         let storedCancel = try! JSONDecoder().decode(
             ShortcutBinding.self,
             from: defaults.data(forKey: "recording_cancel_shortcut")!
@@ -813,7 +824,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testRecordingCancelShortcutRejectsHoldConflict() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
 
         let validation = appState.setRecordingCancelShortcut(appState.holdShortcut)
 
@@ -823,7 +834,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testRecordingCancelShortcutRejectsPasteAgainConflict() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         let f5 = ShortcutPreset.f5.binding
 
         assert(appState.setShortcut(f5, for: .copyAgain) == nil)
@@ -835,7 +846,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testPasteAgainShortcutRejectsRecordingCancelConflict() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
 
         let validation = appState.setShortcut(.defaultRecordingCancel, for: .copyAgain)
 
@@ -845,7 +856,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testPasteAgainShortcutReportsManualModifierCollision() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         _ = appState.setCommandModeEnabled(true)
         _ = appState.setCommandModeStyle(.manual)
         _ = appState.setCommandModeManualModifier(.option)
@@ -858,7 +869,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testHoldShortcutRejectsCancelConflict() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
 
         let validation = appState.setShortcut(.defaultRecordingCancel, for: .hold)
 
@@ -868,7 +879,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testHoldShortcutRejectsMoreSpecificCancelOverlap() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         let commandEsc = ShortcutBinding(
             keyCode: 53,
             keyDisplay: "Esc",
@@ -886,7 +897,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testRecordingCancelShortcutRejectsModifierOnlyOverlapWithKeyCombo() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         let commandOnly = ShortcutBinding(
             keyCode: 55,
             keyDisplay: "Command",
@@ -915,7 +926,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testRecordingCancelShortcutRejectsMoreSpecificHoldOverlap() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         let commandEsc = ShortcutBinding(
             keyCode: 53,
             keyDisplay: "Esc",
@@ -935,7 +946,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testRecordingCancelShortcutRejectsManualModifierRuntimeOverlap() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         _ = appState.setCommandModeEnabled(true)
         _ = appState.setCommandModeStyle(.manual)
         _ = appState.setCommandModeManualModifier(.option)
@@ -967,7 +978,7 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testCommandModeManualModifierReportsCancelOverlap() {
         resetDefaults()
-        let appState = AppState()
+        let appState = makeAppState()
         let commandEsc = ShortcutBinding(
             keyCode: 53,
             keyDisplay: "Esc",
@@ -1199,7 +1210,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testAudioImportConfigurationUsesChoiceDerivedBackend() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             let legacyModel = TranscriptionModel.find(id: "mlx-community/whisper-medium-mlx")
 
             let nativeConfiguration = appState.audioImportConfiguration(for: .nativeWhisper(modelID: NativeWhisperModelCatalog.recommended.id))
@@ -1325,7 +1336,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testNoteBrowserTranscriptionChoiceDisplayIncludesResolvedModels() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.transcriptionModel = "whisper-large-v3-turbo"
             appState.realtimeStreamingModel = ""
 
@@ -1391,6 +1402,37 @@ struct AppStateTranscriptionConfigurationTests {
         precondition(legacyBranch.contains("update(\\AppState.showLegacyMlxWhisperOptions, to: true)"))
     }
 
+    private final class NativeWhisperModelDependencyHarness: @unchecked Sendable {
+        private let lock = NSLock()
+        private var status: NativeWhisperInstallStatus
+        private var deleted: [NativeWhisperModel] = []
+
+        init(status: NativeWhisperInstallStatus) {
+            self.status = status
+        }
+
+        var deletedModels: [NativeWhisperModel] {
+            lock.withLock { deleted }
+        }
+
+        func installStatus(
+            for model: NativeWhisperModel
+        ) -> NativeWhisperInstallStatus {
+            lock.withLock { status }
+        }
+
+        func setStatus(_ status: NativeWhisperInstallStatus) {
+            lock.withLock { self.status = status }
+        }
+
+        func deleteModel(_ model: NativeWhisperModel) throws {
+            lock.withLock {
+                deleted.append(model)
+                status = .notInstalled
+            }
+        }
+    }
+
     private final class NativeWhisperInstallHarness: @unchecked Sendable {
         var progress: ((NativeWhisperDownloadProgress) -> Void)?
         var completion: ((Result<Void, NativeWhisperInstallerError>) -> Void)?
@@ -1410,17 +1452,16 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testNativeWhisperInstallLeavesAppleActiveUntilCompletion() async {
         resetDefaults()
         let harness = NativeWhisperInstallHarness()
-        let originalStarter = AppState.nativeWhisperInstallStarter
-        let originalStatus = AppState.nativeWhisperInstallStatusProvider
-        AppState.nativeWhisperInstallStarter = harness.start
-        AppState.nativeWhisperInstallStatusProvider = { _ in .notInstalled }
-        defer {
-            AppState.nativeWhisperInstallStarter = originalStarter
-            AppState.nativeWhisperInstallStatusProvider = originalStatus
-        }
+        let statusHarness = NativeWhisperModelDependencyHarness(
+            status: .notInstalled
+        )
+        var dependencies = transcriptionTestDependencies(
+            status: statusHarness.installStatus
+        )
+        dependencies.nativeWhisper.startInstall = harness.start
 
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState(dependencies: dependencies)
             appState.setNoteBrowserTranscriptionChoice(.appleLive)
             appState.installNativeWhisperModel(autoSelectWhenReady: true)
 
@@ -1433,17 +1474,16 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testInstallCallWhileAlreadyInstallingStillArmsAutoSelection() async {
         resetDefaults()
         let harness = NativeWhisperInstallHarness()
-        let originalStarter = AppState.nativeWhisperInstallStarter
-        let originalStatus = AppState.nativeWhisperInstallStatusProvider
-        AppState.nativeWhisperInstallStarter = harness.start
-        AppState.nativeWhisperInstallStatusProvider = { _ in .notInstalled }
-        defer {
-            AppState.nativeWhisperInstallStarter = originalStarter
-            AppState.nativeWhisperInstallStatusProvider = originalStatus
-        }
+        let statusHarness = NativeWhisperModelDependencyHarness(
+            status: .notInstalled
+        )
+        var dependencies = transcriptionTestDependencies(
+            status: statusHarness.installStatus
+        )
+        dependencies.nativeWhisper.startInstall = harness.start
 
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState(dependencies: dependencies)
             appState.setNoteBrowserTranscriptionChoice(.appleLive)
             appState.installNativeWhisperModel(autoSelectWhenReady: false)
             appState.cancelNativeWhisperAutoSelection()
@@ -1460,23 +1500,22 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testNativeWhisperInstallAutoSelectsOnSuccess() async {
         resetDefaults()
         let harness = NativeWhisperInstallHarness()
-        let originalStarter = AppState.nativeWhisperInstallStarter
-        let originalStatus = AppState.nativeWhisperInstallStatusProvider
-        AppState.nativeWhisperInstallStarter = harness.start
-        AppState.nativeWhisperInstallStatusProvider = { _ in .notInstalled }
-        defer {
-            AppState.nativeWhisperInstallStarter = originalStarter
-            AppState.nativeWhisperInstallStatusProvider = originalStatus
-        }
+        let statusHarness = NativeWhisperModelDependencyHarness(
+            status: .notInstalled
+        )
+        var dependencies = transcriptionTestDependencies(
+            status: statusHarness.installStatus
+        )
+        dependencies.nativeWhisper.startInstall = harness.start
 
         let appState = await MainActor.run { () -> AppState in
-            let appState = AppState()
+            let appState = makeAppState(dependencies: dependencies)
             appState.setNoteBrowserTranscriptionChoice(.appleLive)
             appState.installNativeWhisperModel(autoSelectWhenReady: true)
             return appState
         }
 
-        AppState.nativeWhisperInstallStatusProvider = { _ in .ready }
+        statusHarness.setStatus(.ready)
         harness.completion?(.success(()))
         await waitUntil { !appState.isInstallingNativeWhisper }
 
@@ -1492,17 +1531,16 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testExplicitBackendChoiceCancelsAutoSelectionOnly() async {
         resetDefaults()
         let harness = NativeWhisperInstallHarness()
-        let originalStarter = AppState.nativeWhisperInstallStarter
-        let originalStatus = AppState.nativeWhisperInstallStatusProvider
-        AppState.nativeWhisperInstallStarter = harness.start
-        AppState.nativeWhisperInstallStatusProvider = { _ in .notInstalled }
-        defer {
-            AppState.nativeWhisperInstallStarter = originalStarter
-            AppState.nativeWhisperInstallStatusProvider = originalStatus
-        }
+        let statusHarness = NativeWhisperModelDependencyHarness(
+            status: .notInstalled
+        )
+        var dependencies = transcriptionTestDependencies(
+            status: statusHarness.installStatus
+        )
+        dependencies.nativeWhisper.startInstall = harness.start
 
         let appState = await MainActor.run { () -> AppState in
-            let appState = AppState()
+            let appState = makeAppState(dependencies: dependencies)
             appState.apiKey = "test-api-key"
             appState.setNoteBrowserTranscriptionChoice(.appleLive)
             appState.installNativeWhisperModel(autoSelectWhenReady: true)
@@ -1514,7 +1552,7 @@ struct AppStateTranscriptionConfigurationTests {
             return appState
         }
 
-        AppState.nativeWhisperInstallStatusProvider = { _ in .ready }
+        statusHarness.setStatus(.ready)
         harness.completion?(.success(()))
         await waitUntil { !appState.isInstallingNativeWhisper }
 
@@ -1530,17 +1568,16 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testNativeWhisperCancellationClearsAutoSelection() async {
         resetDefaults()
         let harness = NativeWhisperInstallHarness()
-        let originalStarter = AppState.nativeWhisperInstallStarter
-        let originalStatus = AppState.nativeWhisperInstallStatusProvider
-        AppState.nativeWhisperInstallStarter = harness.start
-        AppState.nativeWhisperInstallStatusProvider = { _ in .notInstalled }
-        defer {
-            AppState.nativeWhisperInstallStarter = originalStarter
-            AppState.nativeWhisperInstallStatusProvider = originalStatus
-        }
+        let statusHarness = NativeWhisperModelDependencyHarness(
+            status: .notInstalled
+        )
+        var dependencies = transcriptionTestDependencies(
+            status: statusHarness.installStatus
+        )
+        dependencies.nativeWhisper.startInstall = harness.start
 
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState(dependencies: dependencies)
             appState.setNoteBrowserTranscriptionChoice(.appleLive)
             appState.installNativeWhisperModel(autoSelectWhenReady: true)
             precondition(appState.willAutoSelectNativeWhisperWhenReady)
@@ -1552,14 +1589,50 @@ struct AppStateTranscriptionConfigurationTests {
         }
     }
 
-    private static func testSetupProcessingPresetsPreserveProviderConfiguration() async {
+    private static func testAppStateInstancesKeepIndependentNativeWhisperEnvironments() async {
         resetDefaults()
-        let originalProvider = AppState.nativeWhisperInstallStatusProvider
-        AppState.nativeWhisperInstallStatusProvider = { _ in .ready }
-        defer { AppState.nativeWhisperInstallStatusProvider = originalProvider }
+        var readyDependencies = AppStateDependencies.live
+        readyDependencies.nativeWhisper.installStatus = { _ in .ready }
+        var missingDependencies = AppStateDependencies.live
+        missingDependencies.nativeWhisper.installStatus = { _ in .notInstalled }
+
+        let instances = await MainActor.run {
+            (
+                AppState(dependencies: readyDependencies),
+                AppState(dependencies: missingDependencies)
+            )
+        }
 
         await MainActor.run {
-            let appState = AppState()
+            precondition(instances.0.hasNativeLocalWhisperModel)
+            precondition(!instances.1.hasNativeLocalWhisperModel)
+        }
+    }
+
+    private static func testNativeWhisperDeletionUsesOriginatingDependency() async {
+        resetDefaults()
+        let harness = NativeWhisperModelDependencyHarness(status: .ready)
+        var dependencies = AppStateDependencies.live
+        dependencies.nativeWhisper.installStatus = harness.installStatus
+        dependencies.nativeWhisper.deleteModel = harness.deleteModel
+
+        let appState = await MainActor.run {
+            AppState(dependencies: dependencies)
+        }
+        await MainActor.run {
+            precondition(appState.hasNativeLocalWhisperModel)
+            appState.deleteNativeWhisperModel()
+            precondition(!appState.hasNativeLocalWhisperModel)
+        }
+        precondition(harness.deletedModels == [.recommended])
+    }
+
+    private static func testSetupProcessingPresetsPreserveProviderConfiguration() async {
+        resetDefaults()
+        var dependencies = transcriptionTestDependencies(status: { _ in .ready })
+
+        await MainActor.run {
+            let appState = makeAppState(dependencies: dependencies)
             appState.apiKey = "shared-api-key"
             appState.apiBaseURL = "https://provider.example.com/openai/v1"
             appState.transcriptionAPIKey = "transcription-override"
@@ -1691,7 +1764,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testAPITranscriptionModesRemainSelectableWithoutResolvedAPIKey() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
 
             precondition(appState.isNoteBrowserTranscriptionModeAvailable(.apiStandard))
             precondition(appState.isNoteBrowserTranscriptionModeAvailable(.apiRealtime))
@@ -1804,7 +1877,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testTranscriptionAPIKeyEnablesAPIModesWithoutGlobalAPIKey() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.transcriptionAPIKey = "transcription-key"
 
             precondition(appState.isNoteBrowserTranscriptionModeAvailable(.apiStandard))
@@ -1823,7 +1896,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testEmptyTranscriptionAPIKeyFallsBackToGlobalAPIKey() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.apiKey = "global-key"
             appState.transcriptionAPIKey = "  "
 
@@ -1840,7 +1913,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testRemovingAPIKeyPreservesSelectedAPIMode() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.apiKey = "global-key"
             appState.setNoteBrowserTranscriptionMode(.apiStandard)
             precondition(appState.currentNoteBrowserTranscriptionMode == .apiStandard)
@@ -1865,7 +1938,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testRemovingAPIKeyPreservesSelectedAPIModeWhileRecording() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.apiKey = "global-key"
             appState.setNoteBrowserTranscriptionMode(.apiRealtime)
             precondition(appState.currentNoteBrowserTranscriptionMode == .apiRealtime)
@@ -1887,7 +1960,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testSystemDefaultAndSystemAudioConvertsAPIRealtimeToStandard() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.apiKey = "global-key"
             appState.setNoteBrowserTranscriptionMode(.apiRealtime)
             precondition(appState.currentNoteBrowserTranscriptionMode == .apiRealtime)
@@ -1903,7 +1976,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testSystemDefaultAndSystemAudioTurnsOffWithoutReadyFallback() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.setNoteBrowserTranscriptionMode(.localAppleLive)
             appState.transcriptionEnabled = true
             precondition(appState.currentNoteBrowserTranscriptionMode == .localAppleLive)
@@ -1919,7 +1992,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testSystemDefaultAndSystemAudioRejectsLiveModeSelections() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.apiKey = "global-key"
             appState.selectedMicrophoneID = AudioInputDevice.systemDefaultAndSystemAudioID
             precondition(!appState.isNoteBrowserTranscriptionModeAvailable(.apiRealtime))
@@ -1951,7 +2024,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testCombinedSourceDisabledWhenQueuedLiveOnlyChoiceNotRecording() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.apiKey = "global-key"
             appState.setNoteBrowserTranscriptionMode(.apiRealtime)
             appState.transcriptionEnabled = true
@@ -1978,7 +2051,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set("legacy-device-uid", forKey: "selected_microphone_id")
 
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             precondition(appState.selectedMicrophoneDeviceID == "legacy-device-uid")
             precondition(appState.selectedMicrophoneID == "legacy-device-uid")
             precondition(appState.selectedAudioSourceID == AudioInputDevice.defaultMicrophoneID)
@@ -1993,7 +2066,7 @@ struct AppStateTranscriptionConfigurationTests {
         resetDefaults()
 
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.transcriptionEnabled = false
             appState.selectMicrophoneDevice("external-device-uid")
             precondition(appState.selectedMicrophoneDeviceID == "external-device-uid")
@@ -2029,7 +2102,7 @@ struct AppStateTranscriptionConfigurationTests {
         AppSettingsStorage.save("global-key", account: "groq_api_key")
 
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
 
             precondition(appState.currentNoteBrowserTranscriptionMode == .apiStandard)
             precondition(!appState.useLocalTranscription)
@@ -2045,7 +2118,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set(true, forKey: "realtime_streaming_enabled")
 
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
 
             precondition(!appState.transcriptionEnabled)
             precondition(appState.currentNoteBrowserTranscriptionMode == .apiRealtime)
@@ -2062,7 +2135,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set("apple-speech", forKey: "local_transcription_model")
 
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
 
             precondition(!appState.transcriptionEnabled)
             precondition(appState.currentNoteBrowserTranscriptionMode == .localAppleLive)
@@ -2078,12 +2151,10 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set("apple-speech", forKey: "local_transcription_model")
         defaults.set(false, forKey: "use_legacy_mlx_whisper")
 
-        let originalProvider = AppState.nativeWhisperInstallStatusProvider
-        defer { AppState.nativeWhisperInstallStatusProvider = originalProvider }
-        AppState.nativeWhisperInstallStatusProvider = { _ in .ready }
+        var dependencies = transcriptionTestDependencies(status: { _ in .ready })
 
         let finalState = await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState(dependencies: dependencies)
             let expectedChoice = TranscriptionBackendChoice.nativeWhisper(
                 modelID: NativeWhisperModelCatalog.recommended.id
             )
@@ -2104,12 +2175,10 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testRepeatedNativeWhisperSelectionRemainsStable() async {
         resetDefaults()
-        let originalProvider = AppState.nativeWhisperInstallStatusProvider
-        defer { AppState.nativeWhisperInstallStatusProvider = originalProvider }
-        AppState.nativeWhisperInstallStatusProvider = { _ in .ready }
+        var dependencies = transcriptionTestDependencies(status: { _ in .ready })
 
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState(dependencies: dependencies)
             let nativeChoice = TranscriptionBackendChoice.nativeWhisper(
                 modelID: NativeWhisperModelCatalog.recommended.id
             )
@@ -2141,12 +2210,10 @@ struct AppStateTranscriptionConfigurationTests {
             try? FileManager.default.removeItem(at: cacheRoot)
         }
 
-        let originalProvider = AppState.nativeWhisperInstallStatusProvider
-        defer { AppState.nativeWhisperInstallStatusProvider = originalProvider }
-        AppState.nativeWhisperInstallStatusProvider = { _ in .ready }
+        var dependencies = transcriptionTestDependencies(status: { _ in .ready })
 
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState(dependencies: dependencies)
             let legacyChoice = TranscriptionBackendChoice.legacyMlxWhisper(model: legacyModel)
             let nativeChoice = TranscriptionBackendChoice.nativeWhisper(
                 modelID: NativeWhisperModelCatalog.recommended.id
@@ -2185,7 +2252,7 @@ struct AppStateTranscriptionConfigurationTests {
         }
 
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.useLocalTranscription = true
             appState.localTranscriptionModel = legacyModel
             appState.useLegacyMlxWhisper = true
@@ -2222,12 +2289,10 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set(legacyModel.id, forKey: "local_transcription_model")
         defaults.set(true, forKey: "use_legacy_mlx_whisper")
 
-        let originalProvider = AppState.nativeWhisperInstallStatusProvider
-        defer { AppState.nativeWhisperInstallStatusProvider = originalProvider }
-        AppState.nativeWhisperInstallStatusProvider = { _ in .notInstalled }
+        var dependencies = transcriptionTestDependencies(status: { _ in .notInstalled })
 
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState(dependencies: dependencies)
 
             precondition(appState.currentNoteBrowserTranscriptionChoice == .legacyMlxWhisper(model: legacyModel))
             precondition(appState.useLocalTranscription)
@@ -2243,7 +2308,7 @@ struct AppStateTranscriptionConfigurationTests {
         let metadata = GoogleCalendarConnectionMetadata(accountEmail: "user@example.com")
         UserDefaults.standard.set(try JSONEncoder().encode(metadata), forKey: GoogleCalendarConnectionMetadata.storageKey)
 
-        let appState = AppState()
+        let appState = makeAppState()
 
         assert(appState.googleCalendarConnection.isConnected)
         assert(appState.googleCalendarConnection.accountEmail == "user@example.com")
@@ -2256,7 +2321,7 @@ struct AppStateTranscriptionConfigurationTests {
         resetDefaults()
         UserDefaults.standard.set(Data("not-json".utf8), forKey: GoogleCalendarConnectionMetadata.storageKey)
 
-        let appState = AppState()
+        let appState = makeAppState()
 
         assert(!appState.googleCalendarConnection.isConnected)
         assert(UserDefaults.standard.data(forKey: GoogleCalendarConnectionMetadata.storageKey) == nil)
@@ -2268,7 +2333,7 @@ struct AppStateTranscriptionConfigurationTests {
         defaults.set(30, forKey: "calendar_recording_reminder_lead_minutes")
         defaults.removeObject(forKey: "calendar_recording_reminder_lead_minutes_list")
 
-        let appState = AppState()
+        let appState = makeAppState()
 
         assert(appState.calendarRecordingReminderLeadMinutes == [30])
         assert(defaults.array(forKey: "calendar_recording_reminder_lead_minutes_list") as? [Int] == [30])
@@ -2279,7 +2344,7 @@ struct AppStateTranscriptionConfigurationTests {
         let defaults = UserDefaults.standard
         defaults.set([120, 14, 14], forKey: "calendar_recording_reminder_lead_minutes_list")
 
-        let appState = AppState()
+        let appState = makeAppState()
 
         assert(appState.calendarRecordingReminderLeadMinutes == [15, 60])
         assert(defaults.array(forKey: "calendar_recording_reminder_lead_minutes_list") as? [Int] == [15, 60])
@@ -2290,7 +2355,7 @@ struct AppStateTranscriptionConfigurationTests {
         let defaults = UserDefaults.standard
         defaults.set([], forKey: "calendar_recording_reminder_lead_minutes_list")
 
-        let appState = AppState()
+        let appState = makeAppState()
 
         assert(appState.calendarRecordingReminderLeadMinutes == [CalendarRecordingReminderScheduler.defaultLeadMinutes])
         assert(defaults.array(forKey: "calendar_recording_reminder_lead_minutes_list") as? [Int] == [CalendarRecordingReminderScheduler.defaultLeadMinutes])
@@ -2299,7 +2364,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testCalendarRecordingReminderLeadMinutesPersistNormalizedSelection() {
         resetDefaults()
         let defaults = UserDefaults.standard
-        let appState = AppState()
+        let appState = makeAppState()
 
         appState.calendarRecordingReminderLeadMinutes = [60, 5, 5, -1, 14, 500]
 
@@ -2318,7 +2383,7 @@ struct AppStateTranscriptionConfigurationTests {
         UserDefaults.standard.set(customClientID, forKey: "google_calendar_client_id")
 
         let configuration = await MainActor.run {
-            AppState().googleCalendarOAuthConfiguration
+            makeAppState().googleCalendarOAuthConfiguration
         }
 
         assert(!configuration.usesCustomCredentials)
@@ -2339,7 +2404,7 @@ struct AppStateTranscriptionConfigurationTests {
         }
         AppState.googleCalendarTokenLoader = { _ in nil }
 
-        let appState = AppState()
+        let appState = makeAppState()
         await appState.loadGoogleCalendars(force: true)
 
         assert(appState.googleCalendarConnection.isConnected)
@@ -2364,7 +2429,7 @@ struct AppStateTranscriptionConfigurationTests {
             GoogleCalendarOAuthToken(accessToken: "expired-token", refreshToken: nil, expiresAt: Date(timeIntervalSince1970: 0), accountEmail: "user@example.com")
         }
 
-        let appState = AppState()
+        let appState = makeAppState()
         await appState.loadGoogleCalendars(force: true)
 
         assert(appState.googleCalendarConnection.isConnected)
@@ -2384,7 +2449,7 @@ struct AppStateTranscriptionConfigurationTests {
             try! JSONEncoder().encode(GoogleCalendarConnectionMetadata(accountEmail: "user@example.com")),
             forKey: GoogleCalendarConnectionMetadata.storageKey
         )
-        let appState = AppState()
+        let appState = makeAppState()
         await MainActor.run {
             appState.markGoogleCalendarTemporarilyUnavailable(
                 feature: .recordingReminders,
@@ -2410,7 +2475,7 @@ struct AppStateTranscriptionConfigurationTests {
         }
         AppState.googleCalendarTokenLoader = { _ in nil }
 
-        let appState = AppState()
+        let appState = makeAppState()
         await appState.startGoogleCalendarHealthCheck()
         await waitUntil { appState.googleCalendarConnection.health.status == .needsReconnect }
 
@@ -2437,7 +2502,7 @@ struct AppStateTranscriptionConfigurationTests {
             GoogleCalendarService { _ in throw CalendarListFailure() }
         }
 
-        let appState = AppState()
+        let appState = makeAppState()
         await appState.loadGoogleCalendars(force: true)
 
         assert(appState.googleCalendarConnection.isConnected)
@@ -2470,7 +2535,7 @@ struct AppStateTranscriptionConfigurationTests {
             }
         }
 
-        let appState = AppState()
+        let appState = makeAppState()
         await appState.loadGoogleCalendars(force: true)
 
         assert(appState.googleCalendarConnection.isConnected)
@@ -2531,7 +2596,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testRetryAvailabilityRequiresStoredAudio() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             let item = retryHistoryItem(audioFileName: nil)
             precondition(appState.noteBrowserStoredAudioURL(for: item) == nil)
             precondition(appState.noteBrowserRetryAvailability(for: item) == .noAudio)
@@ -2541,7 +2606,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testRetryAvailabilityOffersSelectableCloudAlternative() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             let fileName = "retry-model-setup-\(UUID().uuidString).wav"
             let audioURL = appState.storageLayout.audioDirectory.appendingPathComponent(fileName)
             try! Data([0]).write(to: audioURL)
@@ -2565,7 +2630,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testRetryAvailabilityRequiresModelSelection() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.apiKey = "test-api-key"
             appState.setNoteBrowserTranscriptionChoice(.appleLive)
             let fileName = "retry-model-selection-\(UUID().uuidString).wav"
@@ -2582,7 +2647,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testRetryAvailabilityRequiresProviderConfiguration() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.setNoteBrowserTranscriptionChoice(
                 .apiStandard(modelID: "whisper-large-v3")
             )
@@ -2602,7 +2667,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testRetryAvailabilityAcceptsConfiguredAPIStandard() async {
         resetDefaults()
         await MainActor.run {
-            let appState = AppState()
+            let appState = makeAppState()
             appState.apiKey = "test-api-key"
             appState.setNoteBrowserTranscriptionChoice(
                 .apiStandard(modelID: "whisper-large-v3")

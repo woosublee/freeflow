@@ -834,17 +834,17 @@ struct AppStateAIProcessingBackendTests {
         let installHarness = ControlledNativeWhisperInstallHarness()
         let scheduler = ProgressScheduleHarness()
         var dependencies = modelTestDependencies()
-        AppState.nativeWhisperInstallStatusProvider = {
+        dependencies.nativeWhisper.installStatus = {
             statusHarness.installStatus(for: $0)
         }
-        AppState.nativeWhisperInstallStarter = { model, progress, completion in
+        dependencies.nativeWhisper.startInstall = { model, progress, completion in
             installHarness.start(
                 model: model,
                 progress: progress,
                 completion: completion
             )
         }
-        AppState.nativeWhisperProgressSchedule = scheduler.schedule
+        dependencies.nativeWhisper.progressSchedule = scheduler.schedule
 
         let appState = await MainActor.run { AppState(dependencies: dependencies) }
         await MainActor.run {
@@ -1266,6 +1266,8 @@ struct AppStateAIProcessingBackendTests {
     }
 
     private static func testTerminationWaitsForLocalAIQuiescenceAndSuppressesDuplicates() async throws {
+        let effects = ModelTerminationEffectSnapshot()
+        defer { effects.restore() }
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
@@ -1336,6 +1338,8 @@ struct AppStateAIProcessingBackendTests {
     }
 
     private static func testNativeWhisperTerminationWaitsForWorkerQuiescence() async throws {
+        let effects = ModelTerminationEffectSnapshot()
+        defer { effects.restore() }
         resetAIProcessingDefaults()
         let nativeStatusHarness = NativeWhisperStatusHarness(status: .notInstalled)
         let nativeInstallHarness = ControlledNativeWhisperInstallHarness()
@@ -1350,10 +1354,10 @@ struct AppStateAIProcessingBackendTests {
             waitForProcessExit: { _, _ in true }
         )
         var dependencies = modelTestDependencies()
-        AppState.nativeWhisperInstallStatusProvider = {
+        dependencies.nativeWhisper.installStatus = {
             nativeStatusHarness.installStatus(for: $0)
         }
-        AppState.nativeWhisperInstallStarter = { model, progress, completion in
+        dependencies.nativeWhisper.startInstall = { model, progress, completion in
             nativeInstallHarness.start(
                 model: model,
                 progress: progress,
@@ -1390,6 +1394,8 @@ struct AppStateAIProcessingBackendTests {
     }
 
     private static func testCombinedNativeAndLocalTerminationWaitsForBothWorkers() async throws {
+        let effects = ModelTerminationEffectSnapshot()
+        defer { effects.restore() }
         resetAIProcessingDefaults()
         let localStatusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let localInstallHarness = LocalAIInstallHarness()
@@ -1416,10 +1422,10 @@ struct AppStateAIProcessingBackendTests {
             )
         }
         dependencies.localAI.processingAvailability = supportedLocalAIAvailability
-        AppState.nativeWhisperInstallStatusProvider = {
+        dependencies.nativeWhisper.installStatus = {
             nativeStatusHarness.installStatus(for: $0)
         }
-        AppState.nativeWhisperInstallStarter = { model, progress, completion in
+        dependencies.nativeWhisper.startInstall = { model, progress, completion in
             nativeInstallHarness.start(
                 model: model,
                 progress: progress,
@@ -1468,6 +1474,8 @@ struct AppStateAIProcessingBackendTests {
     }
 
     private static func testTerminationCleanupBlocksNewModelInstalls() async {
+        let effects = ModelTerminationEffectSnapshot()
+        defer { effects.restore() }
         resetAIProcessingDefaults()
         let localStatusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let localInstallHarness = LocalAIInstallHarness()
@@ -1479,10 +1487,10 @@ struct AppStateAIProcessingBackendTests {
         dependencies.localAI.startInstall = localInstallHarness.start
         dependencies.localAI.deletePartialModel = { _ in }
         dependencies.localAI.processingAvailability = supportedLocalAIAvailability
-        AppState.nativeWhisperInstallStatusProvider = {
+        dependencies.nativeWhisper.installStatus = {
             nativeStatusHarness.installStatus(for: $0)
         }
-        AppState.nativeWhisperInstallStarter = { model, progress, completion in
+        dependencies.nativeWhisper.startInstall = { model, progress, completion in
             nativeInstallHarness.start(
                 model: model,
                 progress: progress,
@@ -1519,6 +1527,8 @@ struct AppStateAIProcessingBackendTests {
     }
 
     private static func testPendingRecordingTerminationCancelRepliesFalseOnce() async {
+        let effects = ModelTerminationEffectSnapshot()
+        defer { effects.restore() }
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
@@ -2680,17 +2690,11 @@ struct AppStateAIProcessingBackendTests {
     }
 }
 
-private struct LocalAISeamSnapshot {
-    let nativeWhisperInstallStatusProvider = AppState.nativeWhisperInstallStatusProvider
-    let nativeWhisperInstallStarter = AppState.nativeWhisperInstallStarter
-    let nativeWhisperProgressSchedule = AppState.nativeWhisperProgressSchedule
+private struct ModelTerminationEffectSnapshot {
     let modelDownloadQuitAlertPresenter = AppState.modelDownloadQuitAlertPresenter
     let applicationTerminationReply = AppState.applicationTerminationReply
 
     func restore() {
-        AppState.nativeWhisperInstallStatusProvider = nativeWhisperInstallStatusProvider
-        AppState.nativeWhisperInstallStarter = nativeWhisperInstallStarter
-        AppState.nativeWhisperProgressSchedule = nativeWhisperProgressSchedule
         AppState.modelDownloadQuitAlertPresenter = modelDownloadQuitAlertPresenter
         AppState.applicationTerminationReply = applicationTerminationReply
     }
