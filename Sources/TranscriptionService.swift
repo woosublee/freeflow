@@ -372,6 +372,8 @@ class TranscriptionService {
         let preparedAudio: NativeWhisperExecutionSnapshot.PreparedAudio
         do {
             preparedAudio = try await execution.prepareAudio(fileURL)
+        } catch let error as CancellationError {
+            throw error
         } catch {
             throw QuillUserIssueError.local(
                 code: .audioPreparationFailed,

@@ -1,5 +1,21 @@
 import Foundation
 
+private final class LiveNativeWhisperExecutionEnvironment: @unchecked Sendable {
+    let store: NativeWhisperModelStore
+    let runtime: NativeWhisperRuntime
+    let audioPreparation: AudioImportConversionService
+
+    init(
+        store: NativeWhisperModelStore,
+        runtime: NativeWhisperRuntime,
+        audioPreparation: AudioImportConversionService
+    ) {
+        self.store = store
+        self.runtime = runtime
+        self.audioPreparation = audioPreparation
+    }
+}
+
 struct NativeWhisperExecutionSnapshot: Sendable {
     struct PreparedAudio: Sendable {
         let fileURL: URL
@@ -19,21 +35,24 @@ struct NativeWhisperExecutionSnapshot: Sendable {
         store: NativeWhisperModelStore = NativeWhisperModelStore()
     ) -> NativeWhisperExecutionSnapshot {
         let model = NativeWhisperModelCatalog.recommended
-        let runtime = NativeWhisperRuntime()
-        let audioPreparation = AudioImportConversionService()
+        let environment = LiveNativeWhisperExecutionEnvironment(
+            store: store,
+            runtime: NativeWhisperRuntime(),
+            audioPreparation: AudioImportConversionService()
+        )
         return NativeWhisperExecutionSnapshot(
             modelID: model.id,
             modelIsReady: {
-                store.installStatus(for: model) == .ready
+                environment.store.installStatus(for: model) == .ready
             },
             modelURL: {
-                store.modelURL(for: model)
+                environment.store.modelURL(for: model)
             },
             validateRunnerAndModel: { modelURL in
-                try runtime.validateRunnerAndModel(modelURL: modelURL)
+                try environment.runtime.validateRunnerAndModel(modelURL: modelURL)
             },
             prepareAudio: { sourceURL in
-                let prepared = try await audioPreparation
+                let prepared = try await environment.audioPreparation
                     .prepareForNativeWhisper(sourceURL)
                 return PreparedAudio(
                     fileURL: prepared.fileURL,
@@ -41,7 +60,7 @@ struct NativeWhisperExecutionSnapshot: Sendable {
                 )
             },
             transcribe: { audioURL, modelURL, languageCode in
-                try await runtime.transcribe(
+                try await environment.runtime.transcribe(
                     audioURL: audioURL,
                     modelURL: modelURL,
                     languageCode: languageCode

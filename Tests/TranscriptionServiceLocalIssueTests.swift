@@ -10,6 +10,7 @@ struct TranscriptionServiceLocalIssueTests {
         try await testMissingFFmpegUsesDependencyIssue()
         try await testLegacyProcessFailureKeepsOutputPrivate()
         try await testNativeWhisperPreflightStopsBeforeAudioPreparation()
+        try await testNativeWhisperAudioPreparationPreservesCancellation()
         try await testNativeWhisperUsesOneSnapshotForPreflightAndTranscription()
         try await testNativeWhisperServicesKeepIndependentExecutionEnvironments()
         try await testNativeWhisperMissingModelKeepsExistingIssue()
@@ -104,14 +105,38 @@ struct TranscriptionServiceLocalIssueTests {
         }
     }
 
+    private static func testNativeWhisperAudioPreparationPreservesCancellation()
+        async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let harness = NativeWhisperExecutionHarness(
+            modelID: "cancelled-model",
+            modelURL: root.appendingPathComponent("model.bin"),
+            preparationError: CancellationError()
+        )
+        let service = try makeNativeService(snapshot: harness.snapshot())
+
+        do {
+            _ = try await service.transcribe(fileURL: try writeAudio(in: root))
+            throw TestFailure("Native Whisper audio preparation cancellation must propagate")
+        } catch is CancellationError {
+            try expect(
+                harness.recordedEventNames() == ["preflight", "prepare"],
+                "cancellation stops before transcription"
+            )
+        }
+    }
+
     private static func testNativeWhisperUsesOneSnapshotForPreflightAndTranscription()
         async throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let modelURL = root.appendingPathComponent("origin-model.bin")
+        let preparedAudioURL = root.appendingPathComponent("prepared.wav")
         let harness = NativeWhisperExecutionHarness(
             modelID: "origin-model",
             modelURL: modelURL,
+            preparedAudioURL: preparedAudioURL,
             resultText: "origin transcript"
         )
         let audioURL = try writeAudio(in: root)
@@ -128,6 +153,14 @@ struct TranscriptionServiceLocalIssueTests {
         try expect(
             harness.recordedModelURLs() == [modelURL, modelURL],
             "preflight and transcription share one model URL"
+        )
+        try expect(
+            harness.recordedTranscriptionAudioURLs() == [preparedAudioURL],
+            "transcription uses the prepared audio URL"
+        )
+        try expect(
+            harness.recordedCleanupCount() == 1,
+            "prepared audio is cleaned after transcription"
         )
     }
 
@@ -184,7 +217,10 @@ struct TranscriptionServiceLocalIssueTests {
                 issue.record.context.modelID == "missing-model",
                 "missing model context"
             )
-            try expect(harness.recordedEvents().isEmpty, "missing model stops before preflight")
+            try expect(
+                harness.recordedEventNames().isEmpty,
+                "missing model stops before preflight"
+            )
         }
     }
 
@@ -273,8 +309,11 @@ private final class NativeWhisperExecutionHarness: @unchecked Sendable {
     let modelURL: URL
     private var isReady: Bool
     private let preflightError: Error?
+    private let preparationError: Error?
+    private let preparedAudioURL: URL?
     private let resultText: String
     private var events: [Event] = []
+    private var cleanupCount = 0
 
     private enum Event {
         case preflight(URL)
@@ -303,12 +342,16 @@ private final class NativeWhisperExecutionHarness: @unchecked Sendable {
         modelURL: URL,
         isReady: Bool = true,
         preflightError: Error? = nil,
+        preparationError: Error? = nil,
+        preparedAudioURL: URL? = nil,
         resultText: String = "native transcript"
     ) {
         self.modelID = modelID
         self.modelURL = modelURL
         self.isReady = isReady
         self.preflightError = preflightError
+        self.preparationError = preparationError
+        self.preparedAudioURL = preparedAudioURL
         self.resultText = resultText
     }
 
@@ -324,8 +367,17 @@ private final class NativeWhisperExecutionHarness: @unchecked Sendable {
                 }
             },
             prepareAudio: { url in
-                self.lock.withLock { self.events.append(.prepare(url)) }
-                return .init(fileURL: url, cleanup: {})
+                let preparedURL = try self.lock.withLock {
+                    self.events.append(.prepare(url))
+                    if let error = self.preparationError { throw error }
+                    return self.preparedAudioURL ?? url
+                }
+                return .init(
+                    fileURL: preparedURL,
+                    cleanup: {
+                        self.lock.withLock { self.cleanupCount += 1 }
+                    }
+                )
             },
             transcribe: { audioURL, modelURL, _ in
                 let text = self.lock.withLock {
@@ -346,16 +398,25 @@ private final class NativeWhisperExecutionHarness: @unchecked Sendable {
         )
     }
 
-    func recordedEvents() -> [String] {
-        lock.withLock { events.map(\.name) }
-    }
-
     func recordedEventNames() -> [String] {
-        recordedEvents()
+        lock.withLock { events.map(\.name) }
     }
 
     func recordedModelURLs() -> [URL] {
         lock.withLock { events.compactMap(\.modelURL) }
+    }
+
+    func recordedTranscriptionAudioURLs() -> [URL] {
+        lock.withLock {
+            events.compactMap { event in
+                guard case .transcribe(let audioURL, _) = event else { return nil }
+                return audioURL
+            }
+        }
+    }
+
+    func recordedCleanupCount() -> Int {
+        lock.withLock { cleanupCount }
     }
 }
 
