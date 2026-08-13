@@ -286,7 +286,7 @@ struct AppStateCloudTranscriptionIntegrationSourceTests {
                 "pipelineHistoryStore.trim(",
                 "cloudTranscriptionJobStore.invalidateSession(",
                 "cloudTranscriptionJobStore.reconcile(",
-                "noteAssetStore.sweepOrphans(",
+                "startupNoteAssetStore.sweepOrphans(",
                 "scheduleCloudTranscriptionAutoResume("
             ],
             in: initializer,

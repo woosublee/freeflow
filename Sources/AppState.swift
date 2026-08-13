@@ -2814,6 +2814,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         referenceTrust = .recovered
                     }
                 }
+                let startupNoteAssetStore = NoteAssetStore(
+                    storageLayout: storageLayout
+                )
                 if referenceTrust.permitsStartupReferenceCleanup {
                     var removedStoredFiles: [DeletedPipelineHistoryAssets] = []
                     do {
@@ -2821,32 +2824,55 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     } catch {
                         print("Failed to trim pipeline history during init: \(error)")
                     }
-                    let noteAssetStore = NoteAssetStore(
-                        storageLayout: storageLayout
+                    let survivingHistory = removedStoredFiles.isEmpty
+                        ? savedHistory
+                        : pipelineHistoryStore.loadAllHistory()
+                    let canDeleteTrimmedAssets =
+                        pipelineHistoryStore.availability == .ready
+                        && pipelineHistoryStore.referenceTrust
+                            .permitsStartupReferenceCleanup
+                    let deletableAssets = canDeleteTrimmedAssets
+                        ? Self.deletableAssets(
+                            removed: removedStoredFiles,
+                            survivingHistory: survivingHistory
+                        )
+                        : []
+                    let deletableAudioFileNames = Set(
+                        deletableAssets.compactMap(\.audioFileName)
                     )
-                    let deletableAssets = Self.deletableAssets(
-                        removed: removedStoredFiles,
-                        survivingHistory: savedHistory
+                    let deletableTranscriptFileNames = Set(
+                        deletableAssets.compactMap(\.transcriptFileName)
                     )
+                    var deletedAudioFileNames = Set<String>()
+                    var deletedTranscriptFileNames = Set<String>()
                     for removedAssets in removedStoredFiles {
                         cloudTranscriptionJobStore.invalidateSession(
                             historyID: removedAssets.historyID
                         )
-                        if let assets = deletableAssets.first(where: {
-                            $0.historyID == removedAssets.historyID
-                        }) {
-                            try? noteAssetStore.deleteAssets(
-                                audioFileName: assets.audioFileName,
-                                transcriptFileName: assets.transcriptFileName
-                            )
+                        let audioFileName = removedAssets.audioFileName.flatMap {
+                            deletableAudioFileNames.contains($0)
+                                && deletedAudioFileNames.insert($0).inserted
+                                ? $0
+                                : nil
                         }
+                        let transcriptFileName =
+                            removedAssets.transcriptFileName.flatMap {
+                                deletableTranscriptFileNames.contains($0)
+                                    && deletedTranscriptFileNames.insert($0).inserted
+                                    ? $0
+                                    : nil
+                            }
+                        try? startupNoteAssetStore.deleteAssets(
+                            audioFileName: audioFileName,
+                            transcriptFileName: transcriptFileName
+                        )
                         try? cloudTranscriptionJobStore.delete(
                             historyID: removedAssets.historyID,
                             session: nil
                         )
                     }
                     if !removedStoredFiles.isEmpty {
-                        savedHistory = pipelineHistoryStore.loadAllHistory()
+                        savedHistory = survivingHistory
                         referenceTrust = pipelineHistoryStore.referenceTrust
                     }
                 } else {
@@ -2883,11 +2909,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 if referenceTrust.permitsStartupReferenceCleanup {
                     let sweepReferenceTrust = referenceTrust
                     let sweepNow = Date()
-                    let noteAssetStore = NoteAssetStore(
-                        storageLayout: storageLayout
-                    )
                     Task.detached(priority: .background) {
-                        noteAssetStore.sweepOrphans(
+                        startupNoteAssetStore.sweepOrphans(
                             referencedAudioFileNames: referencedAudioFileNames,
                             referencedTranscriptFileNames: referencedTranscriptFileNames,
                             protectedInflightAudioFileNames: protectedInflightAudioFileNames,
@@ -5387,10 +5410,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
             forKey: assets.historyID
         )
         retryingItemIDs.remove(assets.historyID)
-        let deletable = Self.deletableAssets(
-            removed: [assets],
-            survivingHistory: pipelineHistoryStore.loadAllHistory()
-        )
+        let survivingHistory = pipelineHistoryStore.loadAllHistory()
+        let canDeleteAssets = pipelineHistoryStore.availability == .ready
+            && pipelineHistoryStore.referenceTrust
+                .permitsStartupReferenceCleanup
+        let deletable = canDeleteAssets
+            ? Self.deletableAssets(
+                removed: [assets],
+                survivingHistory: survivingHistory
+            )
+            : []
         for assets in deletable {
             try? noteAssetStore.deleteAssets(
                 audioFileName: assets.audioFileName,
@@ -8841,7 +8870,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         statusText = cancelledStatus
         dismissTranscribingOverlay()
         cleanupActiveAudioRecordersIfIdle()
-        if let audioFileName = job.audioFileName {
+        if let audioFileName = job.audioFileName,
+           !pipelineHistory.contains(where: {
+               $0.audioFileName == audioFileName
+           }) {
             try? noteAssetStore.deleteAudio(
                 fileName: audioFileName
             )
@@ -11578,6 +11610,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             let history = historyWasReadable
                 ? pipelineHistoryStore.loadAllHistory()
                 : []
+            let audioFileIsReferenced = history.contains {
+                $0.audioFileName == audioFileName
+            }
             let historyIsStillAvailableAndDurable =
                 pipelineHistoryStore.availability == .ready
                 && pipelineHistoryStore.durability == .durable
@@ -11590,7 +11625,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     historyIsReadable: historyWasReadable,
                     recordingIDExistsInHistory: history.contains {
                         $0.id == recordingID
-                    }
+                    } || audioFileIsReferenced
                 )
             if cleanupDecision == .deleteUnreferencedAudio {
                 try? noteAssetStore.deleteAudio(
@@ -11952,7 +11987,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
             if existingID != nil {
                 try pipelineHistoryStore.update(entry)
                 if let previousTranscriptFileName,
-                   previousTranscriptFileName != transcriptFileName {
+                   previousTranscriptFileName != transcriptFileName,
+                   !pipelineHistory.contains(where: {
+                       $0.id != existingID
+                           && $0.transcriptFileName == previousTranscriptFileName
+                   }) {
                     try? noteAssetStore.deleteTranscript(
                         fileName: previousTranscriptFileName
                     )

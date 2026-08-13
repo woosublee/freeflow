@@ -9,6 +9,7 @@ struct AppStateStorageSafetyTests {
         try await verifiesDeleteHistoryEntryRemovesOwnedAssets()
         try await verifiesClearHistoryRemovesOwnedAssets()
         try await verifiesSharedAssetsRemainWhileHistoryStillReferencesThem()
+        try verifiesRemovedRowsDoNotProtectEachOthersSharedAssets()
         try verifiesAudioOnlyPersistenceFailureCleanupDecisions()
         try await verifiesArchiveUsesOriginatingHistoryStoreFactory()
         try await verifiesHistoryCreatedAfterAssetsDoesNotSweep()
@@ -330,6 +331,40 @@ struct AppStateStorageSafetyTests {
                 "only the selected shared-reference history entry is removed"
             )
         }
+    }
+
+    private static func verifiesRemovedRowsDoNotProtectEachOthersSharedAssets() throws {
+        let sharedAudio = "removed-shared.wav"
+        let sharedTranscript = "removed-shared.txt"
+        let removed = [
+            DeletedPipelineHistoryAssets(
+                historyID: UUID(),
+                audioFileName: sharedAudio,
+                transcriptFileName: sharedTranscript
+            ),
+            DeletedPipelineHistoryAssets(
+                historyID: UUID(),
+                audioFileName: sharedAudio,
+                transcriptFileName: sharedTranscript
+            )
+        ]
+
+        let deletable = AppState.deletableAssets(
+            removed: removed,
+            survivingHistory: []
+        )
+
+        try expect(
+            deletable.count == removed.count,
+            "removed rows do not count as surviving shared references"
+        )
+        try expect(
+            deletable.allSatisfy {
+                $0.audioFileName == sharedAudio
+                    && $0.transcriptFileName == sharedTranscript
+            },
+            "shared assets are deletable when every referencing row was removed"
+        )
     }
 
     private static func verifiesAudioOnlyPersistenceFailureCleanupDecisions() throws {

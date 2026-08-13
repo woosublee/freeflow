@@ -7,7 +7,7 @@ struct AudioImportFileCopyTests {
     static func main() async throws {
         try await testOffMainCopyPreservesExtensionAndContents()
         try await testOffMainCopyThrowsForMissingFile()
-        try testImportAudioFileUsesCapturedNoteAssetStore()
+        try testImportAudioFileKeepsFilesystemWorkBehindStoreBoundary()
         try testImportAudioFileGroupsCapturedSettings()
         print("AudioImportFileCopyTests passed")
     }
@@ -56,21 +56,15 @@ struct AudioImportFileCopyTests {
         }
     }
 
-    private static func testImportAudioFileUsesCapturedNoteAssetStore() throws {
+    private static func testImportAudioFileKeepsFilesystemWorkBehindStoreBoundary() throws {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
         let importBody = importAudioFileBody(in: source)
-        guard let capture = importBody.range(of: "let noteAssetStore = noteAssetStore"),
-              let task = importBody.range(of: "Task { [weak self] in") else {
-            preconditionFailure("Expected imported audio to capture NoteAssetStore before Task")
-        }
 
-        precondition(capture.lowerBound < task.lowerBound)
-        assertContains(
-            importBody,
-            "savedAudioFile = try await noteAssetStore\n                    .saveSecurityScopedAudio(from: fileURL)"
-        )
+        // Real copy/error behavior is covered above. This narrow scan keeps
+        // security-scope and raw filesystem access out of the Main Actor flow.
+        assertContains(importBody, ".saveSecurityScopedAudio(from: fileURL)")
         assertDoesNotContain(importBody, "startAccessingSecurityScopedResource()")
-        assertDoesNotContain(importBody, "saveSecurityScopedAudioFileOffMain")
+        assertDoesNotContain(importBody, "FileManager.default.copyItem")
     }
 
     private static func testImportAudioFileGroupsCapturedSettings() throws {

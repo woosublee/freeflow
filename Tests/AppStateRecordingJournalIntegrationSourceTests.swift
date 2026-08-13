@@ -31,7 +31,7 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         precondition(source.contains("RecordingJournalRecoveryExecutor("))
         precondition(source.contains("RecordingRecoveryHistory("))
         precondition(source.contains("protectedInflightAudioFileNames("))
-        precondition(source.contains("noteAssetStore.sweepOrphans("))
+        precondition(source.contains("startupNoteAssetStore.sweepOrphans("))
         let startupRecoveryBody = try functionBody(
             named: "recoverRecordingJournalsBeforeHistoryLoad",
             in: source
@@ -398,6 +398,7 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         assert(catchBody.contains("pipelineHistoryStore.verifyHistoryReadable()"))
         assert(catchBody.contains("pipelineHistoryStore.loadAllHistory()"))
         assert(catchBody.contains("audioOnlyPersistenceFailureCleanupDecision("))
+        assert(catchBody.contains("audioFileIsReferenced = history.contains"))
         assert(catchBody.contains("recordingIDExistsInHistory: history.contains"))
         assert(catchBody.contains("cleanupDecision == .deleteUnreferencedAudio"))
         assert(catchBody.contains("noteAssetStore.deleteAudio("))

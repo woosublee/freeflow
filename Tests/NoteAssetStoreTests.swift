@@ -10,6 +10,7 @@ struct NoteAssetStoreTests {
         try testLoadTranscriptThrowsForMissingFile()
         try testDeleteTranscriptIsIdempotentForMissingFile()
         try testSaveAudioCopiesFileAndPreservesExtension()
+        try testSaveAudioRefreshesModificationDate()
         try testAdoptStoppedAudioReusesCanonicalWAVInAudioDirectory()
         try testAdoptStoppedAudioCopiesExternalFile()
         try testAdoptStoppedAudioCopiesInvalidWAVAlreadyInAudioDirectory()
@@ -20,6 +21,9 @@ struct NoteAssetStoreTests {
         try testDeleteTranscriptPropagatesNonMissingFileErrors()
         try testDeleteAudioPropagatesNonMissingFileErrors()
         try testDeleteAssetsStillDeletesTranscriptWhenAudioDeleteFails()
+        try testDeleteRejectsParentDirectoryTraversal()
+        try testLoadTranscriptRejectsParentDirectoryTraversal()
+        try testStoredAudioURLRejectsParentDirectoryTraversal()
         try testSweepOrphansPreservesReferencedAndProtectedAssets()
         try testSweepOrphansPreservesRecentAssets()
         try testSweepOrphansDeletesOldUnreferencedAssets()
@@ -88,6 +92,33 @@ struct NoteAssetStoreTests {
             try expect(saved.fileName.hasSuffix(".m4a"), "saved audio keeps the source extension")
             let copied = try Data(contentsOf: saved.fileURL)
             try expect(copied == contents, "saved audio contents match the source file")
+        }
+    }
+
+    private static func testSaveAudioRefreshesModificationDate() throws {
+        try withTemporaryStore { store in
+            let sourceURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(
+                    "note-asset-store-old-source-\(UUID().uuidString).m4a"
+                )
+            try Data("audio contents".utf8).write(to: sourceURL)
+            try setModificationDate(
+                of: sourceURL,
+                to: Date(timeIntervalSince1970: 0)
+            )
+            defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+            let saved = try store.saveAudio(from: sourceURL)
+            let modificationDate = try saved.fileURL.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate
+
+            try expect(
+                modificationDate.map {
+                    Date().timeIntervalSince($0) < 10
+                } == true,
+                "saved audio receives a fresh modification date"
+            )
         }
     }
 
@@ -351,6 +382,51 @@ struct NoteAssetStoreTests {
             try expect(
                 FileManager.default.fileExists(atPath: savedAudio.fileURL.path),
                 "the blocked audio file remains because its directory could not be modified"
+            )
+        }
+    }
+
+    private static func testDeleteRejectsParentDirectoryTraversal() throws {
+        try withTemporaryStore { store in
+            let siblingURL = store.storageLayout.rootDirectory
+                .appendingPathComponent("outside.wav")
+            try Data("preserve".utf8).write(to: siblingURL)
+
+            try store.deleteAudio(fileName: "../outside.wav")
+            try store.deleteTranscript(fileName: "../outside.wav")
+
+            try expect(
+                FileManager.default.fileExists(atPath: siblingURL.path),
+                "asset deletion cannot escape its storage directory"
+            )
+        }
+    }
+
+    private static func testLoadTranscriptRejectsParentDirectoryTraversal() throws {
+        try withTemporaryStore { store in
+            let siblingURL = store.storageLayout.rootDirectory
+                .appendingPathComponent("outside.txt")
+            try Data("private".utf8).write(to: siblingURL)
+
+            do {
+                _ = try store.loadTranscript(fileName: "../outside.txt")
+                throw TestFailure(
+                    "expected parent-directory transcript load to fail"
+                )
+            } catch let error as TestFailure {
+                throw error
+            } catch is NoteAssetStoreError {
+                // expected
+            }
+        }
+    }
+
+    private static func testStoredAudioURLRejectsParentDirectoryTraversal() throws {
+        try withTemporaryStore { store in
+            let item = makeItem(audioFileName: "../outside.wav")
+            try expect(
+                store.storedAudioURL(for: item) == nil,
+                "stored audio resolution cannot escape its directory"
             )
         }
     }

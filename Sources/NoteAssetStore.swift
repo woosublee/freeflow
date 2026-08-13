@@ -37,6 +37,10 @@ struct NoteAssetStore: Sendable {
         do {
             try? FileManager.default.removeItem(at: destURL)
             try FileManager.default.copyItem(at: tempURL, to: destURL)
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date()],
+                ofItemAtPath: destURL.path
+            )
             return AppState.SavedAudioFile(fileName: fileName, fileURL: destURL)
         } catch {
             throw NoteAssetStoreError.audioSaveFailed(underlying: error)
@@ -50,7 +54,7 @@ struct NoteAssetStore: Sendable {
         let standardizedURL = fileURL.standardizedFileURL
         guard standardizedURL.deletingLastPathComponent() == audioDirectory,
               standardizedURL.pathExtension.lowercased() == "wav",
-              (try? CanonicalPCM16WAV.validateFile(at: standardizedURL)) != nil else {
+              (try? RecordingCanonicalWAV.validateFile(at: standardizedURL)) != nil else {
             return try saveAudio(from: fileURL)
         }
         return AppState.SavedAudioFile(
@@ -72,9 +76,13 @@ struct NoteAssetStore: Sendable {
     }
 
     func deleteAudio(fileName: String) throws {
-        try Self.removeItemIfPresent(
-            at: storageLayout.audioDirectory.appendingPathComponent(fileName)
-        )
+        guard let fileURL = Self.storedFileURL(
+            fileName: fileName,
+            in: storageLayout.audioDirectory
+        ) else {
+            return
+        }
+        try Self.removeItemIfPresent(at: fileURL)
     }
 
     func saveTranscript(
@@ -93,7 +101,14 @@ struct NoteAssetStore: Sendable {
     }
 
     func loadTranscript(fileName: String) throws -> String {
-        let fileURL = storageLayout.transcriptDirectory.appendingPathComponent(fileName)
+        guard let fileURL = Self.storedFileURL(
+            fileName: fileName,
+            in: storageLayout.transcriptDirectory
+        ) else {
+            throw NoteAssetStoreError.transcriptLoadFailed(
+                underlying: CocoaError(.fileReadInvalidFileName)
+            )
+        }
         do {
             return try String(contentsOf: fileURL, encoding: .utf8)
         } catch {
@@ -102,9 +117,13 @@ struct NoteAssetStore: Sendable {
     }
 
     func deleteTranscript(fileName: String) throws {
-        try Self.removeItemIfPresent(
-            at: storageLayout.transcriptDirectory.appendingPathComponent(fileName)
-        )
+        guard let fileURL = Self.storedFileURL(
+            fileName: fileName,
+            in: storageLayout.transcriptDirectory
+        ) else {
+            return
+        }
+        try Self.removeItemIfPresent(at: fileURL)
     }
 
     /// Attempts both deletions independently — matching the existing
@@ -155,7 +174,10 @@ struct NoteAssetStore: Sendable {
 
     func storedAudioURL(for item: PipelineHistoryItem) -> URL? {
         guard let fileName = item.audioFileName else { return nil }
-        return storageLayout.audioDirectory.appendingPathComponent(fileName)
+        return Self.storedFileURL(
+            fileName: fileName,
+            in: storageLayout.audioDirectory
+        )
     }
 
     private func sweepOrphans(
@@ -184,6 +206,19 @@ struct NoteAssetStore: Sendable {
             }
             try? fileManager.removeItem(at: fileURL)
         }
+    }
+
+    private static func storedFileURL(
+        fileName: String,
+        in directory: URL
+    ) -> URL? {
+        guard !fileName.isEmpty,
+              URL(fileURLWithPath: fileName).lastPathComponent == fileName,
+              !fileName.contains("/"),
+              !fileName.contains("\\") else {
+            return nil
+        }
+        return directory.appendingPathComponent(fileName)
     }
 
     private static func preparedDirectory(_ directory: URL) -> URL {

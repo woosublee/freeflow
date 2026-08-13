@@ -82,10 +82,10 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         )
         try expectOrdered(
             [
+                "let startupNoteAssetStore = NoteAssetStore(",
                 "pipelineHistoryStore.trim(to: maxPipelineHistoryCount)",
-                "let noteAssetStore = NoteAssetStore(",
                 "cloudTranscriptionJobStore.invalidateSession(",
-                "try? noteAssetStore.deleteAssets(",
+                "try? startupNoteAssetStore.deleteAssets(",
                 "cloudTranscriptionJobStore.delete("
             ],
             in: initializer,
