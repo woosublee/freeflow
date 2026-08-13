@@ -391,17 +391,18 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         let catchRange = try requiredRange(of: "} catch {", in: persist)
         let catchBody = String(persist[catchRange.upperBound...])
 
-        assert(catchBody.contains("journalRecordingID == nil"))
+        assert(catchBody.contains("journalRecordingID != nil"))
         assert(catchBody.contains("pipelineHistoryStore.availability == .ready"))
         assert(catchBody.contains("pipelineHistoryStore.durability == .durable"))
         assert(catchBody.contains("pipelineHistoryStore.verifyHistoryReadable()"))
-        assert(catchBody.contains("let history = pipelineHistoryStore.loadAllHistory()"))
-        assert(catchBody.contains("!history.contains(where: { $0.id == recordingID })"))
-        assert(!catchBody.contains("!pipelineHistoryStore.loadAllHistory().contains(where: { $0.id == recordingID })"))
-        assert(catchBody.contains("Self.deleteStoredFiles("))
-        assert(catchBody.contains("audioFileName: audioFileName"))
-        assert(catchBody.contains("transcriptFileName: nil"))
-        assert(!catchBody.contains("Self.deleteAudioFile(audioFileName, audioDirectory: storageLayout.audioDirectory)"))
+        assert(catchBody.contains("pipelineHistoryStore.loadAllHistory()"))
+        assert(catchBody.contains("audioOnlyPersistenceFailureCleanupDecision("))
+        assert(catchBody.contains("recordingIDExistsInHistory: history.contains"))
+        assert(catchBody.contains("cleanupDecision == .deleteUnreferencedAudio"))
+        assert(catchBody.contains("noteAssetStore.deleteAudio("))
+        assert(catchBody.contains("fileName: audioFileName"))
+        assert(!catchBody.contains("deleteStoredFiles("))
+        assert(!catchBody.contains("deleteAudioFile("))
     }
 
     private static func testAudioOnlyCompletionOwnsForegroundUIAndTermination() throws {

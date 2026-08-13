@@ -11536,6 +11536,26 @@ final class AppState: ObservableObject, @unchecked Sendable {
         return removedStoredFiles
     }
 
+    enum AudioOnlyPersistenceFailureCleanupDecision: Equatable {
+        case preserve
+        case deleteUnreferencedAudio
+    }
+
+    static func audioOnlyPersistenceFailureCleanupDecision(
+        hasJournalOwner: Bool,
+        historyIsAvailableAndDurable: Bool,
+        historyIsReadable: Bool,
+        recordingIDExistsInHistory: Bool
+    ) -> AudioOnlyPersistenceFailureCleanupDecision {
+        guard !hasJournalOwner,
+              historyIsAvailableAndDurable,
+              historyIsReadable,
+              !recordingIDExistsInHistory else {
+            return .preserve
+        }
+        return .deleteUnreferencedAudio
+    }
+
     @MainActor
     private func persistAudioOnlyRecording(
         recordingID: UUID,
@@ -11584,18 +11604,32 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 )
             }
         } catch {
-            if journalRecordingID == nil,
-               pipelineHistoryStore.availability == .ready,
-               pipelineHistoryStore.durability == .durable,
-               pipelineHistoryStore.verifyHistoryReadable() {
-                let history = pipelineHistoryStore.loadAllHistory()
-                if pipelineHistoryStore.availability == .ready,
-                   pipelineHistoryStore.durability == .durable,
-                   !history.contains(where: { $0.id == recordingID }) {
-                    try? noteAssetStore.deleteAudio(
-                        fileName: audioFileName
-                    )
-                }
+            let historyWasAvailableAndDurable =
+                pipelineHistoryStore.availability == .ready
+                && pipelineHistoryStore.durability == .durable
+            let historyWasReadable = historyWasAvailableAndDurable
+                && pipelineHistoryStore.verifyHistoryReadable()
+            let history = historyWasReadable
+                ? pipelineHistoryStore.loadAllHistory()
+                : []
+            let historyIsStillAvailableAndDurable =
+                pipelineHistoryStore.availability == .ready
+                && pipelineHistoryStore.durability == .durable
+            let cleanupDecision = Self
+                .audioOnlyPersistenceFailureCleanupDecision(
+                    hasJournalOwner: journalRecordingID != nil,
+                    historyIsAvailableAndDurable:
+                        historyWasAvailableAndDurable
+                        && historyIsStillAvailableAndDurable,
+                    historyIsReadable: historyWasReadable,
+                    recordingIDExistsInHistory: history.contains {
+                        $0.id == recordingID
+                    }
+                )
+            if cleanupDecision == .deleteUnreferencedAudio {
+                try? noteAssetStore.deleteAudio(
+                    fileName: audioFileName
+                )
             }
             let message = userIssue(for: error).record.presentation().compactMessage
             completeStoppedRecording(

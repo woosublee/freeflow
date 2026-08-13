@@ -9,6 +9,7 @@ struct AppStateStorageSafetyTests {
         try await verifiesDeleteHistoryEntryRemovesOwnedAssets()
         try await verifiesClearHistoryRemovesOwnedAssets()
         try await verifiesSharedAssetsRemainWhileHistoryStillReferencesThem()
+        try verifiesAudioOnlyPersistenceFailureCleanupDecisions()
         try await verifiesArchiveUsesOriginatingHistoryStoreFactory()
         try await verifiesHistoryCreatedAfterAssetsDoesNotSweep()
         try await verifiesHistoryRowsLostAfterSnapshotDoesNotSweep()
@@ -327,6 +328,37 @@ struct AppStateStorageSafetyTests {
             try expect(
                 appState.pipelineHistory.map(\.id) == [survivingItem.id],
                 "only the selected shared-reference history entry is removed"
+            )
+        }
+    }
+
+    private static func verifiesAudioOnlyPersistenceFailureCleanupDecisions() throws {
+        let cases: [(
+            hasJournalOwner: Bool,
+            historyIsAvailableAndDurable: Bool,
+            historyIsReadable: Bool,
+            recordingIDExistsInHistory: Bool,
+            expected: AppState.AudioOnlyPersistenceFailureCleanupDecision
+        )] = [
+            (true, true, true, false, .preserve),
+            (false, false, true, false, .preserve),
+            (false, true, false, false, .preserve),
+            (false, true, true, true, .preserve),
+            (false, true, true, false, .deleteUnreferencedAudio)
+        ]
+
+        for testCase in cases {
+            let actual = AppState.audioOnlyPersistenceFailureCleanupDecision(
+                hasJournalOwner: testCase.hasJournalOwner,
+                historyIsAvailableAndDurable:
+                    testCase.historyIsAvailableAndDurable,
+                historyIsReadable: testCase.historyIsReadable,
+                recordingIDExistsInHistory:
+                    testCase.recordingIDExistsInHistory
+            )
+            try expect(
+                actual == testCase.expected,
+                "audio-only persistence failure preserves uncertain ownership"
             )
         }
     }
