@@ -6,8 +6,8 @@ import Foundation
 struct AudioImportFileCopyTests {
     static func main() async throws {
         try await testOffMainCopyPreservesExtensionAndContents()
-        await testOffMainCopyReturnsNilForMissingFile()
-        try testImportAudioFileUsesOffMainSecurityScopedCopy()
+        try await testOffMainCopyThrowsForMissingFile()
+        try testImportAudioFileUsesCapturedNoteAssetStore()
         try testImportAudioFileGroupsCapturedSettings()
         print("AudioImportFileCopyTests passed")
     }
@@ -16,62 +16,61 @@ struct AudioImportFileCopyTests {
         let sourceURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("quill-audio-import-copy-source-\(ProcessInfo.processInfo.globallyUniqueString)")
             .appendingPathExtension("m4a")
-        let destinationDirectory = FileManager.default.temporaryDirectory
+        let destinationRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("quill-audio-import-copy-destination-\(ProcessInfo.processInfo.globallyUniqueString)")
         let contents = Data("audio import copy test".utf8)
         try contents.write(to: sourceURL)
-        try FileManager.default.createDirectory(
-            at: destinationDirectory,
-            withIntermediateDirectories: true
-        )
         defer {
             try? FileManager.default.removeItem(at: sourceURL)
-            try? FileManager.default.removeItem(at: destinationDirectory)
+            try? FileManager.default.removeItem(at: destinationRoot)
         }
 
-        guard let saved = await AppState.saveSecurityScopedAudioFileOffMain(
-            from: sourceURL,
-            audioDirectory: destinationDirectory
-        ) else {
-            preconditionFailure("Expected off-main audio copy to succeed")
-        }
+        let store = NoteAssetStore(
+            storageLayout: AppStateStorageLayout(rootDirectory: destinationRoot)
+        )
+        store.prepareDirectories()
+        let saved = try await store.saveSecurityScopedAudio(from: sourceURL)
 
         precondition(saved.fileName.hasSuffix(".m4a"), "Expected copied file to preserve supported extension")
         let copied = try Data(contentsOf: saved.fileURL)
         precondition(copied == contents, "Expected copied file contents to match source")
     }
 
-    private static func testOffMainCopyReturnsNilForMissingFile() async {
+    private static func testOffMainCopyThrowsForMissingFile() async throws {
         let missingURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("quill-missing-audio-import-\(ProcessInfo.processInfo.globallyUniqueString)")
             .appendingPathExtension("mp3")
-        let destinationDirectory = FileManager.default.temporaryDirectory
+        let destinationRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("quill-missing-audio-destination-\(ProcessInfo.processInfo.globallyUniqueString)")
-
-        let saved = await AppState.saveSecurityScopedAudioFileOffMain(
-            from: missingURL,
-            audioDirectory: destinationDirectory
+        defer { try? FileManager.default.removeItem(at: destinationRoot) }
+        let store = NoteAssetStore(
+            storageLayout: AppStateStorageLayout(rootDirectory: destinationRoot)
         )
+        store.prepareDirectories()
 
-        precondition(saved == nil, "Expected missing source file to fail off-main copy")
+        do {
+            _ = try await store.saveSecurityScopedAudio(from: missingURL)
+            preconditionFailure("Expected missing source file to throw")
+        } catch is NoteAssetStoreError {
+            // expected
+        }
     }
 
-    private static func testImportAudioFileUsesOffMainSecurityScopedCopy() throws {
+    private static func testImportAudioFileUsesCapturedNoteAssetStore() throws {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
+        let importBody = importAudioFileBody(in: source)
+        guard let capture = importBody.range(of: "let noteAssetStore = noteAssetStore"),
+              let task = importBody.range(of: "Task { [weak self] in") else {
+            preconditionFailure("Expected imported audio to capture NoteAssetStore before Task")
+        }
 
+        precondition(capture.lowerBound < task.lowerBound)
         assertContains(
-            source,
-            "static func saveSecurityScopedAudioFileOffMain(\n        from fileURL: URL,\n        audioDirectory: URL\n    ) async -> SavedAudioFile?"
+            importBody,
+            "savedAudioFile = try await noteAssetStore\n                    .saveSecurityScopedAudio(from: fileURL)"
         )
-        assertContains(source, "await Task.detached(priority: .userInitiated)")
-        assertContains(source, "let accessGranted = fileURL.startAccessingSecurityScopedResource()")
-        assertContains(source, "fileURL.stopAccessingSecurityScopedResource()")
-        assertContains(
-            source,
-            "guard let savedAudioFile = await Self.saveSecurityScopedAudioFileOffMain(\n                from: fileURL,\n                audioDirectory: audioDirectory"
-        )
-        assertDoesNotContain(importAudioFileBody(in: source), "Self.saveAudioFile(from: fileURL)")
-        assertDoesNotContain(importAudioFileBody(in: source), "startAccessingSecurityScopedResource()")
+        assertDoesNotContain(importBody, "startAccessingSecurityScopedResource()")
+        assertDoesNotContain(importBody, "saveSecurityScopedAudioFileOffMain")
     }
 
     private static func testImportAudioFileGroupsCapturedSettings() throws {

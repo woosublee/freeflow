@@ -5419,24 +5419,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
-    static func saveSecurityScopedAudioFileOffMain(
-        from fileURL: URL,
-        audioDirectory: URL
-    ) async -> SavedAudioFile? {
-        await Task.detached(priority: .userInitiated) {
-            let accessGranted = fileURL.startAccessingSecurityScopedResource()
-            defer {
-                if accessGranted {
-                    fileURL.stopAccessingSecurityScopedResource()
-                }
-            }
-            return Self.saveAudioFile(
-                from: fileURL,
-                audioDirectory: audioDirectory
-            )
-        }.value
-    }
-
     @MainActor
     private func cleanupDeletedPipelineHistoryAssets(
         _ assets: DeletedPipelineHistoryAssets
@@ -7382,22 +7364,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let startedAt = Date()
         let importContextSummary = AudioImportOptions.importContextSummary(for: fileURL.lastPathComponent)
         pendingAudioImportJobIDs.insert(jobID)
-        let audioDirectory = storageLayout.audioDirectory
+        let noteAssetStore = noteAssetStore
 
         Task { [weak self] in
-            guard let savedAudioFile = await Self.saveSecurityScopedAudioFileOffMain(
-                from: fileURL,
-                audioDirectory: audioDirectory
-            ) else {
+            let savedAudioFile: SavedAudioFile
+            do {
+                savedAudioFile = try await noteAssetStore
+                    .saveSecurityScopedAudio(from: fileURL)
+            } catch {
                 self?.pendingAudioImportJobIDs.remove(jobID)
                 self?.errorMessage = localizedCatalogString("Unable to save the audio file. Check disk space or file permissions and try again.")
                 return
             }
             guard let self else {
-                Self.deleteAudioFile(
-                    savedAudioFile.fileName,
-                    audioDirectory: audioDirectory
-                )
+                try? noteAssetStore.deleteAudio(fileName: savedAudioFile.fileName)
                 return
             }
 
@@ -7439,10 +7419,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 }
             } catch {
                 self.pendingAudioImportJobIDs.remove(jobID)
-                Self.deleteAudioFile(
-                    savedAudioFile.fileName,
-                    audioDirectory: audioDirectory
-                )
+                try? noteAssetStore.deleteAudio(fileName: savedAudioFile.fileName)
                 let issue = self.userIssue(for: error)
                 self.errorMessage = issue.record.presentation().compactMessage
                 return
