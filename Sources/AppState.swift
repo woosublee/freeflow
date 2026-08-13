@@ -2883,10 +2883,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 if referenceTrust.permitsStartupReferenceCleanup {
                     let sweepReferenceTrust = referenceTrust
                     let sweepNow = Date()
+                    let noteAssetStore = NoteAssetStore(
+                        storageLayout: storageLayout
+                    )
                     Task.detached(priority: .background) {
-                        Self.sweepOrphanStoredFiles(
-                            audioDirectory: audioDirectory,
-                            transcriptDirectory: transcriptDirectory,
+                        noteAssetStore.sweepOrphans(
                             referencedAudioFileNames: referencedAudioFileNames,
                             referencedTranscriptFileNames: referencedTranscriptFileNames,
                             protectedInflightAudioFileNames: protectedInflightAudioFileNames,
@@ -5323,41 +5324,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
             )
         } catch {
             print("Failed to preserve incomplete history-reference evidence: \(error)")
-        }
-    }
-
-    static func sweepOrphanStoredFiles(
-        audioDirectory: URL,
-        transcriptDirectory: URL,
-        referencedAudioFileNames: Set<String>,
-        referencedTranscriptFileNames: Set<String>,
-        protectedInflightAudioFileNames: Set<String> = [],
-        referenceTrust: PipelineHistoryReferenceTrust,
-        now: Date = Date()
-    ) {
-        guard referenceTrust.permitsStartupReferenceCleanup else { return }
-
-        let fileManager = FileManager.default
-        let gracePeriod: TimeInterval = 300
-        if let audioFiles = try? fileManager.contentsOfDirectory(atPath: audioDirectory.path) {
-            for fileName in audioFiles where !referencedAudioFileNames.contains(fileName) {
-                guard fileName != "inflight" else { continue }
-                guard !protectedInflightAudioFileNames.contains(fileName) else { continue }
-                let fileURL = audioDirectory.appendingPathComponent(fileName)
-                guard let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
-                      let modificationDate = attributes[.modificationDate] as? Date,
-                      now.timeIntervalSince(modificationDate) > gracePeriod else { continue }
-                try? fileManager.removeItem(at: fileURL)
-            }
-        }
-        if let transcriptFiles = try? fileManager.contentsOfDirectory(atPath: transcriptDirectory.path) {
-            for fileName in transcriptFiles where !referencedTranscriptFileNames.contains(fileName) {
-                let fileURL = transcriptDirectory.appendingPathComponent(fileName)
-                guard let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
-                      let modificationDate = attributes[.modificationDate] as? Date,
-                      now.timeIntervalSince(modificationDate) > gracePeriod else { continue }
-                try? fileManager.removeItem(at: fileURL)
-            }
         }
     }
 

@@ -6,21 +6,13 @@ enum NoteAssetStoreError: Error {
     case transcriptLoadFailed(underlying: Error)
 }
 
-/// A focused, instance-owned boundary over `AppStateStorageLayout` for note
-/// audio and transcript files.
+/// The instance-owned filesystem boundary for note audio and transcript
+/// assets under an `AppStateStorageLayout`.
 ///
-/// This does not yet own every audio/transcript call site in `AppState`.
-/// Several existing call sites (audio import, stopped-recording save/delete,
-/// cloud-transcription cleanup) are pinned by exact-source-text regression
-/// tests in other suites (`AudioImportFileCopyTests`,
-/// `CombinedRecordingNormalStopIntegrationTests`,
-/// `AppStateCloudTranscriptionCleanupSourceTests`,
-/// `AppStateRecordingJournalIntegrationSourceTests`). Migrating those call
-/// sites requires first converting those tests to behavioral coverage, which
-/// is out of scope here. This type provides the throwing API surface and
-/// migrates only the call sites those tests do not lock in place: the
-/// `loadTranscript(from:)` and `storedAudioURL(for:)` instance methods on
-/// `AppState`.
+/// Workflow decisions remain in `AppState`: history ownership, shared
+/// references, recording-journal protection, and cleanup ordering. This store
+/// receives those decisions as explicit file names and performs only path
+/// resolution, persistence, deletion, and orphan sweeping.
 struct NoteAssetStore: Sendable {
     let storageLayout: AppStateStorageLayout
 
@@ -138,9 +130,60 @@ struct NoteAssetStore: Sendable {
         if let firstError { throw firstError }
     }
 
+    func sweepOrphans(
+        referencedAudioFileNames: Set<String>,
+        referencedTranscriptFileNames: Set<String>,
+        protectedInflightAudioFileNames: Set<String> = [],
+        referenceTrust: PipelineHistoryReferenceTrust,
+        now: Date = Date()
+    ) {
+        guard referenceTrust.permitsStartupReferenceCleanup else { return }
+
+        sweepOrphans(
+            in: storageLayout.audioDirectory,
+            referencedFileNames: referencedAudioFileNames,
+            protectedFileNames: protectedInflightAudioFileNames.union(["inflight"]),
+            now: now
+        )
+        sweepOrphans(
+            in: storageLayout.transcriptDirectory,
+            referencedFileNames: referencedTranscriptFileNames,
+            protectedFileNames: [],
+            now: now
+        )
+    }
+
     func storedAudioURL(for item: PipelineHistoryItem) -> URL? {
         guard let fileName = item.audioFileName else { return nil }
         return storageLayout.audioDirectory.appendingPathComponent(fileName)
+    }
+
+    private func sweepOrphans(
+        in directory: URL,
+        referencedFileNames: Set<String>,
+        protectedFileNames: Set<String>,
+        now: Date
+    ) {
+        let fileManager = FileManager.default
+        let gracePeriod: TimeInterval = 300
+        guard let fileNames = try? fileManager.contentsOfDirectory(
+            atPath: directory.path
+        ) else {
+            return
+        }
+        for fileName in fileNames
+        where !referencedFileNames.contains(fileName)
+            && !protectedFileNames.contains(fileName) {
+            let fileURL = directory.appendingPathComponent(fileName)
+            guard let attributes = try? fileManager.attributesOfItem(
+                atPath: fileURL.path
+            ),
+            let modificationDate = attributes[.modificationDate] as? Date,
+            now.timeIntervalSince(modificationDate) > gracePeriod else {
+                continue
+            }
+            try? fileManager.removeItem(at: fileURL)
+        }
     }
 
     private static func preparedDirectory(_ directory: URL) -> URL {

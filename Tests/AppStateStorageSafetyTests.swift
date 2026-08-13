@@ -1082,9 +1082,9 @@ struct AppStateStorageSafetyTests {
                 try Data("fixture".utf8).write(to: fileURL)
             }
 
-            AppState.sweepOrphanStoredFiles(
-                audioDirectory: audioDirectory,
-                transcriptDirectory: transcriptDirectory,
+            NoteAssetStore(
+                storageLayout: environment.storageLayout
+            ).sweepOrphans(
                 referencedAudioFileNames: [],
                 referencedTranscriptFileNames: [],
                 protectedInflightAudioFileNames: [],

@@ -20,6 +20,10 @@ struct NoteAssetStoreTests {
         try testDeleteTranscriptPropagatesNonMissingFileErrors()
         try testDeleteAudioPropagatesNonMissingFileErrors()
         try testDeleteAssetsStillDeletesTranscriptWhenAudioDeleteFails()
+        try testSweepOrphansPreservesReferencedAndProtectedAssets()
+        try testSweepOrphansPreservesRecentAssets()
+        try testSweepOrphansDeletesOldUnreferencedAssets()
+        try testSweepOrphansRequiresTrustedReferences()
         try testStoredAudioURLResolvesFromItem()
         try testStoredAudioURLIsNilWithoutAudioFileName()
         try testPrepareDirectoriesCreatesAudioAndTranscriptDirectories()
@@ -349,6 +353,158 @@ struct NoteAssetStoreTests {
                 "the blocked audio file remains because its directory could not be modified"
             )
         }
+    }
+
+    private static func testSweepOrphansPreservesReferencedAndProtectedAssets() throws {
+        try withTemporaryStore { store in
+            let referencedAudioURL = store.storageLayout.audioDirectory
+                .appendingPathComponent("referenced.wav")
+            let protectedAudioURL = store.storageLayout.audioDirectory
+                .appendingPathComponent("protected.wav")
+            let inflightDirectory = store.storageLayout.audioDirectory
+                .appendingPathComponent("inflight", isDirectory: true)
+            let referencedTranscriptURL = store.storageLayout.transcriptDirectory
+                .appendingPathComponent("referenced.txt")
+            for fileURL in [
+                referencedAudioURL,
+                protectedAudioURL,
+                referencedTranscriptURL
+            ] {
+                try Data("fixture".utf8).write(to: fileURL)
+                try setModificationDate(
+                    of: fileURL,
+                    to: Date(timeIntervalSince1970: 0)
+                )
+            }
+            try FileManager.default.createDirectory(
+                at: inflightDirectory,
+                withIntermediateDirectories: true
+            )
+
+            store.sweepOrphans(
+                referencedAudioFileNames: [referencedAudioURL.lastPathComponent],
+                referencedTranscriptFileNames: [
+                    referencedTranscriptURL.lastPathComponent
+                ],
+                protectedInflightAudioFileNames: [
+                    protectedAudioURL.lastPathComponent
+                ],
+                referenceTrust: .complete,
+                now: Date(timeIntervalSince1970: 301)
+            )
+
+            for fileURL in [
+                referencedAudioURL,
+                protectedAudioURL,
+                inflightDirectory,
+                referencedTranscriptURL
+            ] {
+                try expect(
+                    FileManager.default.fileExists(atPath: fileURL.path),
+                    "orphan sweep preserves referenced and protected assets"
+                )
+            }
+        }
+    }
+
+    private static func testSweepOrphansPreservesRecentAssets() throws {
+        try withTemporaryStore { store in
+            let recentAudioURL = store.storageLayout.audioDirectory
+                .appendingPathComponent("recent.wav")
+            let recentTranscriptURL = store.storageLayout.transcriptDirectory
+                .appendingPathComponent("recent.txt")
+            let modificationDate = Date(timeIntervalSince1970: 2)
+            for fileURL in [recentAudioURL, recentTranscriptURL] {
+                try Data("fixture".utf8).write(to: fileURL)
+                try setModificationDate(of: fileURL, to: modificationDate)
+            }
+
+            store.sweepOrphans(
+                referencedAudioFileNames: [],
+                referencedTranscriptFileNames: [],
+                protectedInflightAudioFileNames: [],
+                referenceTrust: .complete,
+                now: Date(timeIntervalSince1970: 302)
+            )
+
+            for fileURL in [recentAudioURL, recentTranscriptURL] {
+                try expect(
+                    FileManager.default.fileExists(atPath: fileURL.path),
+                    "orphan sweep preserves assets at the 300-second boundary"
+                )
+            }
+        }
+    }
+
+    private static func testSweepOrphansDeletesOldUnreferencedAssets() throws {
+        try withTemporaryStore { store in
+            let oldAudioURL = store.storageLayout.audioDirectory
+                .appendingPathComponent("old.wav")
+            let oldTranscriptURL = store.storageLayout.transcriptDirectory
+                .appendingPathComponent("old.txt")
+            for fileURL in [oldAudioURL, oldTranscriptURL] {
+                try Data("fixture".utf8).write(to: fileURL)
+                try setModificationDate(
+                    of: fileURL,
+                    to: Date(timeIntervalSince1970: 0)
+                )
+            }
+
+            store.sweepOrphans(
+                referencedAudioFileNames: [],
+                referencedTranscriptFileNames: [],
+                protectedInflightAudioFileNames: [],
+                referenceTrust: .complete,
+                now: Date(timeIntervalSince1970: 301)
+            )
+
+            for fileURL in [oldAudioURL, oldTranscriptURL] {
+                try expect(
+                    !FileManager.default.fileExists(atPath: fileURL.path),
+                    "orphan sweep deletes assets older than 300 seconds"
+                )
+            }
+        }
+    }
+
+    private static func testSweepOrphansRequiresTrustedReferences() throws {
+        for trust in [
+            PipelineHistoryReferenceTrust.recovered,
+            PipelineHistoryReferenceTrust.unavailable
+        ] {
+            try withTemporaryStore { store in
+                let oldAudioURL = store.storageLayout.audioDirectory
+                    .appendingPathComponent("untrusted-\(UUID().uuidString).wav")
+                try Data("fixture".utf8).write(to: oldAudioURL)
+                try setModificationDate(
+                    of: oldAudioURL,
+                    to: Date(timeIntervalSince1970: 0)
+                )
+
+                store.sweepOrphans(
+                    referencedAudioFileNames: [],
+                    referencedTranscriptFileNames: [],
+                    protectedInflightAudioFileNames: [],
+                    referenceTrust: trust,
+                    now: Date(timeIntervalSince1970: 301)
+                )
+
+                try expect(
+                    FileManager.default.fileExists(atPath: oldAudioURL.path),
+                    "orphan sweep skips cleanup without complete reference trust"
+                )
+            }
+        }
+    }
+
+    private static func setModificationDate(
+        of fileURL: URL,
+        to date: Date
+    ) throws {
+        try FileManager.default.setAttributes(
+            [.modificationDate: date],
+            ofItemAtPath: fileURL.path
+        )
     }
 
     private static func testStoredAudioURLResolvesFromItem() throws {

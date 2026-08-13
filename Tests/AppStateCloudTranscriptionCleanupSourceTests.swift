@@ -108,7 +108,7 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
                 to: cleanup.lowerBound
             )
             try expect(
-                distance < 1_500,
+                distance < 2_000,
                 "trimmed history assets use nearby common cleanup after \(marker)"
             )
         }

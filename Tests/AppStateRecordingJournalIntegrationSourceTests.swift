@@ -30,7 +30,8 @@ struct AppStateRecordingJournalIntegrationSourceTests {
         precondition(source.contains("recoverRecordingJournalsBeforeHistoryLoad"))
         precondition(source.contains("RecordingJournalRecoveryExecutor("))
         precondition(source.contains("RecordingRecoveryHistory("))
-        precondition(source.contains("guard fileName != \"inflight\" else { continue }"))
+        precondition(source.contains("protectedInflightAudioFileNames("))
+        precondition(source.contains("noteAssetStore.sweepOrphans("))
         let startupRecoveryBody = try functionBody(
             named: "recoverRecordingJournalsBeforeHistoryLoad",
             in: source
