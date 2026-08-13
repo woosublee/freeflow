@@ -1,0 +1,322 @@
+import Foundation
+
+#if !QUILL_GROUPED_TEST_RUNNER
+@main
+#endif
+struct NoteAssetStoreTests {
+    static func main() async throws {
+        try testSaveAndLoadTranscriptRoundTrips()
+        try testSaveTranscriptPrefersPostProcessedText()
+        try testLoadTranscriptThrowsForMissingFile()
+        try testDeleteTranscriptIsIdempotentForMissingFile()
+        try testSaveAudioCopiesFileAndPreservesExtension()
+        try testSaveAudioThrowsWhenSourceFileIsMissing()
+        try await testSaveSecurityScopedAudioThrowsWhenSourceFileIsMissing()
+        try testDeleteAudioIsIdempotentForMissingFile()
+        try testDeleteAssetsRemovesBothFiles()
+        try testStoredAudioURLResolvesFromItem()
+        try testStoredAudioURLIsNilWithoutAudioFileName()
+        try testPrepareDirectoriesCreatesAudioAndTranscriptDirectories()
+        try testTwoStoresWithIndependentLayoutsDoNotShareFiles()
+        try testSaveTranscriptThrowsWhenDirectoryIsUnavailable()
+        try testSaveAudioThrowsWhenDirectoryIsUnavailable()
+        print("NoteAssetStoreTests passed")
+    }
+
+    private static func testSaveAndLoadTranscriptRoundTrips() throws {
+        try withTemporaryStore { store in
+            let fileName = try store.saveTranscript(
+                rawTranscript: "raw",
+                postProcessedTranscript: "processed"
+            )
+            let loaded = try store.loadTranscript(fileName: fileName)
+            try expect(loaded == "processed", "loaded transcript matches the saved content")
+        }
+    }
+
+    private static func testSaveTranscriptPrefersPostProcessedText() throws {
+        try withTemporaryStore { store in
+            let fileName = try store.saveTranscript(
+                rawTranscript: "raw only",
+                postProcessedTranscript: ""
+            )
+            let loaded = try store.loadTranscript(fileName: fileName)
+            try expect(
+                loaded == "raw only",
+                "an empty post-processed transcript falls back to the raw transcript"
+            )
+        }
+    }
+
+    private static func testLoadTranscriptThrowsForMissingFile() throws {
+        try withTemporaryStore { store in
+            do {
+                _ = try store.loadTranscript(fileName: "missing-\(UUID().uuidString).txt")
+                throw TestFailure("expected loadTranscript to throw for a missing file")
+            } catch is NoteAssetStoreError {
+                // expected
+            }
+        }
+    }
+
+    private static func testDeleteTranscriptIsIdempotentForMissingFile() throws {
+        try withTemporaryStore { store in
+            store.deleteTranscript(fileName: "missing-\(UUID().uuidString).txt")
+        }
+    }
+
+    private static func testSaveAudioCopiesFileAndPreservesExtension() throws {
+        try withTemporaryStore { store in
+            let sourceURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("note-asset-store-source-\(UUID().uuidString).m4a")
+            let contents = Data("audio contents".utf8)
+            try contents.write(to: sourceURL)
+            defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+            let saved = try store.saveAudio(from: sourceURL)
+            try expect(saved.fileName.hasSuffix(".m4a"), "saved audio keeps the source extension")
+            let copied = try Data(contentsOf: saved.fileURL)
+            try expect(copied == contents, "saved audio contents match the source file")
+        }
+    }
+
+    private static func testSaveAudioThrowsWhenSourceFileIsMissing() throws {
+        try withTemporaryStore { store in
+            let missingURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("note-asset-store-missing-\(UUID().uuidString).wav")
+            do {
+                _ = try store.saveAudio(from: missingURL)
+                throw TestFailure("expected saveAudio to throw for a missing source file")
+            } catch is NoteAssetStoreError {
+                // expected
+            }
+        }
+    }
+
+    private static func testSaveSecurityScopedAudioThrowsWhenSourceFileIsMissing() async throws {
+        try await withTemporaryStoreAsync { store in
+            let missingURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("note-asset-store-missing-scoped-\(UUID().uuidString).wav")
+            do {
+                _ = try await store.saveSecurityScopedAudio(from: missingURL)
+                throw TestFailure(
+                    "expected saveSecurityScopedAudio to throw for a missing source file"
+                )
+            } catch is NoteAssetStoreError {
+                // expected
+            }
+        }
+    }
+
+    private static func testDeleteAudioIsIdempotentForMissingFile() throws {
+        try withTemporaryStore { store in
+            store.deleteAudio(fileName: "missing-\(UUID().uuidString).wav")
+        }
+    }
+
+    private static func testDeleteAssetsRemovesBothFiles() throws {
+        try withTemporaryStore { store in
+            let transcriptFileName = try store.saveTranscript(
+                rawTranscript: "to delete",
+                postProcessedTranscript: ""
+            )
+            let sourceURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("note-asset-store-to-delete-\(UUID().uuidString).wav")
+            try Data("fixture".utf8).write(to: sourceURL)
+            defer { try? FileManager.default.removeItem(at: sourceURL) }
+            let savedAudio = try store.saveAudio(from: sourceURL)
+
+            store.deleteAssets(
+                audioFileName: savedAudio.fileName,
+                transcriptFileName: transcriptFileName
+            )
+
+            try expect(
+                !FileManager.default.fileExists(atPath: savedAudio.fileURL.path),
+                "deleteAssets removes the saved audio file"
+            )
+            let transcriptURL = store.storageLayout.transcriptDirectory
+                .appendingPathComponent(transcriptFileName)
+            try expect(
+                !FileManager.default.fileExists(atPath: transcriptURL.path),
+                "deleteAssets removes the saved transcript file"
+            )
+        }
+    }
+
+    private static func testStoredAudioURLResolvesFromItem() throws {
+        try withTemporaryStore { store in
+            let item = makeItem(audioFileName: "resolved.wav")
+            let resolved = store.storedAudioURL(for: item)
+            try expect(
+                resolved == store.storageLayout.audioDirectory.appendingPathComponent("resolved.wav"),
+                "storedAudioURL resolves under the store's own audio directory"
+            )
+        }
+    }
+
+    private static func testStoredAudioURLIsNilWithoutAudioFileName() throws {
+        try withTemporaryStore { store in
+            let item = makeItem(audioFileName: nil)
+            try expect(
+                store.storedAudioURL(for: item) == nil,
+                "storedAudioURL is nil when the item has no audio file name"
+            )
+        }
+    }
+
+    private static func testPrepareDirectoriesCreatesAudioAndTranscriptDirectories() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note-asset-store-prepare-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NoteAssetStore(storageLayout: AppStateStorageLayout(rootDirectory: root))
+
+        let (audioDirectory, transcriptDirectory) = store.prepareDirectories()
+
+        var isDirectory: ObjCBool = false
+        try expect(
+            FileManager.default.fileExists(atPath: audioDirectory.path, isDirectory: &isDirectory)
+                && isDirectory.boolValue,
+            "prepareDirectories creates the audio directory"
+        )
+        try expect(
+            FileManager.default.fileExists(atPath: transcriptDirectory.path, isDirectory: &isDirectory)
+                && isDirectory.boolValue,
+            "prepareDirectories creates the transcript directory"
+        )
+    }
+
+    private static func testTwoStoresWithIndependentLayoutsDoNotShareFiles() throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note-asset-store-independent-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let firstStore = NoteAssetStore(
+            storageLayout: AppStateStorageLayout(
+                rootDirectory: parent.appendingPathComponent("first", isDirectory: true)
+            )
+        )
+        let secondStore = NoteAssetStore(
+            storageLayout: AppStateStorageLayout(
+                rootDirectory: parent.appendingPathComponent("second", isDirectory: true)
+            )
+        )
+        firstStore.prepareDirectories()
+        secondStore.prepareDirectories()
+
+        let firstFileName = try firstStore.saveTranscript(
+            rawTranscript: "first store transcript",
+            postProcessedTranscript: ""
+        )
+        let secondFileName = try secondStore.saveTranscript(
+            rawTranscript: "second store transcript",
+            postProcessedTranscript: ""
+        )
+
+        try expect(
+            (try? secondStore.loadTranscript(fileName: firstFileName)) == nil,
+            "the second store cannot read a transcript saved only in the first store"
+        )
+        let firstLoaded = try firstStore.loadTranscript(fileName: firstFileName)
+        let secondLoaded = try secondStore.loadTranscript(fileName: secondFileName)
+        try expect(
+            firstLoaded == "first store transcript" && secondLoaded == "second store transcript",
+            "each store independently persists and loads its own transcript"
+        )
+    }
+
+    private static func testSaveTranscriptThrowsWhenDirectoryIsUnavailable() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note-asset-store-blocked-transcript-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storageLayout = AppStateStorageLayout(rootDirectory: root)
+        // Create a plain file where the transcript directory should be, so
+        // FileManager cannot create it and any write into it fails.
+        try Data().write(to: storageLayout.transcriptDirectory)
+        let store = NoteAssetStore(storageLayout: storageLayout)
+
+        do {
+            _ = try store.saveTranscript(rawTranscript: "unwritable", postProcessedTranscript: "")
+            throw TestFailure(
+                "expected saveTranscript to throw when its directory cannot be created"
+            )
+        } catch is NoteAssetStoreError {
+            // expected
+        }
+    }
+
+    private static func testSaveAudioThrowsWhenDirectoryIsUnavailable() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note-asset-store-blocked-audio-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storageLayout = AppStateStorageLayout(rootDirectory: root)
+        try Data().write(to: storageLayout.audioDirectory)
+        let store = NoteAssetStore(storageLayout: storageLayout)
+
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note-asset-store-blocked-source-\(UUID().uuidString).wav")
+        try Data("fixture".utf8).write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+        do {
+            _ = try store.saveAudio(from: sourceURL)
+            throw TestFailure("expected saveAudio to throw when its directory cannot be created")
+        } catch is NoteAssetStoreError {
+            // expected
+        }
+    }
+
+    private static func makeItem(audioFileName: String?) -> PipelineHistoryItem {
+        PipelineHistoryItem(
+            timestamp: Date(),
+            rawTranscript: "",
+            postProcessedTranscript: "",
+            postProcessingPrompt: nil,
+            contextSummary: "",
+            contextScreenshotDataURL: nil,
+            contextScreenshotStatus: "No screenshot",
+            postProcessingStatus: "succeeded",
+            debugStatus: "",
+            customVocabulary: "",
+            audioFileName: audioFileName
+        )
+    }
+
+    private static func withTemporaryStore(
+        _ operation: (NoteAssetStore) throws -> Void
+    ) throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note-asset-store-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NoteAssetStore(storageLayout: AppStateStorageLayout(rootDirectory: root))
+        store.prepareDirectories()
+        try operation(store)
+    }
+
+    private static func withTemporaryStoreAsync(
+        _ operation: (NoteAssetStore) async throws -> Void
+    ) async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note-asset-store-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NoteAssetStore(storageLayout: AppStateStorageLayout(rootDirectory: root))
+        store.prepareDirectories()
+        try await operation(store)
+    }
+
+    private static func expect(
+        _ condition: @autoclosure () -> Bool,
+        _ label: String
+    ) throws {
+        guard condition() else { throw TestFailure(label) }
+    }
+}
+
+private struct TestFailure: Error, CustomStringConvertible {
+    let description: String
+
+    init(_ description: String) {
+        self.description = description
+    }
+}

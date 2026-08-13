@@ -2434,6 +2434,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var needsMicrophoneRefreshAfterRecording = false
     private let dependencies: AppStateDependencies
     var storageLayout: AppStateStorageLayout { dependencies.storageLayout }
+    var noteAssetStore: NoteAssetStore { NoteAssetStore(storageLayout: storageLayout) }
     private var pipelineHistoryStore: PipelineHistoryStore
     private var recordingJournalStore: RecordingJournalStore
     private var cloudTranscriptionJobStore: CloudTranscriptionJobStore
@@ -5306,8 +5307,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     func loadTranscript(from fileName: String) -> String? {
-        let fileURL = storageLayout.transcriptDirectory.appendingPathComponent(fileName)
-        return try? String(contentsOf: fileURL, encoding: .utf8)
+        try? noteAssetStore.loadTranscript(fileName: fileName)
     }
 
     static func fileSizeBytes(for fileURL: URL) -> Int64? {
@@ -7559,8 +7559,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     func storedAudioURL(for item: PipelineHistoryItem) -> URL? {
-        guard let fileName = item.audioFileName else { return nil }
-        return storageLayout.audioDirectory.appendingPathComponent(fileName)
+        noteAssetStore.storedAudioURL(for: item)
     }
 
     @MainActor
