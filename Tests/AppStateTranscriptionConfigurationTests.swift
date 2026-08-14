@@ -7,7 +7,7 @@ import Foundation
 #endif
 struct AppStateTranscriptionConfigurationTests {
     static func main() async throws {
-        testDefaultDependenciesUseExplicitCredentialLayout()
+        try testDefaultAppStateUsesExplicitCredentialLayout()
         try testMakeTranscriptionServiceUsesLocalConfiguration()
         try testMakeTranscriptionServiceMapsEmptyLocalWhisperPathToNil()
         try testMakeTranscriptionServiceDefaultsLegacyMlxWhisperOff()
@@ -159,12 +159,31 @@ struct AppStateTranscriptionConfigurationTests {
         CredentialStore(layout: credentialStorageLayout)
     }
 
-    private static func testDefaultDependenciesUseExplicitCredentialLayout() {
-        let dependencies = transcriptionTestDependencies()
-        precondition(
-            dependencies.credentialStorageLayout.directory
-                == credentialStorageLayout.directory
+    private static func resetCredentialStore() {
+        let directory = credentialStorageLayout.directory
+        guard FileManager.default.fileExists(atPath: directory.path) else {
+            return
+        }
+        do {
+            try FileManager.default.removeItem(at: directory)
+        } catch {
+            preconditionFailure(
+                "Could not reset isolated credential storage: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private static func testDefaultAppStateUsesExplicitCredentialLayout() throws {
+        resetCredentialStore()
+        defer { resetCredentialStore() }
+        try credentialStore.save(
+            "suite-key",
+            account: "groq_api_key"
         )
+
+        let appState = makeAppState()
+
+        precondition(appState.apiKey == "suite-key")
     }
 
     private static func transcriptionTestDependencies(
@@ -3663,9 +3682,7 @@ struct AppStateTranscriptionConfigurationTests {
     }
 
     private static func resetDefaults() {
-        try? FileManager.default.removeItem(
-            at: credentialStorageLayout.directory
-        )
+        resetCredentialStore()
         let defaults = UserDefaults.standard
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("app_state_transcription_test_") {
             defaults.removeObject(forKey: key)

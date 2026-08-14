@@ -178,19 +178,34 @@ struct CredentialStoreTests {
     }
 
     private static func testLegacyCredentialBridgeIsRemoved() throws {
-        let credentialSource = try String(
-            contentsOfFile: "Sources/CredentialStore.swift",
-            encoding: .utf8
+        let sourceDirectory = URL(
+            fileURLWithPath: "Sources",
+            isDirectory: true
         )
+        let sourceURLs = try FileManager.default
+            .contentsOfDirectory(
+                at: sourceDirectory,
+                includingPropertiesForKeys: nil
+            )
+            .filter { $0.pathExtension == "swift" }
+        let allSource = try sourceURLs
+            .map { try String(contentsOf: $0, encoding: .utf8) }
+            .joined(separator: "\n")
         let legacyTypeName = ["App", "Settings", "Storage"].joined()
+        let legacyOverrideName = ["storage", "Directory", "Override"].joined()
+
         try expect(
-            !credentialSource.contains(legacyTypeName),
-            "CredentialStorageLayout no longer consults a global override"
+            !allSource.contains(legacyTypeName),
+            "no production source recreates the legacy credential bridge"
         )
         try expect(
-            !FileManager.default.fileExists(
-                atPath: "Sources/KeychainStorage.swift"
-            ),
+            !allSource.contains(legacyOverrideName),
+            "no production source recreates the global credential override"
+        )
+        try expect(
+            !sourceURLs.contains {
+                $0.lastPathComponent == "KeychainStorage.swift"
+            },
             "the legacy credential bridge source is removed"
         )
         try expect(

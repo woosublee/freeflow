@@ -8,17 +8,14 @@ import Foundation
 struct AppStateAIProcessingBackendTests {
     static func main() async throws {
         let defaultsSnapshot = UserDefaultsSnapshot()
-        try? FileManager.default.removeItem(
-            at: credentialStorageLayout.directory
-        )
+        resetCredentialStore()
         defer {
             defaultsSnapshot.restore()
-            try? FileManager.default.removeItem(
-                at: credentialStorageLayout.directory
-            )
+            resetCredentialStore()
         }
 
-        testDefaultModelDependenciesUseExplicitCredentialLayout()
+        testResetDoesNotCreateCredentialDirectory()
+        try await testDefaultModelAppStateUsesExplicitCredentialLayout()
         await testLegacyModelsMigrateToIndependentCloudChoices()
         await testCorruptedChoicesFallbackAndPersistNormalizedCloudChoices()
         await testWhitespaceCloudIDsFallbackToRememberedOrDefaultModels()
@@ -95,6 +92,20 @@ struct AppStateAIProcessingBackendTests {
 
     private static var credentialStore: CredentialStore {
         CredentialStore(layout: credentialStorageLayout)
+    }
+
+    private static func resetCredentialStore() {
+        let directory = credentialStorageLayout.directory
+        guard FileManager.default.fileExists(atPath: directory.path) else {
+            return
+        }
+        do {
+            try FileManager.default.removeItem(at: directory)
+        } catch {
+            preconditionFailure(
+                "Could not reset isolated credential storage: \(error.localizedDescription)"
+            )
+        }
     }
 
     private static let successfulReadinessProbe: LocalAIServerManager.ReadinessProbe = { request in
@@ -432,9 +443,6 @@ struct AppStateAIProcessingBackendTests {
         dependencies.localAI.startInstall = installHarness.start
         dependencies.localAI.deleteModel = { model in
             deletionHarness.record(modelID: model.id, managerWasStopped: true)
-        }
-        defer {
-            try? credentialStore.delete(account: "groq_api_key")
         }
 
         UserDefaults.standard.set("remembered/post", forKey: "post_processing_model")
@@ -2332,12 +2340,29 @@ struct AppStateAIProcessingBackendTests {
         precondition(deletionHarness.deletedModelIDs == [LocalAIModelCatalog.quality.id])
     }
 
-    private static func testDefaultModelDependenciesUseExplicitCredentialLayout() {
-        let dependencies = modelTestDependencies()
+    private static func testResetDoesNotCreateCredentialDirectory() {
+        resetCredentialStore()
+        resetAIProcessingDefaults()
         precondition(
-            dependencies.credentialStorageLayout.directory
-                == credentialStorageLayout.directory
+            !FileManager.default.fileExists(
+                atPath: credentialStorageLayout.directory.path
+            )
         )
+    }
+
+    private static func testDefaultModelAppStateUsesExplicitCredentialLayout() async throws {
+        resetCredentialStore()
+        defer { resetCredentialStore() }
+        try credentialStore.save(
+            "suite-key",
+            account: "groq_api_key"
+        )
+
+        let appState = await makeRefreshedAppState()
+
+        await MainActor.run {
+            precondition(appState.apiKey == "suite-key")
+        }
     }
 
     private static func modelTestDependencies() -> AppStateDependencies {
@@ -2687,7 +2712,7 @@ struct AppStateAIProcessingBackendTests {
     }
 
     private static func resetAIProcessingDefaults() {
-        try? credentialStore.delete(account: "groq_api_key")
+        resetCredentialStore()
         for key in [
             "post_processing_model",
             "context_model",
