@@ -74,6 +74,7 @@ FULL_SOURCE_APP_STATE_TESTS = \
 	Tests/NoteAssetStoreTests.swift \
 	Tests/CredentialStoreTests.swift \
 	Tests/HistoryArchiveRecoveryWorkflowTests.swift \
+	Tests/TranscriptionRetryWorkflowTests.swift \
 	Tests/AppStateStorageSafetyTests.swift \
 	Tests/AppStateHistoryProtectionSourceTests.swift \
 	Tests/AppStateTranscriptionConfigurationTests.swift \
