@@ -2,6 +2,96 @@ import Combine
 import Darwin
 import Foundation
 
+private final class ControlledRetryCloudUpload: @unchecked Sendable {
+    private let condition = NSCondition()
+    private let transcript: String
+    private var didEnterUpload = false
+    private var didFinishUpload = false
+    private var isReleased = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    init(transcript: String) {
+        self.transcript = transcript
+    }
+
+    func dependencies() -> CloudTranscriptionDependencies {
+        CloudTranscriptionDependencies(
+            encodedUploadCeilingBytes: 20_000_000,
+            upload: { [self] request, _ in
+                defer { markUploadFinished() }
+                await waitForRelease()
+                try Task.checkCancellation()
+                let data = try JSONSerialization.data(withJSONObject: [
+                    "text": transcript,
+                    "language": "en",
+                    "segments": []
+                ])
+                return (
+                    data,
+                    HTTPURLResponse(
+                        url: request.url!,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!
+                )
+            },
+            checkpointStore: InMemoryCloudTranscriptionCheckpointStore(),
+            progress: { _ in },
+            temporaryRoot: FileManager.default.temporaryDirectory
+                .appendingPathComponent(
+                    "quill-controlled-retry-\(UUID().uuidString)",
+                    isDirectory: true
+                ),
+            sleep: { _ in }
+        )
+    }
+
+    var hasEnteredUpload: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return didEnterUpload
+    }
+
+    var hasFinishedUpload: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return didFinishUpload
+    }
+
+    func release() {
+        condition.lock()
+        isReleased = true
+        let continuations = continuations
+        self.continuations.removeAll()
+        condition.unlock()
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
+    private func markUploadFinished() {
+        condition.lock()
+        didFinishUpload = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    private func waitForRelease() async {
+        await withCheckedContinuation { continuation in
+            condition.lock()
+            didEnterUpload = true
+            if isReleased {
+                condition.unlock()
+                continuation.resume()
+                return
+            }
+            continuations.append(continuation)
+            condition.unlock()
+        }
+    }
+}
+
 #if !QUILL_GROUPED_TEST_RUNNER
 @main
 #endif
@@ -70,7 +160,7 @@ struct AppStateTranscriptionConfigurationTests {
         testTimeoutFailureReasonOverridesCommandFallback()
         testStoppedTranscriptionSettingsSnapshotCapturesHistoryMetadata()
         try testAppStateCreatedTranscriptionServicesPassLegacyMlxWhisperToggle()
-        try testRetrySnapshotGatesStoredContextByCurrentToggleAndUsability()
+        try testRetryRequestGatesStoredContextByCurrentToggleAndUsability()
         try testAppStateCapturesNativeWhisperExecutionBeforeImportAndRetryTasks()
         try testNoteBrowserTranscriptionMenuUsesFlatNativeCheckedItems()
         await testAudioImportConfigurationUsesChoiceDerivedBackend()
@@ -136,11 +226,14 @@ struct AppStateTranscriptionConfigurationTests {
         try await testRetryTimeoutPreservesRawTranscriptAndFailedOutcome()
         try await testCreatedAppStateKeepsItsRetryDependencySnapshot()
         try await testRetryTranscriptionFailurePreservesExistingAIOutcome()
+        try await testTranscriptEditInvalidatesActiveRetryAfterDurableSave()
+        try await testDeleteFailureCancelsActiveRetryWithoutResurrection()
+        try testRetryWorkflowMutationRoutes()
         try testRetryUsesCurrentPostProcessingAndAudioOnlyMetadata()
         try testAudioOnlyRetryCreatesTranscriptFileAndPreservesMetadata()
         try testHistoryReconstructionPreservesMeetingSummaryMetadata()
         try testSuccessfulTranscriptionHistoryReceivesSpokenLanguage()
-        try await testResumedRetryPersistsAIProcessingOutcome()
+        try await testResumedRetryPersistsAIOutcomeAndCommandFallbackWhitespace()
         try testHistoryDeletionForgetsSummaryGenerationStateAfterPersistence()
         try testRealtimeConfiguredLanguageUsesOneRequestAndResolutionValue()
         try testAudioOnlyRetryDeletesNewTranscriptFileWhenStale()
@@ -1149,10 +1242,10 @@ struct AppStateTranscriptionConfigurationTests {
             from: "func importAudioFile(_ fileURL: URL, mode: NoteBrowserTranscriptionMode)",
             to: "\n    @MainActor\n    func retryTranscription"
         )
-        let retryBody = sourceBlock(
+        let retryRequest = sourceBlock(
             in: source,
-            from: "func retryTranscription(item: PipelineHistoryItem)",
-            to: "\n    @MainActor\n    private func copyRetryTranscriptToPasteboardIfNeeded"
+            from: "private func transcriptionRetryWorkflowRequest(",
+            to: "\n    @MainActor\n    private func transcriptionRetryWorkflowRuntime"
         )
         let stoppedRecordingBody = sourceBlock(
             in: source,
@@ -1167,8 +1260,16 @@ struct AppStateTranscriptionConfigurationTests {
         precondition(importBody.contains("let transcriptionService = try configuration.makeTranscriptionService("))
         precondition(importBody.contains("cloudExecutionContext: cloudExecutionContext"))
         precondition(source.contains("self.useLegacyMlxWhisper = transcriptionConfiguration.useLegacyMlxWhisper"))
-        precondition(retryBody.contains("snapshot.execution\n                    .makeTranscriptionService("))
-        precondition(retryBody.contains("cloudExecutionContext: snapshot.cloudExecutionContext"))
+        precondition(
+            retryRequest.contains(
+                "useLegacyMlxWhisper: configuration.useLegacyMlxWhisper"
+            )
+        )
+        precondition(
+            retryRequest.contains(
+                "nativeWhisperExecution: nativeWhisperExecutionSnapshot("
+            )
+        )
         precondition(stoppedRecordingBody.contains("let capturedUseLegacyMlxWhisper = useLegacyMlxWhisper"))
         precondition(stoppedRecordingBody.contains("useLegacyMlxWhisper: capturedUseLegacyMlxWhisper,"))
         guard let capture = stoppedRecordingBody.range(
@@ -1195,57 +1296,59 @@ struct AppStateTranscriptionConfigurationTests {
     // contextSummary, gated by the CURRENT context-capture toggle and by
     // whether the stored summary is actually usable (old notes may still
     // carry the stop-time placeholder sentence).
-    private static func testRetrySnapshotGatesStoredContextByCurrentToggleAndUsability() throws {
+    private static func testRetryRequestGatesStoredContextByCurrentToggleAndUsability() throws {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
-        let snapshotBody = sourceBlock(
+        let requestBody = sourceBlock(
             in: source,
-            from: "private func makeRetrySnapshot(for item: PipelineHistoryItem) throws -> RetrySnapshot {",
-            to: "\n    private func makeRetryHistoryItem("
+            from: "private func transcriptionRetryWorkflowRequest(",
+            to: "\n    @MainActor\n    private func transcriptionRetryWorkflowRuntime"
         )
 
         precondition(
-            snapshotBody.contains("disableContextCapture"),
+            requestBody.contains("disableContextCapture"),
             "retry gates stored context injection by the current context toggle"
         )
         precondition(
-            snapshotBody.contains("Self.isPlaceholderContextSummary(item.contextSummary)"),
+            requestBody.contains("Self.isPlaceholderContextSummary(item.contextSummary)"),
             "retry treats a placeholder/empty stored summary as unusable"
         )
         precondition(
-            snapshotBody.contains("QuillUserIssueRecord(code: .contextUnavailable)"),
+            requestBody.contains("QuillUserIssueRecord(code: .contextUnavailable)"),
             "retry attaches the context-unavailable warning when stored context is enabled but unusable"
         )
-        guard let restoredContextRange = snapshotBody.range(of: "restoredContext: AppContext(") else {
-            preconditionFailure("Expected restoredContext construction in makeRetrySnapshot")
+        guard let restoredContextRange = requestBody.range(
+            of: "let restoredContext = AppContext("
+        ) else {
+            preconditionFailure("Expected restoredContext construction in Retry request")
         }
-        guard let restoredContextEnd = snapshotBody.range(
-            of: "restoredIntent:",
-            range: restoredContextRange.upperBound..<snapshotBody.endIndex
+        guard let restoredContextEnd = requestBody.range(
+            of: "let restoredIntent =",
+            range: restoredContextRange.upperBound..<requestBody.endIndex
         ) else {
             preconditionFailure("Expected restoredContext to precede restoredIntent")
         }
         let restoredContextBody = String(
-            snapshotBody[restoredContextRange.lowerBound..<restoredContextEnd.lowerBound]
+            requestBody[restoredContextRange.lowerBound..<restoredContextEnd.lowerBound]
         )
         precondition(
             restoredContextBody.contains("userIssueRecord:"),
             "restoredContext threads a userIssueRecord for the warning banner"
         )
 
-        let retryBody = sourceBlock(
+        let processingBody = sourceBlock(
             in: source,
-            from: "func retryTranscription(item: PipelineHistoryItem)",
-            to: "\n    @MainActor\n    private func copyRetryTranscriptToPasteboardIfNeeded"
+            from: "private static func processRetryTranscription(",
+            to: "\n    func updatePermissionStatus"
         )
-        guard let postProcessingIssueRange = retryBody.range(of: "result.userIssueRecord?.persistedStatus"),
-              let contextIssueRange = retryBody.range(
-                of: "snapshot.restoredContext.userIssueRecord?.persistedStatus",
-                range: postProcessingIssueRange.upperBound..<retryBody.endIndex
-              ),
-              let normalStatusRange = retryBody.range(
-                of: "Self.statusMessage(",
-                range: contextIssueRange.upperBound..<retryBody.endIndex
-              ) else {
+        guard let postProcessingIssueRange = processingBody.range(
+            of: "result.userIssueRecord?.persistedStatus"
+        ), let contextIssueRange = processingBody.range(
+            of: "context.userIssueRecord?.persistedStatus",
+            range: postProcessingIssueRange.upperBound..<processingBody.endIndex
+        ), let normalStatusRange = processingBody.range(
+            of: "statusMessage(",
+            range: contextIssueRange.upperBound..<processingBody.endIndex
+        ) else {
             preconditionFailure("Expected retry status fallback chain: post-processing issue, then context issue, then normal status")
         }
         precondition(postProcessingIssueRange.lowerBound < contextIssueRange.lowerBound)
@@ -1263,10 +1366,10 @@ struct AppStateTranscriptionConfigurationTests {
             from: "func importAudioFile(_ fileURL: URL, choice:",
             to: "\n    @MainActor\n    func retryTranscription"
         )
-        let retrySnapshot = sourceBlock(
+        let retryRequest = sourceBlock(
             in: source,
-            from: "private func makeRetrySnapshot(for item:",
-            to: "\n    private func makeRetryHistoryItem("
+            from: "private func transcriptionRetryWorkflowRequest(",
+            to: "\n    @MainActor\n    private func transcriptionRetryWorkflowRuntime"
         )
 
         guard let importCapture = importBody.range(
@@ -1276,8 +1379,8 @@ struct AppStateTranscriptionConfigurationTests {
         }
         precondition(importCapture.lowerBound < importTask.lowerBound)
         precondition(
-            retrySnapshot.contains(
-                "nativeWhisperExecution: nativeWhisperExecutionSnapshot(\n                        for: retryChoice"
+            retryRequest.contains(
+                "nativeWhisperExecution: nativeWhisperExecutionSnapshot("
             )
         )
     }
@@ -1401,10 +1504,12 @@ struct AppStateTranscriptionConfigurationTests {
 
         guard let retryGuard = retryBody.range(
             of: "guard noteBrowserRetryAvailability(for: item) == .ready else"
-        ), let retrySnapshot = retryBody.range(of: "snapshot = try makeRetrySnapshot(for: item)") else {
+        ), let retryRequest = retryBody.range(
+            of: "let request = try transcriptionRetryWorkflowRequest(for: item)"
+        ) else {
             preconditionFailure("Expected retry readiness guard")
         }
-        precondition(retryGuard.lowerBound < retrySnapshot.lowerBound)
+        precondition(retryGuard.lowerBound < retryRequest.lowerBound)
         precondition(!retryBody.contains("openProviderSettings()"))
     }
 
@@ -3013,6 +3118,16 @@ struct AppStateTranscriptionConfigurationTests {
                 item,
                 rawTranscript: rawTranscript
             )
+            await MainActor.run {
+                precondition(
+                    appState.lastTranscript == rawTranscript,
+                    "Manual fallback delivers the durable transcript through the AppState adapter"
+                )
+                precondition(
+                    appState.noteRetryGeneration(for: originalItem.id) == 1,
+                    "durable Manual fallback advances the warning generation"
+                )
+            }
         }
     }
 
@@ -3170,48 +3285,305 @@ struct AppStateTranscriptionConfigurationTests {
         }
     }
 
-    private static func testRetryUsesCurrentPostProcessingAndAudioOnlyMetadata() throws {
-        let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
-        let retrySnapshot = sourceBlock(
+    private static func testTranscriptEditInvalidatesActiveRetryAfterDurableSave()
+        async throws
+    {
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try FileManager.default.createDirectory(
+                at: environment.storageLayout.audioDirectory,
+                withIntermediateDirectories: true
+            )
+            resetDefaults()
+            let store = PipelineHistoryStore(
+                storeURL: environment.storageLayout.historyStoreURL
+            )
+            let upload = ControlledRetryCloudUpload(
+                transcript: "late provider transcript"
+            )
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = { _ in store }
+            dependencies.makeRetryCloudTranscriptionDependencies = {
+                upload.dependencies()
+            }
+            let fileName = "retry-edit-\(UUID().uuidString).wav"
+            try writeTestWAV(
+                at: environment.storageLayout.audioDirectory
+                    .appendingPathComponent(fileName)
+            )
+            let item = retryHistoryItem(audioFileName: fileName)
+            _ = try store.append(item, maxCount: 10)
+
+            let configuredDependencies = dependencies
+            let appState = await MainActor.run {
+                AppState(dependencies: configuredDependencies)
+            }
+            await MainActor.run {
+                appState.transcriptionAPIKey = "transcription-key"
+                appState.transcriptionAPIURL =
+                    "https://api.example.com/openai/v1"
+                appState.setNoteBrowserTranscriptionChoice(
+                    .apiStandard(modelID: "whisper-large-v3")
+                )
+                appState.disablePostProcessing = true
+                appState.retryTranscription(item: item)
+            }
+            await waitUntil(timeoutNanoseconds: 3_000_000_000) {
+                upload.hasEnteredUpload
+            }
+
+            let editedTranscript = "Edited while Retry was running."
+            await MainActor.run {
+                appState.updateTranscript(
+                    id: item.id,
+                    text: editedTranscript
+                )
+                precondition(
+                    !appState.retryingItemIDs.contains(item.id),
+                    "durable transcript edit clears active Retry state"
+                )
+            }
+            upload.release()
+            await waitUntil(timeoutNanoseconds: 3_000_000_000) {
+                upload.hasFinishedUpload
+            }
+
+            let persisted = try requireHistoryItem(
+                withID: item.id,
+                in: store.loadAllHistory()
+            )
+            precondition(persisted.postProcessedTranscript == editedTranscript)
+            await MainActor.run {
+                precondition(
+                    appState.pipelineHistory.first?.postProcessedTranscript
+                        == editedTranscript,
+                    "late Retry completion does not overwrite a durable edit"
+                )
+            }
+        }
+    }
+
+    private static func testDeleteFailureCancelsActiveRetryWithoutResurrection()
+        async throws
+    {
+        try await AppStateTestStorage.withIsolatedStorage { environment in
+            try FileManager.default.createDirectory(
+                at: environment.storageLayout.audioDirectory,
+                withIntermediateDirectories: true
+            )
+            resetDefaults()
+            var shouldFailSave = false
+            let store = PipelineHistoryStore(
+                storeURL: environment.storageLayout.historyStoreURL,
+                persistentStoreLoader:
+                    PipelineHistoryStore.loadPersistentStoresSynchronously,
+                contextSaver: { context in
+                    if shouldFailSave {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
+                    try context.save()
+                }
+            )
+            let upload = ControlledRetryCloudUpload(
+                transcript: "late deleted-note transcript"
+            )
+            var dependencies = environment.dependencies
+            dependencies.makePipelineHistoryStore = { _ in store }
+            dependencies.makeRetryCloudTranscriptionDependencies = {
+                upload.dependencies()
+            }
+            let fileName = "retry-delete-failure-\(UUID().uuidString).wav"
+            try writeTestWAV(
+                at: environment.storageLayout.audioDirectory
+                    .appendingPathComponent(fileName)
+            )
+            let item = retryHistoryItem(audioFileName: fileName)
+            _ = try store.append(item, maxCount: 10)
+
+            let configuredDependencies = dependencies
+            let appState = await MainActor.run {
+                AppState(dependencies: configuredDependencies)
+            }
+            await MainActor.run {
+                appState.transcriptionAPIKey = "transcription-key"
+                appState.transcriptionAPIURL =
+                    "https://api.example.com/openai/v1"
+                appState.setNoteBrowserTranscriptionChoice(
+                    .apiStandard(modelID: "whisper-large-v3")
+                )
+                appState.disablePostProcessing = true
+                appState.retryTranscription(item: item)
+            }
+            await waitUntil(timeoutNanoseconds: 3_000_000_000) {
+                upload.hasEnteredUpload
+            }
+
+            shouldFailSave = true
+            await MainActor.run {
+                appState.deleteHistoryEntry(id: item.id)
+                precondition(appState.pipelineHistory.map(\.id) == [item.id])
+                precondition(
+                    !appState.retryingItemIDs.contains(item.id),
+                    "failed durable delete still cancels the active Retry"
+                )
+            }
+            upload.release()
+            await waitUntil(timeoutNanoseconds: 3_000_000_000) {
+                upload.hasFinishedUpload
+            }
+
+            await MainActor.run {
+                let current = appState.pipelineHistory[0]
+                precondition(current.rawTranscript == item.rawTranscript)
+                precondition(
+                    current.postProcessedTranscript
+                        == item.postProcessedTranscript,
+                    "late Retry completion cannot resurrect after delete failure"
+                )
+            }
+        }
+    }
+
+    private static func testRetryWorkflowMutationRoutes() throws {
+        let source = try String(
+            contentsOfFile: "Sources/AppState.swift",
+            encoding: .utf8
+        )
+        let update = sourceBlock(
             in: source,
-            from: "private func makeRetrySnapshot(for item: PipelineHistoryItem)",
-            to: "\n    private func makeRetryHistoryItem("
+            from: "func updateTranscript(id: UUID, text: String)",
+            to: "\n    @MainActor\n    func importAudioFile"
+        )
+        let clear = sourceBlock(
+            in: source,
+            from: "func clearPipelineHistory()",
+            to: "\n    @MainActor\n    func deleteHistoryEntry"
+        )
+        let delete = sourceBlock(
+            in: source,
+            from: "func deleteHistoryEntry(id: UUID)",
+            to: "\n    @MainActor\n    func updateHistoryItemTitle"
+        )
+        let cleanup = sourceBlock(
+            in: source,
+            from: "private func cleanupDeletedPipelineHistoryAssets(",
+            to: "\n    static func normalizeInterruptedHistoryItem"
+        )
+        let replacement = sourceBlock(
+            in: source,
+            from: "private func applyHistoryRuntimeReplacement(",
+            to: "\n    @MainActor\n    private func recoveryOperationMessage"
         )
 
-        assert(retrySnapshot.contains("let isAudioOnly = item.machineStatus == .audioOnly"))
-        assert(retrySnapshot.contains("postProcessingEnabled: !disablePostProcessing"))
-        assert(!retrySnapshot.contains("item.usedPostProcessing"))
-        assert(retrySnapshot.contains("isAudioOnly ? customVocabulary : item.customVocabulary"))
-        assert(retrySnapshot.contains("isAudioOnly ? customSystemPrompt : item.customSystemPrompt"))
+        guard let updateSave = update.range(
+            of: "try pipelineHistoryStore.update(updated)"
+        ), let updateInvalidation = update.range(
+            of: "transcriptionRetryWorkflow.invalidate(noteID: id)"
+        ) else {
+            preconditionFailure("Expected transcript-edit Retry invalidation")
+        }
+        precondition(updateSave.lowerBound < updateInvalidation.lowerBound)
+
+        guard let clearCancel = clear.range(
+            of: "transcriptionRetryWorkflow.cancel(noteID: historyID)"
+        ), let clearSave = clear.range(
+            of: "try pipelineHistoryStore.clearAll("
+        ), let clearForget = clear.range(
+            of: "transcriptionRetryWorkflow.forgetAll()"
+        ) else {
+            preconditionFailure("Expected clear Retry cancellation and forget")
+        }
+        precondition(clearCancel.lowerBound < clearSave.lowerBound)
+        precondition(clearSave.lowerBound < clearForget.lowerBound)
+
+        guard let deleteCancel = delete.range(
+            of: "transcriptionRetryWorkflow.cancel(noteID: id)"
+        ), let deleteSave = delete.range(
+            of: "try pipelineHistoryStore.delete("
+        ) else {
+            preconditionFailure("Expected delete Retry cancellation")
+        }
+        precondition(deleteCancel.lowerBound < deleteSave.lowerBound)
+        precondition(
+            cleanup.contains(
+                "transcriptionRetryWorkflow.forget(noteID: assets.historyID)"
+            )
+        )
+        guard let freshCase = replacement.range(of: "case .fresh(let runtime):"),
+              let freshForget = replacement.range(
+                of: "transcriptionRetryWorkflow.forgetAll()",
+                range: freshCase.upperBound..<replacement.endIndex
+              ),
+              let storeReplacement = replacement.range(
+                of: "pipelineHistoryStore = runtime.historyStore",
+                range: freshForget.upperBound..<replacement.endIndex
+              ) else {
+            preconditionFailure("Expected fresh archive runtime Retry reset")
+        }
+        precondition(freshForget.lowerBound < storeReplacement.lowerBound)
+    }
+
+    private static func testRetryUsesCurrentPostProcessingAndAudioOnlyMetadata() throws {
+        let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
+        let retryRequest = sourceBlock(
+            in: source,
+            from: "private func transcriptionRetryWorkflowRequest(",
+            to: "\n    @MainActor\n    private func transcriptionRetryWorkflowRuntime"
+        )
+
+        assert(retryRequest.contains("let isAudioOnly = item.machineStatus == .audioOnly"))
+        assert(retryRequest.contains("postProcessingEnabled: !disablePostProcessing"))
+        assert(!retryRequest.contains("item.usedPostProcessing"))
+        assert(retryRequest.contains("? customVocabulary"))
+        assert(retryRequest.contains(": item.customVocabulary"))
+        assert(retryRequest.contains("? customSystemPrompt"))
+        assert(retryRequest.contains(": item.customSystemPrompt"))
         // Retry no longer injects the stored contextSummary unconditionally:
         // it is gated by the current context toggle and by whether the
         // stored summary is actually usable (see
-        // testRetrySnapshotGatesStoredContextByCurrentToggleAndUsability).
-        assert(retrySnapshot.contains("let usesStoredContext = !isAudioOnly && !disableContextCapture"))
-        assert(retrySnapshot.contains("currentActivity: restoredCurrentActivity"))
+        // testRetryRequestGatesStoredContextByCurrentToggleAndUsability).
+        assert(retryRequest.contains("let usesStoredContext = !isAudioOnly && !disableContextCapture"))
+        assert(
+            retryRequest.contains(
+                "currentActivity: storedContextIsUsable ? item.contextSummary : \"\""
+            )
+        )
+        guard let macroCapture = retryRequest.range(
+            of: "let capturedMacros = voiceMacros"
+        ), let processingStart = retryRequest.range(
+            of: "let processing = TranscriptionRetryProcessingBehavior"
+        ), let requestStart = retryRequest.range(
+            of: "return TranscriptionRetryWorkflowRequest("
+        ) else {
+            preconditionFailure("Expected immutable Retry processing capture")
+        }
+        assert(macroCapture.lowerBound < processingStart.lowerBound)
+        let processingBody = String(
+            retryRequest[processingStart.lowerBound..<requestStart.lowerBound]
+        )
+        assert(!processingBody.contains("self."))
+        assert(processingBody.contains("voiceMacros: capturedMacros"))
     }
 
     private static func testAudioOnlyRetryCreatesTranscriptFileAndPreservesMetadata() throws {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
-        let retry = sourceBlock(
+        let request = sourceBlock(
             in: source,
-            from: "func retryTranscription(item: PipelineHistoryItem)",
-            to: "\n    @MainActor\n    private func copyRetryTranscriptToPasteboardIfNeeded"
+            from: "private func transcriptionRetryWorkflowRequest(",
+            to: "\n    @MainActor\n    private func transcriptionRetryWorkflowRuntime"
         )
-        let history = sourceBlock(
+        let runtime = sourceBlock(
             in: source,
-            from: "private func makeRetryHistoryItem(",
-            to: "\n    func updatePermissionStatus"
+            from: "private func transcriptionRetryWorkflowRuntime()",
+            to: "\n    @MainActor\n    private static func processRetryTranscription"
         )
 
-        assert(retry.contains("let transcriptFileName = snapshot.item.transcriptFileName == nil"))
-        assert(retry.contains("noteAssetStore.saveTranscript("))
-        assert(!retry.contains("saveTranscriptFile("))
-        assert(!retry.contains("let transcriptFileName = snapshot.item.machineStatus == .audioOnly"))
-        assert(history.contains("capturedSelection: snapshot.item.capturedSelection"))
-        assert(history.contains("systemPrompt: snapshot.item.systemPrompt"))
-        assert(history.contains("contextSystemPrompt: snapshot.item.contextSystemPrompt"))
-        assert(history.contains("customTitle: snapshot.item.customTitle"))
+        assert(request.contains("let isAudioOnly = item.machineStatus == .audioOnly"))
+        assert(request.contains("initialItem: item"))
+        assert(request.contains("TranscriptionRetryHistoryMetadata("))
+        assert(runtime.contains("TranscriptionRetryAssetAccess("))
+        assert(runtime.contains("assetStore.saveTranscript("))
+        assert(runtime.contains("assetStore.deleteTranscript(fileName: fileName)"))
+        assert(!runtime.contains("saveTranscriptFile("))
     }
 
     private static func testHistoryReconstructionPreservesMeetingSummaryMetadata() throws {
@@ -3221,11 +3593,6 @@ struct AppStateTranscriptionConfigurationTests {
                 in: source,
                 from: "func updateTranscript(id: UUID, text: String)",
                 to: "\n    @MainActor\n    func importAudioFile"
-            ),
-            sourceBlock(
-                in: source,
-                from: "private func makeRetryHistoryItem(",
-                to: "\n    func updatePermissionStatus"
             ),
             sourceBlock(
                 in: source,
@@ -3245,13 +3612,22 @@ struct AppStateTranscriptionConfigurationTests {
             assert(path.contains("meetingSummaryAttempt:"))
         }
 
-        let retry = paths[1]
-        let finalRecording = paths[3]
-        for path in [retry, finalRecording] {
-            assert(path.contains("let effectiveSpokenLanguage = spokenLanguage ??"))
-            assert(path.contains("spokenLanguageCode: effectiveSpokenLanguage?.languageCode"))
-            assert(path.contains("spokenLanguageResolution: effectiveSpokenLanguage?.source"))
-        }
+        let finalRecording = paths[2]
+        assert(
+            finalRecording.contains(
+                "let effectiveSpokenLanguage = spokenLanguage ??"
+            )
+        )
+        assert(
+            finalRecording.contains(
+                "spokenLanguageCode: effectiveSpokenLanguage?.languageCode"
+            )
+        )
+        assert(
+            finalRecording.contains(
+                "spokenLanguageResolution: effectiveSpokenLanguage?.source"
+            )
+        )
     }
 
     private static func testSuccessfulTranscriptionHistoryReceivesSpokenLanguage() throws {
@@ -3263,13 +3639,8 @@ struct AppStateTranscriptionConfigurationTests {
         )
         let retry = sourceBlock(
             in: source,
-            from: "func retryTranscription(item: PipelineHistoryItem)",
-            to: "\n    @MainActor\n    private func copyRetryTranscriptToPasteboardIfNeeded"
-        )
-        let resumedCloud = sourceBlock(
-            in: source,
-            from: "private func resumeCloudTranscriptionAfterLaunch(",
-            to: "\n    @MainActor\n    private func installCloudTranscriptionTask"
+            from: "private static func processRetryTranscription(",
+            to: "\n    func updatePermissionStatus"
         )
         let stoppedRecording = sourceBlock(
             in: source,
@@ -3281,7 +3652,7 @@ struct AppStateTranscriptionConfigurationTests {
             from: "private func recordPipelineHistoryEntry(",
             to: "\n    private func startRealtimeStreamingIfEnabled"
         )
-        for successfulPath in [importedAudioPath, retry, resumedCloud] {
+        for successfulPath in [importedAudioPath, retry] {
             precondition(successfulPath.contains("spokenLanguage: transcription.spokenLanguage"))
         }
         precondition(stoppedRecording.contains("spokenLanguage: completion.spokenLanguage"))
@@ -3290,19 +3661,26 @@ struct AppStateTranscriptionConfigurationTests {
         precondition(history.contains("spokenLanguageResolution: effectiveSpokenLanguage?.source"))
     }
 
-    private static func testResumedRetryPersistsAIProcessingOutcome() async throws {
+    private static func testResumedRetryPersistsAIOutcomeAndCommandFallbackWhitespace() async throws {
         try await AppStateTestStorage.withIsolatedStorage { environment in
             try FileManager.default.createDirectory(
                 at: environment.storageLayout.audioDirectory,
                 withIntermediateDirectories: true
             )
             resetDefaults()
+            defer { resetDefaults() }
             let rawTranscript = "재실행 후 복구된 원본 전사문"
+            let commandFallback = "  들여쓴 선택 영역\n"
             let historyID = UUID()
+            let commandHistoryID = UUID()
             let fileName = "\(historyID.uuidString).wav"
+            let commandFileName = "\(commandHistoryID.uuidString).wav"
             let audioURL = environment.storageLayout.audioDirectory
                 .appendingPathComponent(fileName)
+            let commandAudioURL = environment.storageLayout.audioDirectory
+                .appendingPathComponent(commandFileName)
             try writeTestWAV(at: audioURL)
+            try writeTestWAV(at: commandAudioURL)
 
             let store = PipelineHistoryStore(storeURL: environment.storageLayout.historyStoreURL)
             var dependencies = environment.dependencies
@@ -3330,7 +3708,30 @@ struct AppStateTranscriptionConfigurationTests {
                 usedPostProcessing: true,
                 transcriptionLanguageCode: "ko"
             )
+            let commandItem = PipelineHistoryItem(
+                intent: .commandManual,
+                selectedText: commandFallback,
+                id: commandHistoryID,
+                timestamp: Date(timeIntervalSince1970: 2),
+                rawTranscript: "",
+                postProcessedTranscript: "",
+                postProcessingPrompt: nil,
+                contextSummary: "",
+                contextScreenshotDataURL: nil,
+                contextScreenshotStatus: "No screenshot",
+                postProcessingStatus: PipelineHistoryItem
+                    .cloudTranscribingStatus,
+                aiProcessingOutcome: "succeeded",
+                debugStatus: "Cloud transcription in progress",
+                customVocabulary: "",
+                audioFileName: commandFileName,
+                usedLocalTranscription: false,
+                usedContextCapture: false,
+                usedPostProcessing: true,
+                transcriptionLanguageCode: "ko"
+            )
             _ = try store.append(originalItem, maxCount: 10)
+            _ = try store.append(commandItem, maxCount: 10)
 
             let jobStore = CloudTranscriptionJobStore(
                 jobsDirectory: environment.storageLayout.cloudTranscriptionJobsDirectory,
@@ -3344,15 +3745,38 @@ struct AppStateTranscriptionConfigurationTests {
                 historyID: historyID,
                 audioURL: audioURL
             )
+            let commandRecord = try makeResumableCloudRecord(
+                historyID: commandHistoryID,
+                audioURL: commandAudioURL
+            )
             let session = jobStore.beginSession(historyID: historyID)
             try jobStore.create(record, session: session)
             jobStore.invalidateSession(historyID: historyID)
+            let commandSession = jobStore.beginSession(
+                historyID: commandHistoryID
+            )
+            try jobStore.create(commandRecord, session: commandSession)
+            jobStore.invalidateSession(historyID: commandHistoryID)
 
             let defaults = UserDefaults.standard
+            defer {
+                defaults.removeObject(forKey: "output_language")
+                defaults.removeObject(forKey: "disable_post_processing")
+                defaults.removeObject(
+                    forKey: "meeting_summary_output_language"
+                )
+                defaults.removeObject(
+                    forKey: "meeting_summary_settings_initialized"
+                )
+            }
             defaults.set(true, forKey: "hasCompletedSetup")
+            defaults.set(true, forKey: "meeting_summary_settings_initialized")
+            defaults.set("", forKey: "meeting_summary_output_language")
             defaults.set(true, forKey: "transcription_enabled")
             defaults.set(false, forKey: "use_local_transcription")
-            defaults.set(false, forKey: "disable_post_processing")
+            defaults.set(true, forKey: "disable_post_processing")
+            defaults.set("English", forKey: "output_language")
+            defaults.set(true, forKey: "press_enter_voice_command_enabled")
             defaults.set("whisper-large-v3", forKey: "transcription_model")
             defaults.set("ko", forKey: "transcription_language")
             AIProcessingBackendChoiceStore.save(
@@ -3397,9 +3821,12 @@ struct AppStateTranscriptionConfigurationTests {
                 AppState(dependencies: configuredDependencies)
             }
             await waitUntil(timeoutNanoseconds: 3_000_000_000) {
-                store.loadAllHistory().contains {
-                    $0.id == historyID
-                        && $0.debugStatus == "Resumed after relaunch"
+                let history = store.loadAllHistory()
+                return [historyID, commandHistoryID].allSatisfy { id in
+                    history.contains {
+                        $0.id == id
+                            && $0.debugStatus == "Resumed after relaunch"
+                    }
                 }
             }
 
@@ -3418,6 +3845,44 @@ struct AppStateTranscriptionConfigurationTests {
                 )
                 precondition(item.debugStatus == "Resumed after relaunch")
             }
+            let commandInMemory = try requireHistoryItem(
+                withID: commandHistoryID,
+                in: appState.pipelineHistory
+            )
+            let commandPersisted = try requireHistoryItem(
+                withID: commandHistoryID,
+                in: store.loadAllHistory()
+            )
+            for item in [commandInMemory, commandPersisted] {
+                precondition(item.rawTranscript == rawTranscript)
+                precondition(
+                    item.postProcessedTranscript == commandFallback,
+                    "startup Resume must preserve whitespace-sensitive command fallback text"
+                )
+                precondition(
+                    item.aiProcessingOutcome == "failed:request-timed-out"
+                )
+                let issue = try QuillUserIssueRecord.decodePersistedStatus(
+                    item.postProcessingStatus
+                )
+                precondition(issue.code == .requestTimedOut)
+                precondition(issue.context.operation == .commandTransform)
+                precondition(item.debugStatus == "Resumed after relaunch")
+            }
+            await MainActor.run {
+                precondition(
+                    appState.lastTranscript.isEmpty,
+                    "startup Resume remains history-only"
+                )
+                precondition(
+                    appState.noteRetryGeneration(for: historyID) == 1,
+                    "durable startup Resume advances warning generation"
+                )
+                precondition(
+                    appState.noteRetryGeneration(for: commandHistoryID) == 1,
+                    "command Resume advances warning generation"
+                )
+            }
         }
     }
 
@@ -3433,10 +3898,10 @@ struct AppStateTranscriptionConfigurationTests {
             from: "func deleteHistoryEntry(id: UUID)",
             to: "\n    @MainActor\n    func updateHistoryItemTitle"
         )
-        let retry = sourceBlock(
+        let retryEvents = sourceBlock(
             in: source,
-            from: "func retryTranscription(item: PipelineHistoryItem)",
-            to: "\n    @MainActor\n    private func copyRetryTranscriptToPasteboardIfNeeded"
+            from: "private func applyTranscriptionRetryWorkflowEvent(",
+            to: "\n    @MainActor\n    private func applyTranscriptionRetryWorkflowState"
         )
 
         assert(clear.contains("try pipelineHistoryStore.clearAll("))
@@ -3457,12 +3922,15 @@ struct AppStateTranscriptionConfigurationTests {
                     of: "meetingSummaryWorkflow.forget(noteID: id)"
                 )!.lowerBound
         )
-        assert(retry.contains("try self.pipelineHistoryStore.update("))
-        assert(retry.contains("requiresDurableStore: true"))
+        assert(retryEvents.contains("case .itemPersisted(let item, let effects):"))
+        assert(retryEvents.contains("incrementNoteRetryGeneration(for: item.id)"))
+        assert(retryEvents.contains("meetingSummaryWorkflow.invalidate(noteID: item.id)"))
         assert(
-            retry.range(of: "requiresDurableStore: true")!.lowerBound
-                < retry.range(
-                    of: "self.meetingSummaryWorkflow.invalidate("
+            retryEvents.range(
+                of: "case .itemPersisted(let item, let effects):"
+            )!.lowerBound
+                < retryEvents.range(
+                    of: "meetingSummaryWorkflow.invalidate(noteID: item.id)"
                 )!.lowerBound
         )
     }
@@ -3501,26 +3969,17 @@ struct AppStateTranscriptionConfigurationTests {
             from: "func retryTranscription(item: PipelineHistoryItem)",
             to: "\n    @MainActor\n    private func copyRetryTranscriptToPasteboardIfNeeded"
         )
-        let staleGuard = sourceBlock(
-            in: retry,
-            from: "guard self.isCurrentCloudTranscriptionExecution(",
-            to: "\n                do {"
-        )
-        let storeUpdate = sourceBlock(
-            in: retry,
-            from: "try self.pipelineHistoryStore.update(updatedItem, requiresDurableStore: true)",
-            to: "\n                if !retrySucceeded"
+        let runtime = sourceBlock(
+            in: source,
+            from: "private func transcriptionRetryWorkflowRuntime()",
+            to: "\n    @MainActor\n    private static func processRetryTranscription"
         )
 
-        for cleanup in [staleGuard, storeUpdate] {
-            assert(cleanup.contains("snapshot.item.transcriptFileName == nil"))
-            assert(cleanup.contains("let transcriptFileName = updatedItem.transcriptFileName"))
-            let compactCleanup = cleanup.filter { !$0.isWhitespace }
-            assert(compactCleanup.contains(
-                "try?noteAssetStore.deleteTranscript(fileName:transcriptFileName)"
-            ))
-            assert(!compactCleanup.contains("Self.deleteTranscriptFile"))
-        }
+        assert(retry.contains("transcriptionRetryWorkflow.startManual("))
+        assert(retry.contains("runtime: transcriptionRetryWorkflowRuntime()"))
+        assert(runtime.contains("deleteTranscript: { fileName in"))
+        assert(runtime.contains("assetStore.deleteTranscript(fileName: fileName)"))
+        assert(!runtime.contains("Self.deleteTranscriptFile"))
     }
 
     private static func makeResumableCloudRecord(

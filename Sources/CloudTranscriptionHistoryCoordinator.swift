@@ -14,7 +14,16 @@ struct CloudTranscriptionStartupReconciler {
         history: [PipelineHistoryItem],
         runtime: CloudTranscriptionExecutionSnapshot
     ) -> CloudTranscriptionStartupReconciliation {
-        let base = store.reconcile(history: history, audioRoot: audioRoot)
+        reconcile(
+            store.reconcile(history: history, audioRoot: audioRoot),
+            runtime: runtime
+        )
+    }
+
+    func reconcile(
+        _ base: CloudTranscriptionReconciliation,
+        runtime: CloudTranscriptionExecutionSnapshot
+    ) -> CloudTranscriptionStartupReconciliation {
         let hasAPIKey = !runtime.apiKey.trimmingCharacters(
             in: .whitespacesAndNewlines
         ).isEmpty
