@@ -206,6 +206,13 @@ enum HistoryWorkflowAdmission {
     }
 }
 
+struct HistoryStartupResult {
+    let activeStore: PipelineHistoryStore
+    let state: HistoryWorkflowState
+    let permitsNormalHistoryStartup: Bool
+    let permitsUnresolvedArchiveStartup: Bool
+}
+
 struct HistoryFreshRuntime {
     let historyStore: PipelineHistoryStore
     let recordingJournalStore: RecordingJournalStore
@@ -334,6 +341,82 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
     ) {
         self.storageLayout = storageLayout
         self.dependencies = dependencies
+    }
+
+    func prepareStartup() -> HistoryStartupResult {
+        Self.prepareDirectory(storageLayout.rootDirectory)
+        Self.prepareDirectory(storageLayout.audioDirectory)
+        Self.prepareDirectory(storageLayout.transcriptDirectory)
+
+        let rollbackSafety = dependencies.rollbackInterruptedTransactions(
+            storageLayout.rootDirectory
+        )
+        if rollbackSafety != .unresolvedInterruptedTransaction {
+            _ = try? dependencies.removeExpiredSnapshots(
+                storageLayout.rootDirectory
+            )
+        }
+        let archiveSafety = dependencies.inspectArchiveSafety(
+            storageLayout.rootDirectory
+        )
+        let activeStore = dependencies.makeHistoryStore(
+            storageLayout.historyStoreURL
+        )
+        if activeStore.availability == .ready {
+            activeStore.verifyHistoryReadable()
+        }
+        let unavailable = activeStore.availability == .unavailable
+            || archiveSafety == .unresolvedInterruptedTransaction
+        state = HistoryWorkflowState(
+            archiveSafety: archiveSafety,
+            archiveActivity: .idle,
+            recoveryOperation: .idle,
+            snapshots: dependencies.listSnapshots(
+                storageLayout.rootDirectory
+            ),
+            inspections: [:],
+            inspectionSnapshotID: nil,
+            importResult: nil,
+            isHistoryUnavailable: unavailable,
+            showsPersistenceWarning: unavailable
+                || activeStore.durability == .inMemory
+        )
+        return HistoryStartupResult(
+            activeStore: activeStore,
+            state: state,
+            permitsNormalHistoryStartup:
+                archiveSafety == .normal
+                    && activeStore.availability == .ready,
+            permitsUnresolvedArchiveStartup:
+                archiveSafety == .unresolvedArchive
+                    && activeStore.availability == .ready
+        )
+    }
+
+    @MainActor
+    func synchronize(activeStore: PipelineHistoryStore) {
+        let unavailable = activeStore.availability == .unavailable
+            || state.archiveSafety == .unresolvedInterruptedTransaction
+        let showsWarning = unavailable
+            || activeStore.durability == .inMemory
+        guard state.isHistoryUnavailable != unavailable
+                || state.showsPersistenceWarning != showsWarning else {
+            return
+        }
+        state.isHistoryUnavailable = unavailable
+        state.showsPersistenceWarning = showsWarning
+        emitState()
+    }
+
+    @discardableResult
+    private static func prepareDirectory(_ directory: URL) -> URL {
+        if !FileManager.default.fileExists(atPath: directory.path) {
+            try? FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+        }
+        return directory
     }
 
     @MainActor

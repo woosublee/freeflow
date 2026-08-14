@@ -2389,6 +2389,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     var credentialStore: CredentialStore {
         CredentialStore(layout: dependencies.credentialStorageLayout)
     }
+    private let historyWorkflow: HistoryArchiveRecoveryWorkflow
     private var pipelineHistoryStore: PipelineHistoryStore
     private var recordingJournalStore: RecordingJournalStore
     private var cloudTranscriptionJobStore: CloudTranscriptionJobStore
@@ -2431,21 +2432,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
             .recommended
         )
         let storageLayout = dependencies.storageLayout
-        let storageRoot = Self.preparedDirectory(storageLayout.rootDirectory)
-        let audioDirectory = Self.preparedDirectory(storageLayout.audioDirectory)
-        _ = Self.preparedDirectory(storageLayout.transcriptDirectory)
-        let recoveredArchiveSafety = HistoryArchiveTransition
-            .rollbackInterruptedTransactions(at: storageRoot)
-        if recoveredArchiveSafety != .unresolvedInterruptedTransaction {
-            _ = try? HistoryRecoveryService(storageRoot: storageRoot)
-                .removeExpiredCompletedSnapshots()
-        }
-        let initialHistoryArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        pipelineHistoryStore = dependencies.makePipelineHistoryStore(
-            storageLayout.historyStoreURL
+        let historyWorkflow = HistoryArchiveRecoveryWorkflow(
+            storageLayout: storageLayout,
+            makeHistoryStore: dependencies.makePipelineHistoryStore
         )
-        let initialHistoryUnavailable = pipelineHistoryStore.availability == .unavailable
-            || initialHistoryArchiveSafety == .unresolvedInterruptedTransaction
+        let historyStartup = historyWorkflow.prepareStartup()
+        self.historyWorkflow = historyWorkflow
+        pipelineHistoryStore = historyStartup.activeStore
+        let audioDirectory = storageLayout.audioDirectory
         recordingJournalStore = RecordingJournalStore(
             audioDirectory: audioDirectory
         )
@@ -2754,11 +2748,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         var savedHistory: [PipelineHistoryItem] = []
         var cloudReconciliation: CloudTranscriptionReconciliation?
 
-        if pipelineHistoryStore.availability == .ready {
-            pipelineHistoryStore.verifyHistoryReadable()
-        }
-        if initialHistoryArchiveSafety == .normal,
-           pipelineHistoryStore.availability == .ready {
+        if historyStartup.permitsNormalHistoryStartup {
             Self.recoverRecordingJournalsBeforeHistoryLoad(
                 recordingJournalStore: recordingJournalStore,
                 historyStore: pipelineHistoryStore,
@@ -2917,8 +2907,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             } else {
                 print("Skipping history startup work because persistent history is unavailable.")
             }
-        } else if initialHistoryArchiveSafety == .unresolvedArchive,
-                  pipelineHistoryStore.availability == .ready {
+        } else if historyStartup.permitsUnresolvedArchiveStartup {
             Self.recoverRecordingJournalsBeforeHistoryLoad(
                 recordingJournalStore: recordingJournalStore,
                 historyStore: pipelineHistoryStore,
@@ -3042,23 +3031,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.soundVolume = soundVolume
         self.voiceMacros = initialMacros
         self.pipelineHistory = savedHistory
-        self.isHistoryUnavailable = initialHistoryUnavailable
-        self.historyArchiveSafety = initialHistoryArchiveSafety
-        self.historyRecoverySnapshots = HistoryRecoveryService(storageRoot: storageRoot).listSnapshots()
-        if initialHistoryUnavailable {
-            self.historyPersistenceWarning = QuillUserIssueRecord(
-                code: .historyPersistenceUnavailable
-            )
-        } else {
-            switch pipelineHistoryStore.durability {
-            case .durable:
-                self.historyPersistenceWarning = nil
-            case .inMemory:
-                self.historyPersistenceWarning = QuillUserIssueRecord(
-                    code: .historyPersistenceUnavailable
-                )
-            }
-        }
+        self.isHistoryUnavailable = historyStartup.state.isHistoryUnavailable
+        self.historyArchiveSafety = historyStartup.state.archiveSafety
+        self.historyRecoverySnapshots = historyStartup.state.snapshots
+        self.historyPersistenceWarning = historyStartup.state.showsPersistenceWarning
+            ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+            : nil
         self.hasAccessibility = initialAccessibility
         self.hasScreenRecordingPermission = initialScreenCapturePermission
         self.launchAtLogin = SMAppService.mainApp.status == .enabled
