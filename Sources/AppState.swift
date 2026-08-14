@@ -3095,6 +3095,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
             UserDefaults.standard.removeObject(forKey: pendingMutedAudioRestoreStorageKey)
         }
 
+        historyWorkflow.onEvent = { [weak self] event in
+            self?.applyHistoryWorkflowEvent(event)
+        }
+
         overlayManager.onStopButtonPressed = { [weak self] in
             DispatchQueue.main.async {
                 self?.handleOverlayStopButtonPressed()
@@ -4906,6 +4910,133 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
+    private func applyHistoryWorkflowEvent(
+        _ event: HistoryWorkflowEvent
+    ) {
+        switch event {
+        case .stateChanged(let state):
+            applyHistoryWorkflowState(state)
+        case .installRuntime(let replacement):
+            applyHistoryRuntimeReplacement(replacement)
+        case .failed(let failure):
+            applyHistoryWorkflowFailure(failure)
+        case .performPostAction(let postAction):
+            if postAction == .openRecovery {
+                openHistoryRecoverySettings()
+            }
+        }
+    }
+
+    @MainActor
+    private func applyHistoryWorkflowState(
+        _ state: HistoryWorkflowState
+    ) {
+        let completedArchive = isHistoryArchiveTransitioning
+            && state.archiveActivity == .idle
+        historyArchiveSafety = state.archiveSafety
+        isHistoryArchiveTransitioning = state.archiveActivity != .idle
+        if completedArchive {
+            historyRecoverySnapshots = state.snapshots
+            historyRecoveryInspections = state.inspections
+            historyRecoveryInspectionSnapshotID = state.inspectionSnapshotID
+            isHistoryRecoveryOperationInProgress =
+                state.recoveryOperation != .idle
+            historyRecoveryOperationMessage = recoveryOperationMessage(
+                for: state.recoveryOperation
+            )
+            historyRecoveryImportResult = state.importResult
+        }
+        isHistoryUnavailable = state.isHistoryUnavailable
+        historyPersistenceWarning = state.showsPersistenceWarning
+            ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+            : nil
+    }
+
+    @MainActor
+    private func applyHistoryRuntimeReplacement(
+        _ replacement: HistoryRuntimeReplacement
+    ) {
+        switch replacement {
+        case .fresh(let runtime):
+            pipelineHistoryStore = runtime.historyStore
+            recordingJournalStore = runtime.recordingJournalStore
+            cloudTranscriptionJobStore = runtime.cloudTranscriptionJobStore
+            pipelineHistory = []
+            retryingItemIDs = []
+            pendingAudioImportJobIDs = []
+            cloudTranscriptionProgressByHistoryID = [:]
+            meetingSummaryGeneratingNoteIDs = []
+            meetingSummaryPendingRevealNoteIDs = []
+            forgetAllWarningBannerState()
+        case .recovered(let historyStore, let history):
+            pipelineHistoryStore = historyStore
+            pipelineHistory = history
+        }
+    }
+
+    @MainActor
+    private func recoveryOperationMessage(
+        for operation: HistoryRecoveryWorkflowOperation
+    ) -> String? {
+        switch operation {
+        case .idle:
+            return nil
+        case .importing:
+            return localizedCatalogString("Recovering history…")
+        case .cancellingScheduledDeletion:
+            return localizedCatalogString("Cancelling scheduled deletion…")
+        case .deletingSnapshot:
+            return localizedCatalogString("Deleting recovery snapshot…")
+        }
+    }
+
+    @MainActor
+    private func applyHistoryWorkflowFailure(
+        _ failure: HistoryWorkflowFailure
+    ) {
+        switch failure {
+        case .historyUnavailable,
+             .archiveTransitionFailed,
+             .freshStoreVerificationFailed:
+            errorMessage = historyUnavailableMessage
+        case .recoveryImportFailed,
+             .activeStoreReopenFailed:
+            errorMessage = localizedCatalogString(
+                "History recovery could not be completed."
+            )
+        case .snapshotOperationFailed:
+            errorMessage = localizedCatalogString(
+                "Recovery snapshot operation could not be completed."
+            )
+        case .inspectionFailed:
+            break
+        }
+    }
+
+    @MainActor
+    private func historyWorkflowAdmissionContext()
+        -> HistoryWorkflowAdmissionContext {
+        HistoryWorkflowAdmissionContext(
+            isRecording: isRecording,
+            isTranscribing: isTranscribing,
+            hasRetryWork: !retryingItemIDs.isEmpty,
+            hasActiveTranscriptionJobs: !activeTranscriptionJobs.isEmpty,
+            hasPendingAudioImports: !pendingAudioImportJobIDs.isEmpty,
+            hasCloudHistoryWork:
+                cloudTranscriptionHistoryCoordinator.hasActiveWork,
+            hasMeetingSummaryWork:
+                !meetingSummaryGeneratingNoteIDs.isEmpty,
+            hasActiveRecordingJournal:
+                activeRecordingID != nil
+                    || activeSegmentedJournalController != nil,
+            hasPendingRecordingFinalization:
+                pendingRecordingJournalFinalizationCount != 0,
+            hasPendingRecordingStart: pendingRecordingStartCount != 0,
+            hasPendingAudioOnlyStops: !pendingAudioOnlyStopIDs.isEmpty
+        )
+    }
+
+    @MainActor
     func openHistoryRecoverySettings() {
         refreshHistoryRecoverySnapshots()
         guard !historyRecoverySnapshots.isEmpty else { return }
@@ -6468,17 +6599,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private func synchronizeHistoryPersistenceState() {
-        let unavailable = pipelineHistoryStore.availability == .unavailable
-            || historyArchiveSafety == .unresolvedInterruptedTransaction
-        let warning: QuillUserIssueRecord?
-        if unavailable {
-            warning = QuillUserIssueRecord(code: .historyPersistenceUnavailable)
-        } else {
-            warning = nil
-        }
-        guard isHistoryUnavailable != unavailable || historyPersistenceWarning != warning else { return }
-        isHistoryUnavailable = unavailable
-        historyPersistenceWarning = warning
+        let state = historyWorkflow.synchronize(
+            activeStore: pipelineHistoryStore
+        )
+        historyArchiveSafety = state.archiveSafety
+        isHistoryUnavailable = state.isHistoryUnavailable
+        historyPersistenceWarning = state.showsPersistenceWarning
+            ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+            : nil
     }
 
     private func loadPipelineHistory() -> [PipelineHistoryItem] {
@@ -6510,107 +6638,23 @@ final class AppState: ObservableObject, @unchecked Sendable {
     func archiveOldHistoryAndStartFresh(
         postAction: HistoryArchivePostAction = .startFresh
     ) -> Bool {
-        synchronizeHistoryPersistenceState()
-        guard isHistoryUnavailable,
-              (historyArchiveSafety == .normal || historyArchiveSafety == .unresolvedArchive),
-              !isHistoryArchiveTransitioning,
-              !isHistoryRecoveryOperationInProgress else {
+        guard !isHistoryRecoveryOperationInProgress else {
             return false
         }
-        guard !isRecording,
-              !isTranscribing,
-              retryingItemIDs.isEmpty,
-              activeTranscriptionJobs.isEmpty,
-              pendingAudioImportJobIDs.isEmpty,
-              !cloudTranscriptionHistoryCoordinator.hasActiveWork,
-              meetingSummaryGeneratingNoteIDs.isEmpty,
-              activeRecordingID == nil,
-              activeSegmentedJournalController == nil,
-              pendingRecordingJournalFinalizationCount == 0,
-              pendingRecordingStartCount == 0,
-              pendingAudioOnlyStopIDs.isEmpty else {
+        synchronizeHistoryPersistenceState()
+        let result = historyWorkflow.requestArchive(
+            context: historyWorkflowAdmissionContext(),
+            currentStore: pipelineHistoryStore,
+            postAction: postAction
+        )
+        if result == .rejected(.applicationBusy) {
             errorMessage = localizedCatalogString(
                 "Finish the current recording or transcription before archiving history."
             )
-            return false
-        }
-
-        do {
-            try pipelineHistoryStore.detachForHistoryArchive()
-        } catch {
+        } else if result == .rejected(.historyUnavailable) {
             errorMessage = historyUnavailableMessage
-            return false
         }
-
-        let storageRoot = dependencies.storageLayout.rootDirectory
-        let makeStore = dependencies.makePipelineHistoryStore
-        let appStateReference = WeakAppStateReference(self)
-        isHistoryArchiveTransitioning = true
-        historyArchiveSafety = .transitioning
-        Task.detached(priority: .userInitiated) {
-            do {
-                let result = try HistoryArchiveTransition(
-                    makeStore: makeStore
-                ).archiveAndCreateFreshHistory(at: storageRoot)
-                await MainActor.run {
-                    appStateReference.value?.completeHistoryArchiveTransition(
-                        result,
-                        storageRoot: storageRoot,
-                        postAction: postAction
-                    )
-                }
-            } catch {
-                await MainActor.run {
-                    appStateReference.value?.completeHistoryArchiveTransitionFailure(
-                        at: storageRoot
-                    )
-                }
-            }
-        }
-        return true
-    }
-
-    @MainActor
-    private func completeHistoryArchiveTransition(
-        _ result: HistoryArchiveTransitionResult,
-        storageRoot: URL,
-        postAction: HistoryArchivePostAction
-    ) {
-        let activeStore = dependencies.makePipelineHistoryStore(
-            dependencies.storageLayout.historyStoreURL
-        )
-        guard activeStore.availability == .ready,
-              activeStore.durability == .durable,
-              activeStore.verifyHistoryReadable() else {
-            completeHistoryArchiveTransitionFailure(at: storageRoot)
-            return
-        }
-        pipelineHistoryStore = activeStore
-        let storageLayout = dependencies.storageLayout
-        _ = Self.preparedDirectory(storageLayout.rootDirectory)
-        let audioDirectory = Self.preparedDirectory(storageLayout.audioDirectory)
-        _ = Self.preparedDirectory(storageLayout.transcriptDirectory)
-        recordingJournalStore = RecordingJournalStore(
-            audioDirectory: audioDirectory
-        )
-        cloudTranscriptionJobStore = CloudTranscriptionJobStore(
-            jobsDirectory: storageLayout.cloudTranscriptionJobsDirectory,
-            temporaryRoot: storageLayout.cloudTranscriptionTemporaryDirectory
-        )
-        pipelineHistory = []
-        retryingItemIDs = []
-        pendingAudioImportJobIDs = []
-        cloudTranscriptionProgressByHistoryID = [:]
-        meetingSummaryGeneratingNoteIDs = []
-        meetingSummaryPendingRevealNoteIDs = []
-        forgetAllWarningBannerState()
-        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        refreshHistoryRecoverySnapshots()
-        isHistoryArchiveTransitioning = false
-        synchronizeHistoryPersistenceState()
-        if postAction == .openRecovery {
-            openHistoryRecoverySettings()
-        }
+        return result == .accepted
     }
 
     @MainActor
@@ -6697,14 +6741,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         synchronizeHistoryPersistenceState()
         invalidateHistoryRecoveryInspectionResults()
         errorMessage = localizedCatalogString("History recovery could not be completed.")
-    }
-
-    @MainActor
-    private func completeHistoryArchiveTransitionFailure(at storageRoot: URL) {
-        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        isHistoryArchiveTransitioning = false
-        synchronizeHistoryPersistenceState()
-        errorMessage = historyUnavailableMessage
     }
 
     @MainActor

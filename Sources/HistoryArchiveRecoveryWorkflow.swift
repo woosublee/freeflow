@@ -436,19 +436,16 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
         return .accepted
     }
 
-    @MainActor
-    func synchronize(activeStore: PipelineHistoryStore) {
-        let unavailable = activeStore.availability == .unavailable
-            || state.archiveSafety == .unresolvedInterruptedTransaction
-        let showsWarning = unavailable
+    @discardableResult
+    func synchronize(
+        activeStore: PipelineHistoryStore
+    ) -> HistoryWorkflowState {
+        state.isHistoryUnavailable =
+            activeStore.availability == .unavailable
+                || state.archiveSafety == .unresolvedInterruptedTransaction
+        state.showsPersistenceWarning = state.isHistoryUnavailable
             || activeStore.durability == .inMemory
-        guard state.isHistoryUnavailable != unavailable
-                || state.showsPersistenceWarning != showsWarning else {
-            return
-        }
-        state.isHistoryUnavailable = unavailable
-        state.showsPersistenceWarning = showsWarning
-        emitState()
+        return state
     }
 
     @MainActor

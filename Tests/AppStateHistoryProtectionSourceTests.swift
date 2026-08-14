@@ -78,32 +78,9 @@ struct AppStateHistoryProtectionSourceTests {
             )
         }
 
-        // Every archive-guard condition can only actually block anything while
-        // history is simultaneously unavailable, since `archiveOldHistoryAndStartFresh`
-        // itself requires `isHistoryUnavailable == true` as its own precondition
-        // — and `requireAvailableHistoryForMutation()` blocks the public entry
-        // points (`importAudioFile`, recording start, retry, meeting-summary
-        // generation) from ever running while history is unavailable. That
-        // combination cannot be constructed through the public API without a
-        // real audio/recording/summary pipeline, so these guards remain a
-        // narrow existence check rather than a simulated race.
-        let archiveGuardRange = try source.range(
-            from: "func archiveOldHistoryAndStartFresh(",
-            to: "@MainActor\n    func clearPipelineHistory()"
-        )
-        let archiveGuardBody = String(source[archiveGuardRange])
-        for requiredGuard in [
-            "pendingAudioImportJobIDs.isEmpty",
-            "!cloudTranscriptionHistoryCoordinator.hasActiveWork",
-            "meetingSummaryGeneratingNoteIDs.isEmpty",
-            "pendingRecordingJournalFinalizationCount == 0",
-            "pendingRecordingStartCount == 0"
-        ] {
-            try expect(
-                archiveGuardBody.contains(requiredGuard),
-                "archive continues to wait for \(requiredGuard) before moving history files"
-            )
-        }
+        // Archive admission now has table-driven behavior coverage in
+        // HistoryArchiveRecoveryWorkflowTests. This remaining source check
+        // protects the separate mid-write audio-import tracking invariant.
         try expect(
             source.contains("pendingAudioImportJobIDs.insert(jobID)")
                 && source.contains("pendingAudioImportJobIDs.remove(jobID)"),
