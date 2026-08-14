@@ -128,8 +128,8 @@ enum HistoryWorkflowAdmission {
         context: HistoryWorkflowAdmissionContext
     ) -> HistoryWorkflowCommandResult {
         guard state.isHistoryUnavailable,
-              state.archiveSafety == .normal
-                || state.archiveSafety == .unresolvedArchive else {
+              (state.archiveSafety == .normal
+                || state.archiveSafety == .unresolvedArchive) else {
             return .rejected(.archiveNotRequired)
         }
         guard state.archiveActivity == .idle else {
@@ -365,6 +365,7 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
     private var inspectionAttemptedIDs = Set<UUID>()
     private var inspectionRevision = 0
     private var inspectionActiveHistory: [PipelineHistoryItem] = []
+    private var snapshotOperationActiveStore: PipelineHistoryStore?
 
     convenience init(
         storageLayout: AppStateStorageLayout,
@@ -591,11 +592,13 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
     @MainActor
     func requestCancelScheduledDeletion(
         snapshotID: UUID,
+        activeStore: PipelineHistoryStore,
         activeHistory: [PipelineHistoryItem],
         shouldRescheduleInspection: Bool
     ) -> HistoryWorkflowCommandResult {
         requestSnapshotOperation(
             .cancelScheduledDeletion(snapshotID),
+            activeStore: activeStore,
             activeHistory: activeHistory,
             shouldRescheduleInspection: shouldRescheduleInspection
         )
@@ -604,11 +607,13 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
     @MainActor
     func requestDeleteSnapshot(
         snapshotID: UUID,
+        activeStore: PipelineHistoryStore,
         activeHistory: [PipelineHistoryItem],
         shouldRescheduleInspection: Bool
     ) -> HistoryWorkflowCommandResult {
         requestSnapshotOperation(
             .delete(snapshotID),
+            activeStore: activeStore,
             activeHistory: activeHistory,
             shouldRescheduleInspection: shouldRescheduleInspection
         )
@@ -672,6 +677,7 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
     @MainActor
     private func requestSnapshotOperation(
         _ operation: HistorySnapshotOperation,
+        activeStore: PipelineHistoryStore,
         activeHistory: [PipelineHistoryItem],
         shouldRescheduleInspection: Bool
     ) -> HistoryWorkflowCommandResult {
@@ -681,6 +687,7 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
             requiresCompletedSnapshot: operation.requiresCompletedSnapshot
         )
         guard admission == .accepted else { return admission }
+        snapshotOperationActiveStore = activeStore
         state.importResult = nil
         state.recoveryOperation = operation.recoveryOperation
         emitState()
@@ -744,7 +751,7 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
                 || result.conflictRecordCount > 0
             ? result
             : nil
-        synchronizeStateForVerifiedStore(reopenedStore)
+        _ = synchronize(activeStore: reopenedStore)
         invalidateInspection(
             activeHistory: history,
             shouldReschedule: shouldRescheduleInspection
@@ -772,7 +779,7 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
                     historyStore: reopenedStore,
                     history: activeHistory
                 )))
-                synchronizeStateForVerifiedStore(reopenedStore)
+                _ = synchronize(activeStore: reopenedStore)
                 failure = requestedFailure
             } else {
                 state.isHistoryUnavailable = true
@@ -796,7 +803,12 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
 
     @MainActor
     private func completeSnapshotOperationSuccess() {
+        let activeStore = snapshotOperationActiveStore
+        snapshotOperationActiveStore = nil
         refreshSafetyAndSnapshots()
+        if let activeStore {
+            _ = synchronize(activeStore: activeStore)
+        }
         state.recoveryOperation = .idle
         emitState()
         startNextInspection()
@@ -807,7 +819,12 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
         activeHistory: [PipelineHistoryItem],
         shouldRescheduleInspection: Bool
     ) {
+        let activeStore = snapshotOperationActiveStore
+        snapshotOperationActiveStore = nil
         refreshSafetyAndSnapshots()
+        if let activeStore {
+            _ = synchronize(activeStore: activeStore)
+        }
         state.recoveryOperation = .idle
         state.importResult = nil
         invalidateInspection(
@@ -859,6 +876,7 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
             }
             return
         }
+        inspectionActiveHistory = []
     }
 
     @MainActor
@@ -929,7 +947,7 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
         emit(.installRuntime(.fresh(runtime)))
         refreshSafetyAndSnapshots()
         state.archiveActivity = .idle
-        synchronizeStateForVerifiedStore(activeStore)
+        _ = synchronize(activeStore: activeStore)
         emitState()
         emit(.performPostAction(postAction))
     }
@@ -938,9 +956,7 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
     private func completeArchiveFailure(
         _ failure: HistoryWorkflowFailure
     ) {
-        state.archiveSafety = dependencies.inspectArchiveSafety(
-            storageLayout.rootDirectory
-        )
+        refreshSafetyAndSnapshots()
         state.archiveActivity = .idle
         state.isHistoryUnavailable = true
         state.showsPersistenceWarning = true
@@ -964,17 +980,6 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
             state.isHistoryUnavailable = true
             state.showsPersistenceWarning = true
         }
-    }
-
-    @MainActor
-    private func synchronizeStateForVerifiedStore(
-        _ activeStore: PipelineHistoryStore
-    ) {
-        state.isHistoryUnavailable =
-            activeStore.availability == .unavailable
-                || state.archiveSafety == .unresolvedInterruptedTransaction
-        state.showsPersistenceWarning = state.isHistoryUnavailable
-            || activeStore.durability == .inMemory
     }
 
     @discardableResult

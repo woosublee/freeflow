@@ -5090,6 +5090,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     func cancelHistoryRecoveryScheduledDeletion(id: UUID) -> Bool {
         historyWorkflow.requestCancelScheduledDeletion(
             snapshotID: id,
+            activeStore: pipelineHistoryStore,
             activeHistory: pipelineHistory,
             shouldRescheduleInspection: selectedSettingsTab == .recovery
         ) == .accepted
@@ -5100,6 +5101,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     func deleteHistoryRecoverySnapshot(id: UUID) -> Bool {
         historyWorkflow.requestDeleteSnapshot(
             snapshotID: id,
+            activeStore: pipelineHistoryStore,
             activeHistory: pipelineHistory,
             shouldRescheduleInspection: selectedSettingsTab == .recovery
         ) == .accepted

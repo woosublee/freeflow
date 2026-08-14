@@ -17,6 +17,7 @@ struct HistoryArchiveRecoveryWorkflowTests {
         try await testArchiveInstallsVerifiedRuntimeBeforeIdleState()
         try await testArchiveVerificationFailureNeverInstallsRuntime()
         try await testArchiveTransitionFailureNeverInstallsRuntime()
+        try await testArchiveFailureRefreshesPublishedSnapshotCatalog()
         try await testArchiveCapturesOriginatingDependencies()
         try await testInspectionQueueRunsReadySnapshotsInOrder()
         try await testInspectionRetryMovesSnapshotToFront()
@@ -29,6 +30,7 @@ struct HistoryArchiveRecoveryWorkflowTests {
         try await testRecoveryReopenFailureNeverInstallsRuntime()
         try testRecoveryImportRejectsInvalidAndReentrantRequests()
         try await testSnapshotCancellationRefreshesCatalog()
+        try await testSnapshotSuccessSynchronizesActiveStoreAvailability()
         try await testSnapshotDeleteRefreshesCatalog()
         try await testSnapshotFailureNeverInstallsRuntime()
         try await testSnapshotOperationsWaitForInspection()
@@ -339,6 +341,31 @@ struct HistoryArchiveRecoveryWorkflowTests {
         }
     }
 
+    private static func testArchiveFailureRefreshesPublishedSnapshotCatalog() async throws {
+        try await withArchiveWorkflow(
+            transitionShouldFail: true,
+            publishesSnapshotBeforeFailure: true
+        ) { workflow, startup, eventRecorder, transitionRecorder in
+            let command = await MainActor.run {
+                workflow.requestArchive(
+                    context: .init(),
+                    currentStore: startup.activeStore,
+                    postAction: .openRecovery
+                )
+            }
+            try expect(command == .accepted, "archive transition begins")
+            try await waitUntil {
+                eventRecorder.failures.contains(.archiveTransitionFailed)
+            }
+            try expect(
+                workflow.state.snapshots.contains(where: {
+                    $0.id == transitionRecorder.publishedSnapshotID
+                }),
+                "archive failure exposes a snapshot published before the error"
+            )
+        }
+    }
+
     private static func testArchiveCapturesOriginatingDependencies() async throws {
         try await withTemporaryDirectoryAsync { root in
             let layout = AppStateStorageLayout(rootDirectory: root)
@@ -640,10 +667,11 @@ struct HistoryArchiveRecoveryWorkflowTests {
     private static func testSnapshotCancellationRefreshesCatalog() async throws {
         try await withRecoveryWorkflow(
             snapshotStatus: .completed
-        ) { workflow, _, recorder, events in
+        ) { workflow, startup, recorder, events in
             let command = await MainActor.run {
                 workflow.requestCancelScheduledDeletion(
                     snapshotID: recorder.snapshotID,
+                    activeStore: startup.activeStore,
                     activeHistory: [],
                     shouldRescheduleInspection: false
                 )
@@ -663,11 +691,41 @@ struct HistoryArchiveRecoveryWorkflowTests {
         }
     }
 
-    private static func testSnapshotDeleteRefreshesCatalog() async throws {
-        try await withRecoveryWorkflow { workflow, _, recorder, events in
+    private static func testSnapshotSuccessSynchronizesActiveStoreAvailability() async throws {
+        try await withRecoveryWorkflow(
+            unavailableStoreCalls: [1]
+        ) { workflow, _, recorder, _ in
+            let readyStore = PipelineHistoryStore(inMemory: true)
+            try expect(
+                workflow.state.isHistoryUnavailable,
+                "fixture begins with stale unavailable workflow state"
+            )
             let command = await MainActor.run {
                 workflow.requestDeleteSnapshot(
                     snapshotID: recorder.snapshotID,
+                    activeStore: readyStore,
+                    activeHistory: [],
+                    shouldRescheduleInspection: false
+                )
+            }
+            try expect(command == .accepted, "snapshot deletion is accepted")
+            try await waitUntil {
+                workflow.state.recoveryOperation == .idle
+                    && workflow.state.snapshots.isEmpty
+            }
+            try expect(
+                !workflow.state.isHistoryUnavailable,
+                "successful snapshot operation synchronizes active store availability"
+            )
+        }
+    }
+
+    private static func testSnapshotDeleteRefreshesCatalog() async throws {
+        try await withRecoveryWorkflow { workflow, startup, recorder, events in
+            let command = await MainActor.run {
+                workflow.requestDeleteSnapshot(
+                    snapshotID: recorder.snapshotID,
+                    activeStore: startup.activeStore,
                     activeHistory: [],
                     shouldRescheduleInspection: false
                 )
@@ -687,10 +745,11 @@ struct HistoryArchiveRecoveryWorkflowTests {
     private static func testSnapshotFailureNeverInstallsRuntime() async throws {
         try await withRecoveryWorkflow(
             deleteShouldFail: true
-        ) { workflow, _, recorder, events in
+        ) { workflow, startup, recorder, events in
             let command = await MainActor.run {
                 workflow.requestDeleteSnapshot(
                     snapshotID: recorder.snapshotID,
+                    activeStore: startup.activeStore,
                     activeHistory: [],
                     shouldRescheduleInspection: false
                 )
@@ -713,7 +772,7 @@ struct HistoryArchiveRecoveryWorkflowTests {
     }
 
     private static func testSnapshotOperationsWaitForInspection() async throws {
-        try await withRecoveryWorkflow { workflow, _, recorder, _ in
+        try await withRecoveryWorkflow { workflow, startup, recorder, _ in
             recorder.blockInspection()
             await MainActor.run {
                 workflow.beginInspection(activeHistory: [])
@@ -722,6 +781,7 @@ struct HistoryArchiveRecoveryWorkflowTests {
             let command = await MainActor.run {
                 workflow.requestDeleteSnapshot(
                     snapshotID: recorder.snapshotID,
+                    activeStore: startup.activeStore,
                     activeHistory: [],
                     shouldRescheduleInspection: false
                 )
@@ -863,6 +923,7 @@ struct HistoryArchiveRecoveryWorkflowTests {
     private static func withArchiveWorkflow(
         freshStoreUnavailable: Bool = false,
         transitionShouldFail: Bool = false,
+        publishesSnapshotBeforeFailure: Bool = false,
         _ operation: (
             HistoryArchiveRecoveryWorkflow,
             HistoryStartupResult,
@@ -875,7 +936,9 @@ struct HistoryArchiveRecoveryWorkflowTests {
                 freshStoreUnavailable: freshStoreUnavailable
             )
             let transitionRecorder = ArchiveTransitionRecorder(
-                shouldFail: transitionShouldFail
+                shouldFail: transitionShouldFail,
+                publishesSnapshotBeforeFailure:
+                    publishesSnapshotBeforeFailure
             )
             let workflow = HistoryArchiveRecoveryWorkflow(
                 storageLayout: AppStateStorageLayout(rootDirectory: root),
@@ -910,7 +973,9 @@ struct HistoryArchiveRecoveryWorkflowTests {
             transitionRecorder.count > 0 ? .unresolvedArchive : .normal
         }
         dependencies.removeExpiredSnapshots = { _ in [] }
-        dependencies.listSnapshots = { _ in [] }
+        dependencies.listSnapshots = { storageRoot in
+            transitionRecorder.snapshots(root: storageRoot)
+        }
         dependencies.archiveAndCreateFreshHistory = { storageRoot, _ in
             try transitionRecorder.perform(root: storageRoot)
         }
@@ -1167,12 +1232,19 @@ private final class ArchiveStoreFactoryRecorder: @unchecked Sendable {
 }
 
 private final class ArchiveTransitionRecorder: @unchecked Sendable {
+    let publishedSnapshotID = UUID()
     private let lock = NSLock()
     private var executionCount = 0
     private let shouldFail: Bool
+    private let publishesSnapshotBeforeFailure: Bool
 
-    init(shouldFail: Bool = false) {
+    init(
+        shouldFail: Bool = false,
+        publishesSnapshotBeforeFailure: Bool = false
+    ) {
         self.shouldFail = shouldFail
+        self.publishesSnapshotBeforeFailure =
+            publishesSnapshotBeforeFailure
     }
 
     var count: Int {
@@ -1183,6 +1255,30 @@ private final class ArchiveTransitionRecorder: @unchecked Sendable {
         lock.withHistoryWorkflowLock {
             executionCount += 1
         }
+    }
+
+    func snapshots(root: URL) -> [HistoryRecoverySnapshotDescriptor] {
+        guard publishesSnapshotBeforeFailure, count > 0 else { return [] }
+        let snapshot = HistoryArchiveSnapshot(
+            schemaVersion: HistoryArchiveSnapshot.currentSchemaVersion,
+            id: publishedSnapshotID,
+            archivedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            components: []
+        )
+        return [
+            HistoryRecoverySnapshotDescriptor(
+                snapshot: snapshot,
+                snapshotURL: root
+                    .appendingPathComponent("Recovery", isDirectory: true)
+                    .appendingPathComponent(
+                        "history-\(publishedSnapshotID.uuidString.lowercased())",
+                        isDirectory: true
+                    ),
+                payloadByteCount: 0,
+                integrity: .ready,
+                state: nil
+            ),
+        ]
     }
 
     func perform(root: URL) throws -> HistoryArchiveTransitionResult {
