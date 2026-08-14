@@ -11,26 +11,13 @@ enum CredentialStoreError: LocalizedError {
     }
 }
 
-/// A focused, instance-owned boundary over the on-disk credential/settings
-/// file `AppSettingsStorage` also reads and writes.
-///
-/// `AppSettingsStorage.storageDirectoryOverride` remains in place as a
-/// transitional bridge: `CredentialStorageLayout.live` still consults it so
-/// the many existing tests in `AppStateTranscriptionConfigurationTests` and
-/// `AppStateAIProcessingBackendTests` that redirect it before constructing a
-/// bare `AppState()` keep working unchanged. Those two suites construct
-/// `AppState()` at roughly 150 call sites relying on that global today;
-/// migrating all of them to inject `credentialStorageLayout` explicitly is a
-/// materially larger, separate effort tracked as a follow-up rather than
-/// folded into this PR. Production code (`AppState`) no longer reads
-/// `AppSettingsStorage` directly — it goes through this type.
+/// The instance-owned location of Quill's credential settings file.
 struct CredentialStorageLayout: Sendable {
     let directory: URL
 
     static var live: CredentialStorageLayout {
         CredentialStorageLayout(
-            directory: AppSettingsStorage.storageDirectoryOverride
-                ?? AppSettingsStorage.defaultStorageDirectory
+            directory: AppName.applicationSupportDirectory
         )
     }
 }

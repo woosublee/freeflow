@@ -16,7 +16,6 @@ enum AppStateTestStorage {
                 "quill-app-state-tests-\(UUID().uuidString)",
                 isDirectory: true
             )
-        let originalSettingsDirectory = AppSettingsStorage.storageDirectoryOverride
         try FileManager.default.createDirectory(
             at: rootDirectory,
             withIntermediateDirectories: true
@@ -26,9 +25,7 @@ enum AppStateTestStorage {
         var dependencies = AppStateDependencies.live
         dependencies.storageLayout = storageLayout
         dependencies.credentialStorageLayout = CredentialStorageLayout(directory: settingsDirectory)
-        AppSettingsStorage.storageDirectoryOverride = settingsDirectory
         defer {
-            AppSettingsStorage.storageDirectoryOverride = originalSettingsDirectory
             try? FileManager.default.removeItem(at: rootDirectory)
         }
         return try await operation(
