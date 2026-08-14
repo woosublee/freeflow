@@ -240,7 +240,8 @@ final class LocalAIModelWorkflow: @unchecked Sendable {
     }
 
     private func startInstallIfPossible(_ model: LocalAIModel) {
-        guard installTasks[model.id] == nil,
+        guard !isTerminationCleanupPending,
+              installTasks[model.id] == nil,
               !cancellingModelIDs.contains(model.id),
               !deletionRequestedModelIDs.contains(model.id),
               isModelAvailable(model) else {

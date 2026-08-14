@@ -28,6 +28,18 @@ struct LocalAIModelWorkflowTests {
         let workflow = makeWorkflow()
         let real = LocalAIModelCatalog.quality
         try expect(workflow.canonicalModel(for: real) == real, "genuine catalog model is canonical")
+
+        let forged = LocalAIModel(
+            id: real.id,
+            displayName: "Forged Model",
+            description: real.description,
+            artifacts: real.artifacts,
+            approximateResidentRAMBytes: real.approximateResidentRAMBytes,
+            minimumPhysicalMemoryBytes: real.minimumPhysicalMemoryBytes,
+            capabilities: real.capabilities,
+            runtime: real.runtime
+        )
+        try expect(workflow.canonicalModel(for: forged) == nil, "forged model with same id is rejected")
     }
 
     @MainActor
