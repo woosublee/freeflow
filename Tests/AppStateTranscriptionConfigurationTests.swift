@@ -8,7 +8,7 @@ private final class ControlledRetryCloudUpload: @unchecked Sendable {
     private var didEnterUpload = false
     private var didFinishUpload = false
     private var isReleased = false
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var continuations: [CheckedContinuation<Void, Never>] = []
 
     init(transcript: String) {
         self.transcript = transcript
@@ -47,38 +47,27 @@ private final class ControlledRetryCloudUpload: @unchecked Sendable {
         )
     }
 
-    func waitUntilUploadStarts() {
+    var hasEnteredUpload: Bool {
         condition.lock()
         defer { condition.unlock() }
-        let deadline = Date().addingTimeInterval(3)
-        while !didEnterUpload {
-            precondition(
-                condition.wait(until: deadline),
-                "Timed out waiting for controlled Retry upload"
-            )
-        }
+        return didEnterUpload
     }
 
-    func waitUntilUploadFinishes() {
+    var hasFinishedUpload: Bool {
         condition.lock()
         defer { condition.unlock() }
-        let deadline = Date().addingTimeInterval(3)
-        while !didFinishUpload {
-            precondition(
-                condition.wait(until: deadline),
-                "Timed out waiting for controlled Retry upload to finish"
-            )
-        }
+        return didFinishUpload
     }
 
     func release() {
         condition.lock()
         isReleased = true
-        let continuation = continuation
-        self.continuation = nil
-        condition.broadcast()
+        let continuations = continuations
+        self.continuations.removeAll()
         condition.unlock()
-        continuation?.resume()
+        for continuation in continuations {
+            continuation.resume()
+        }
     }
 
     private func markUploadFinished() {
@@ -97,8 +86,7 @@ private final class ControlledRetryCloudUpload: @unchecked Sendable {
                 continuation.resume()
                 return
             }
-            self.continuation = continuation
-            condition.broadcast()
+            continuations.append(continuation)
             condition.unlock()
         }
     }
@@ -3339,7 +3327,9 @@ struct AppStateTranscriptionConfigurationTests {
                 appState.disablePostProcessing = true
                 appState.retryTranscription(item: item)
             }
-            upload.waitUntilUploadStarts()
+            await waitUntil(timeoutNanoseconds: 3_000_000_000) {
+                upload.hasEnteredUpload
+            }
 
             let editedTranscript = "Edited while Retry was running."
             await MainActor.run {
@@ -3353,7 +3343,9 @@ struct AppStateTranscriptionConfigurationTests {
                 )
             }
             upload.release()
-            upload.waitUntilUploadFinishes()
+            await waitUntil(timeoutNanoseconds: 3_000_000_000) {
+                upload.hasFinishedUpload
+            }
 
             let persisted = try requireHistoryItem(
                 withID: item.id,
@@ -3421,7 +3413,9 @@ struct AppStateTranscriptionConfigurationTests {
                 appState.disablePostProcessing = true
                 appState.retryTranscription(item: item)
             }
-            upload.waitUntilUploadStarts()
+            await waitUntil(timeoutNanoseconds: 3_000_000_000) {
+                upload.hasEnteredUpload
+            }
 
             shouldFailSave = true
             await MainActor.run {
@@ -3433,7 +3427,9 @@ struct AppStateTranscriptionConfigurationTests {
                 )
             }
             upload.release()
-            upload.waitUntilUploadFinishes()
+            await waitUntil(timeoutNanoseconds: 3_000_000_000) {
+                upload.hasFinishedUpload
+            }
 
             await MainActor.run {
                 let current = appState.pipelineHistory[0]

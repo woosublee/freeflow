@@ -50,6 +50,7 @@ struct TranscriptionRetryWorkflowTests {
         try testStartupFilterPreservesKeylessAndIncompatibleRecordsForRetry()
         try await testStartupResumeUsesPersistedCompletionPolicy()
         try await testStartupResumeUsesStoredContextAndHistoryOnlyDelivery()
+        try await testStartupDuplicateHistoryIDsUseFirstItem()
         try await testStartupSuccessPersistsAndDeletesSidecar()
         try await testStartupFallbackPersistsWithoutSummaryInvalidation()
         try await testStartupProviderFailurePreservesPlaceholderAndSidecar()
@@ -2049,6 +2050,56 @@ struct TranscriptionRetryWorkflowTests {
         )
         let completion = try requireSuccessCompletion(events.outcomes.last)
         try expect(completion.interactiveTranscript == nil, "startup is history only")
+    }
+
+    @MainActor
+    private static func testStartupDuplicateHistoryIDsUseFirstItem()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem(contextSummary: "first stored context")
+        let duplicate = makeHistoryItem(
+            id: item.id,
+            timestamp: item.timestamp,
+            audioFileName: item.audioFileName ?? "recording.wav",
+            contextSummary: "duplicate stored context"
+        )
+        let cloud = try makeCloudState(
+            historyID: item.id,
+            fixture: fixture,
+            configuration: defaultCloudConfiguration(fixture: fixture)
+        )
+        try createStoredRecord(cloud.record, in: fixture.jobStore)
+        let processing = TranscriptionRetryStartupProcessingRecorder(
+            result: processingResult(raw: "resumed raw", final: "resumed final")
+        )
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: immediateDependencies(text: "provider resumed")
+        )
+        workflow.onEvent = events.record
+
+        workflow.resumeAtStartup(
+            input: try makeStartupInput(
+                cloud: cloud,
+                item: item,
+                fixture: fixture,
+                processing: processing,
+                history: [item, duplicate]
+            ),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        try expectEqual(
+            processing.items.first?.contextSummary,
+            "first stored context",
+            "duplicate startup history keeps first item"
+        )
     }
 
     @MainActor

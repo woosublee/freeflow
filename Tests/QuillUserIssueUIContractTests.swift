@@ -243,10 +243,16 @@ struct QuillUserIssueUIContractTests {
             from: "private func applyTranscriptionRetryWorkflowEvent(",
             to: "private func applyTranscriptionRetryWorkflowState("
         )
+        let warningGenerationEffects = block(
+            retryEvents,
+            from: "if effects.advancesWarningGeneration {",
+            to: "if effects.invalidatesMeetingSummary {"
+        )
         try expect(
-            retryEvents.contains("if effects.advancesWarningGeneration")
-                && retryEvents.contains("incrementNoteRetryGeneration(for: item.id)"),
-            "persisted Retry effects invalidate stale dismissals"
+            warningGenerationEffects.contains(
+                "incrementNoteRetryGeneration(for: item.id)"
+            ),
+            "persisted Retry warning effects invalidate stale dismissals"
         )
     }
 

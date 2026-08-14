@@ -331,7 +331,8 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             runtime: input.runtime
         )
         let historyByID = Dictionary(
-            uniqueKeysWithValues: input.history.map { ($0.id, $0) }
+            input.history.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
         )
 
         for record in reconciliation.resumable {
