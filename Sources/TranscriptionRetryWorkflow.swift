@@ -218,7 +218,16 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         runtime.cloud.cancelExistingExecution(noteID)
 
         let token = dependencies.makeAttemptToken()
+        let existingRecord = try? runtime.cloud.jobStore.load(
+            historyID: noteID
+        )
         let session = runtime.cloud.jobStore.beginSession(historyID: noteID)
+        prepareSidecarForAttempt(
+            existingRecord: existingRecord,
+            request: request,
+            store: runtime.cloud.jobStore,
+            session: session
+        )
         let cloudContext = makeCloudContext(
             request: request,
             store: runtime.cloud.jobStore,
@@ -320,6 +329,47 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             depth += 1
         }
         return nil
+    }
+
+    @MainActor
+    private func prepareSidecarForAttempt(
+        existingRecord: CloudTranscriptionJobRecord?,
+        request: TranscriptionRetryWorkflowRequest,
+        store: CloudTranscriptionJobStore,
+        session: CloudTranscriptionJobSession
+    ) {
+        guard case .cloud(let cloud, let completion) = request.execution,
+              let existingRecord,
+              !Self.isCompatibleRetry(
+                existingRecord,
+                cloud: cloud,
+                completion: completion
+              ) else {
+            return
+        }
+        let staleSession = CloudTranscriptionJobSession(
+            historyID: request.sourceIdentity.noteID,
+            token: UUID()
+        )
+        try? store.replaceForIncompatibleRetry(
+            historyID: request.sourceIdentity.noteID,
+            oldSession: staleSession,
+            newSession: session
+        )
+    }
+
+    private static func isCompatibleRetry(
+        _ record: CloudTranscriptionJobRecord,
+        cloud: CloudTranscriptionExecutionSnapshot,
+        completion: TranscriptionCompletionSnapshot
+    ) -> Bool {
+        record.identity.providerID == cloud.providerID
+            && record.identity.model == cloud.model
+            && record.identity.language == cloud.language
+            && record.identity.responseFormat == cloud.responseFormat
+            && record.plan.encodedUploadCeilingBytes
+                == cloud.encodedUploadCeilingBytes
+            && record.completionPolicy == completion.cloudJobPolicy
     }
 
     @MainActor
@@ -491,12 +541,16 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             )
         )
 
+        let cleanupFailureDescription = deleteCompletedSidecarIfPresent(
+            noteID: noteID,
+            token: token
+        )
         let completion = TranscriptionRetryCompletion(
             interactiveTranscript: request.deliveryPolicy == .interactive
                 ? processing.finalTranscript
                 : nil,
             transcriptAssetPersisted: transcriptFileName != nil,
-            cleanupFailureDescription: nil
+            cleanupFailureDescription: cleanupFailureDescription
         )
         let outcome: TranscriptionRetryWorkflowOutcome
         switch processing.disposition {
@@ -506,6 +560,29 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             outcome = .fallback(completion)
         }
         finishAttempt(noteID: noteID, token: token, outcome: outcome)
+    }
+
+    @MainActor
+    private func deleteCompletedSidecarIfPresent(
+        noteID: UUID,
+        token: UUID
+    ) -> String? {
+        guard let attempt = activeAttempts[noteID],
+              attempt.token == token else {
+            return nil
+        }
+        do {
+            guard try attempt.jobStore.load(historyID: noteID) != nil else {
+                return nil
+            }
+            try attempt.jobStore.deleteCompletedJob(
+                historyID: noteID,
+                session: attempt.session
+            )
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     @MainActor
