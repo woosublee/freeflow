@@ -1217,6 +1217,8 @@ private final class ArchiveStoreFactoryRecorder: @unchecked Sendable {
             callCount += 1
             return callCount
         }
+        // The first call creates the unavailable startup state
+        // required for archive admission.
         guard call > 1, !freshStoreUnavailable else {
             return PipelineHistoryStore(
                 storeURL: url,

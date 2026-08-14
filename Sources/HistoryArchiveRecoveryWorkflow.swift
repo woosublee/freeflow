@@ -369,8 +369,8 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
 
     convenience init(
         storageLayout: AppStateStorageLayout,
-        makeHistoryStore: @escaping
-            HistoryArchiveRecoveryWorkflowDependencies.HistoryStoreFactory
+        makeHistoryStore:
+            @escaping HistoryArchiveRecoveryWorkflowDependencies.HistoryStoreFactory
     ) {
         self.init(
             storageLayout: storageLayout,
@@ -662,6 +662,7 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
         return .accepted
     }
 
+    @MainActor
     @discardableResult
     func synchronize(
         activeStore: PipelineHistoryStore

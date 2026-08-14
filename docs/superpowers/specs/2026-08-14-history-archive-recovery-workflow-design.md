@@ -89,7 +89,7 @@ HistoryArchiveRecoveryWorkflow(
 )
 ```
 
-Its initializer may accept optional factories for `HistoryArchiveTransition` and `HistoryRecoveryService` so workflow tests can use deterministic collaborators without adding process-global seams. Production defaults construct the existing concrete types.
+Its instance-owned `HistoryArchiveRecoveryWorkflowDependencies` bundle supplies closure-based archive, recovery, catalog, retention, and store collaborators. Production defaults delegate those closures to the existing `HistoryArchiveTransition` and `HistoryRecoveryService` concrete types, while workflow tests inject deterministic closures without adding process-global seams.
 
 The workflow owns:
 
@@ -305,7 +305,6 @@ Snapshot deletion and retention cancellation continue to require no mutating rec
 `HistoryWorkflowFailure` distinguishes:
 
 - history unavailable,
-- busy/reentrant command rejection,
 - archive transition failure,
 - fresh-store verification failure,
 - recovery inspection failure,
@@ -313,7 +312,9 @@ Snapshot deletion and retention cancellation continue to require no mutating rec
 - active-store reopen failure,
 - and snapshot operation failure.
 
-The failure carries no API key, transcript content, note content, absolute user path, or durable secret. `AppState` maps each category to the same existing localized user message.
+Command admission failures remain separate in `HistoryWorkflowRejection`, including `archiveTransitionInProgress`, `recoveryOperationInProgress`, and `applicationBusy`.
+
+Failures and rejections carry no API key, transcript content, note content, absolute user path, or durable secret. `AppState` maps each category to the same existing localized user message.
 
 ### Store replacement
 

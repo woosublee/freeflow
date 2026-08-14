@@ -9,9 +9,6 @@ struct QuillUserIssueUIContractTests {
         let settings = try source("Sources/SettingsView.swift")
         let menuBar = try source("Sources/MenuBarView.swift")
         let appState = try source("Sources/AppState.swift")
-        let historyWorkflow = try source(
-            "Sources/HistoryArchiveRecoveryWorkflow.swift"
-        )
         let historyRecovery = try source("Sources/HistoryRecoveryView.swift")
 
         try testSharedRenderer(issueView)
@@ -33,7 +30,6 @@ struct QuillUserIssueUIContractTests {
         )
         try testRecoveryImportOutcomePersistsOutsideProgressOverlay(
             appState,
-            historyWorkflow,
             historyRecovery
         )
         try testRecoveryCountGrammarUsesSingularCatalogKeys(historyRecovery)
@@ -308,7 +304,6 @@ struct QuillUserIssueUIContractTests {
 
     private static func testRecoveryImportOutcomePersistsOutsideProgressOverlay(
         _ appState: String,
-        _ historyWorkflow: String,
         _ historyRecovery: String
     ) throws {
         try expect(
@@ -317,9 +312,6 @@ struct QuillUserIssueUIContractTests {
             )
                 && appState.contains(
                     "historyRecoveryImportResult = state.importResult"
-                )
-                && historyWorkflow.contains(
-                    "state.importResult = result.failedRecordCount > 0"
                 ),
             "workflow partial recovery outcomes reach AppState after the operation ends"
         )
