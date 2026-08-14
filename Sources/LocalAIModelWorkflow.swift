@@ -342,6 +342,8 @@ final class LocalAIModelWorkflow: @unchecked Sendable {
             modelState.issue = nil
         } else if wasCancelling {
             modelState.issue = nil
+            // Emit the cancelled outcome for cancellation
+            outcomeToEmit = .cancelled
         } else {
             switch result {
             case .success where status == .ready && isModelAvailable(model):

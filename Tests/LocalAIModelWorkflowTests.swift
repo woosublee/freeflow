@@ -9,6 +9,10 @@ struct LocalAIModelWorkflowTests {
         try testCanonicalModelRejectsForgedModels()
         try testIsModelAvailableReflectsProcessingAvailability()
         try await testStartInstallSucceedsAndEmitsReadyOutcome()
+        try await testCancelInstallEmitsCancelledOutcome()
+        try await testCancelThenRestartResumesAfterCancellationCompletes()
+        try await testDeleteModelDuringInstallCancelsFirst()
+        try await testDeleteModelWhenIdleGoesStraightToDeletion()
         print("LocalAIModelWorkflowTests passed")
     }
 
@@ -97,6 +101,106 @@ struct LocalAIModelWorkflowTests {
             },
             "installOutcome(.readyAndAvailable) fired"
         )
+    }
+
+    @MainActor
+    private static func testCancelInstallEmitsCancelledOutcome() async throws {
+        let model = LocalAIModelCatalog.quality
+        let harness = ControlledLocalAIInstallHarness(finalStatus: .notInstalled)
+        let workflow = LocalAIModelWorkflow(
+            dependencies: harness.dependencies(),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        workflow.markInitialRefreshCompletedForTesting()
+        var events: [LocalAIModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.startInstall(model)
+        try expect(workflow.cancelInstall(model), "cancel reports it found an active task")
+        try expect(workflow.installState(for: model).progress.isCancelled, "progress marked cancelled")
+
+        harness.complete(model: model, with: .failure(.cancelled))
+        try await waitUntil { !workflow.installState(for: model).isInstalling }
+
+        try expect(
+            events.contains {
+                if case .installOutcome(_, .cancelled) = $0 { return true }
+                return false
+            },
+            "installOutcome(.cancelled) fired"
+        )
+    }
+
+    @MainActor
+    private static func testCancelThenRestartResumesAfterCancellationCompletes() async throws {
+        let model = LocalAIModelCatalog.quality
+        let harness = ControlledLocalAIInstallHarness(finalStatus: .notInstalled)
+        let workflow = LocalAIModelWorkflow(
+            dependencies: harness.dependencies(),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        workflow.markInitialRefreshCompletedForTesting()
+
+        workflow.startInstall(model)
+        workflow.cancelInstall(model)
+        // A second startInstall while cancellation is still in flight requests
+        // a restart once the cancelled attempt finishes.
+        workflow.startInstall(model)
+
+        harness.complete(model: model, with: .failure(.cancelled))
+        try await waitUntil { workflow.installState(for: model).isInstalling }
+        try expect(workflow.installState(for: model).isInstalling, "restarted install is in flight")
+    }
+
+    @MainActor
+    private static func testDeleteModelDuringInstallCancelsFirst() async throws {
+        let model = LocalAIModelCatalog.quality
+        let harness = ControlledLocalAIInstallHarness(finalStatus: .notInstalled)
+        let workflow = LocalAIModelWorkflow(
+            dependencies: harness.dependencies(),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        workflow.markInitialRefreshCompletedForTesting()
+
+        workflow.startInstall(model)
+        try expect(workflow.deleteModel(model), "delete accepted during install")
+        try expect(workflow.installState(for: model).progress.isCancelled, "install marked cancelled by delete")
+    }
+
+    @MainActor
+    private static func testDeleteModelWhenIdleGoesStraightToDeletion() async throws {
+        let model = LocalAIModelCatalog.quality
+        var deleteCalled = false
+        let workflow = LocalAIModelWorkflow(
+            dependencies: AppStateLocalAIDependencies(
+                makeServerManager: { LocalAIServerManager(store: LocalAIModelStore()) },
+                idleShutdownSleep: { _ in try await Task.sleep(nanoseconds: UInt64.max) },
+                installStatus: { _ in .notInstalled },
+                startInstall: { _, _, completion in
+                    completion(.failure(.alreadyInProgress))
+                    return LocalAIInstallTask()
+                },
+                progressSchedule: { _, operation in operation() },
+                deleteModel: { _ in deleteCalled = true },
+                deletePartialModel: { _ in },
+                processingAvailability: {
+                    LocalAIProcessingAvailability(
+                        isAppleSilicon: true,
+                        runnerIsExecutable: true,
+                        physicalMemory: 32 * 1024 * 1024 * 1024
+                    )
+                }
+            ),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        var events: [LocalAIModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        try expect(workflow.deleteModel(model), "delete accepted when idle")
+        try await waitUntil { deleteCalled }
+        try await waitUntil {
+            events.contains { if case .deletionOutcome = $0 { return true }; return false }
+        }
     }
 
     @MainActor
