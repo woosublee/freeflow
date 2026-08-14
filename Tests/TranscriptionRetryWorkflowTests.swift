@@ -45,6 +45,16 @@ struct TranscriptionRetryWorkflowTests {
         try await testChangedAudioIdentityRejectsCompletion()
         try await testChangedTimestampRejectsCompletion()
         try await testStaleAttemptDeletesOnlyItsCreatedTranscript()
+        try testStartupFilterResumesOnlyExactCompatibleRecords()
+        try testStartupFilterPreservesKeylessAndIncompatibleRecordsForRetry()
+        try await testStartupResumeUsesPersistedCompletionPolicy()
+        try await testStartupResumeUsesStoredContextAndHistoryOnlyDelivery()
+        try await testStartupSuccessPersistsAndDeletesSidecar()
+        try await testStartupFallbackPersistsWithoutSummaryInvalidation()
+        try await testStartupProviderFailurePreservesPlaceholderAndSidecar()
+        try await testStartupCancellationPreservesPlaceholderAndSidecar()
+        try await testStartupMissingHistoryDoesNotStartProvider()
+        try await testStartupSeedsAndClearsStoredProgress()
         print("TranscriptionRetryWorkflowTests passed")
     }
 
@@ -1772,6 +1782,617 @@ struct TranscriptionRetryWorkflowTests {
         try expect(events.persistedEvents.isEmpty, "stale asset has no item event")
     }
 
+    private static func testStartupFilterResumesOnlyExactCompatibleRecords()
+        throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let runtimeConfiguration = defaultCloudConfiguration(fixture: fixture)
+        let runtimeState = try makeCloudState(
+            historyID: UUID(),
+            fixture: fixture,
+            configuration: runtimeConfiguration
+        )
+        let runtime = try requireCloudRuntime(runtimeState.execution)
+        let firstCompatible = try makeCloudState(
+            historyID: UUID(),
+            fixture: fixture,
+            configuration: runtimeConfiguration
+        ).record
+        let secondCompatible = try makeCloudState(
+            historyID: UUID(),
+            fixture: fixture,
+            configuration: runtimeConfiguration
+        ).record
+        let startupMismatches = TranscriptionRetryCloudMismatch.allCases.filter {
+            $0 != .completionPolicy
+        }
+        let incompatible = try startupMismatches.map {
+            try makeCloudState(
+                historyID: UUID(),
+                fixture: fixture,
+                configuration: $0.applying(
+                    to: runtimeConfiguration,
+                    fixture: fixture
+                )
+            ).record
+        }
+        let oldAlgorithm = replacingAlgorithmVersion(
+            in: try makeCloudState(
+                historyID: UUID(),
+                fixture: fixture,
+                configuration: runtimeConfiguration
+            ).record,
+            with: 0
+        )
+        let terminal = try makeCloudState(
+            historyID: UUID(),
+            fixture: fixture,
+            configuration: runtimeConfiguration
+        ).record
+        let invalidID = UUID()
+        let base = CloudTranscriptionReconciliation(
+            resumable: [firstCompatible, secondCompatible]
+                + incompatible
+                + [oldAlgorithm],
+            waitingForRetry: [terminal],
+            invalid: [invalidID]
+        )
+        let result = CloudTranscriptionStartupReconciler(
+            store: fixture.jobStore,
+            audioRoot: fixture.audioURL.deletingLastPathComponent()
+        ).reconcile(base, runtime: runtime)
+
+        try expectEqual(
+            Set(result.resumable.map(\.historyID)),
+            Set([firstCompatible.historyID, secondCompatible.historyID]),
+            "startup exact compatibility"
+        )
+        try expectEqual(
+            Set(result.waitingForRetry.map(\.historyID)),
+            Set(incompatible.map(\.historyID) + [
+                oldAlgorithm.historyID,
+                terminal.historyID
+            ]),
+            "startup incompatible records wait"
+        )
+        try expectEqual(result.invalid, [invalidID], "startup invalid IDs")
+    }
+
+    private static func testStartupFilterPreservesKeylessAndIncompatibleRecordsForRetry()
+        throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let configuration = defaultCloudConfiguration(fixture: fixture)
+        let record = try makeCloudState(
+            historyID: UUID(),
+            fixture: fixture,
+            configuration: configuration
+        ).record
+        var keylessConfiguration = configuration
+        keylessConfiguration.apiKey = "   "
+        let keylessRuntime = try requireCloudRuntime(
+            makeCloudState(
+                historyID: UUID(),
+                fixture: fixture,
+                configuration: keylessConfiguration
+            ).execution
+        )
+        let invalidID = UUID()
+        let base = CloudTranscriptionReconciliation(
+            resumable: [record],
+            waitingForRetry: [],
+            invalid: [invalidID]
+        )
+        let result = CloudTranscriptionStartupReconciler(
+            store: fixture.jobStore,
+            audioRoot: fixture.audioURL.deletingLastPathComponent()
+        ).reconcile(base, runtime: keylessRuntime)
+
+        try expect(result.resumable.isEmpty, "keyless startup does not resume")
+        try expectEqual(result.waitingForRetry, [record], "keyless record preserved")
+        try expectEqual(result.invalid, [invalidID], "keyless invalid IDs preserved")
+    }
+
+    @MainActor
+    private static func testStartupResumeUsesPersistedCompletionPolicy()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        var configuration = defaultCloudConfiguration(fixture: fixture)
+        configuration.completionPolicy = CloudTranscriptionCompletionPolicy(
+            postProcessingEnabled: false,
+            outputLanguage: "ko",
+            pressEnterCommandEnabled: true
+        )
+        let cloud = try makeCloudState(
+            historyID: item.id,
+            fixture: fixture,
+            configuration: configuration,
+            completedPrefix: ["stored prefix"]
+        )
+        try createStoredRecord(cloud.record, in: fixture.jobStore)
+        let processing = TranscriptionRetryStartupProcessingRecorder(
+            result: processingResult(raw: "resumed raw", final: "resumed final")
+        )
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: immediateDependencies(text: "provider resumed")
+        )
+        workflow.onEvent = events.record
+
+        workflow.resumeAtStartup(
+            input: try makeStartupInput(
+                cloud: cloud,
+                item: item,
+                fixture: fixture,
+                processing: processing
+            ),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        try expectEqual(
+            processing.completions,
+            [
+                TranscriptionCompletionSnapshot(
+                    postProcessingEnabled: false,
+                    outputLanguage: "ko",
+                    pressEnterCommandEnabled: true
+                )
+            ],
+            "startup persisted completion"
+        )
+    }
+
+    @MainActor
+    private static func testStartupResumeUsesStoredContextAndHistoryOnlyDelivery()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem(contextSummary: "stored startup context")
+        let cloud = try makeCloudState(
+            historyID: item.id,
+            fixture: fixture,
+            configuration: defaultCloudConfiguration(fixture: fixture)
+        )
+        try createStoredRecord(cloud.record, in: fixture.jobStore)
+        let processing = TranscriptionRetryStartupProcessingRecorder(
+            result: processingResult(raw: "resumed raw", final: "resumed final")
+        )
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: immediateDependencies(text: "provider resumed")
+        )
+        workflow.onEvent = events.record
+
+        workflow.resumeAtStartup(
+            input: try makeStartupInput(
+                cloud: cloud,
+                item: item,
+                fixture: fixture,
+                processing: processing
+            ),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        try expectEqual(
+            processing.items.first?.contextSummary,
+            "stored startup context",
+            "startup stored context"
+        )
+        let completion = try requireSuccessCompletion(events.outcomes.last)
+        try expect(completion.interactiveTranscript == nil, "startup is history only")
+    }
+
+    @MainActor
+    private static func testStartupSuccessPersistsAndDeletesSidecar()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let cloud = try makeCloudState(
+            historyID: item.id,
+            fixture: fixture,
+            configuration: defaultCloudConfiguration(fixture: fixture),
+            completedPrefix: ["stored prefix"]
+        )
+        try createStoredRecord(cloud.record, in: fixture.jobStore)
+        let processing = TranscriptionRetryStartupProcessingRecorder(
+            result: processingResult(raw: "resumed raw", final: "resumed final")
+        )
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let dependencyCount = TranscriptionRetryCounter()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: immediateDependencies(text: "provider resumed")
+        )
+        workflow.onEvent = events.record
+
+        workflow.resumeAtStartup(
+            input: try makeStartupInput(
+                cloud: cloud,
+                item: item,
+                fixture: fixture,
+                processing: processing,
+                dependencyCount: dependencyCount
+            ),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        try expectEqual(
+            history.persistedItems.last?.postProcessedTranscript,
+            "resumed final",
+            "startup persisted transcript"
+        )
+        try expectEqual(
+            events.persistedEvents.last?.effects,
+            TranscriptionRetryPersistedEffects(
+                advancesWarningGeneration: true,
+                invalidatesMeetingSummary: false
+            ),
+            "startup persisted effects"
+        )
+        try expectEqual(dependencyCount.value(), 1, "one startup dependency value")
+        let remainingSidecar = try fixture.jobStore.load(historyID: item.id)
+        try expect(
+            remainingSidecar == nil,
+            "startup success deletes sidecar"
+        )
+    }
+
+    @MainActor
+    private static func testStartupFallbackPersistsWithoutSummaryInvalidation()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let cloud = try makeCloudState(
+            historyID: item.id,
+            fixture: fixture,
+            configuration: defaultCloudConfiguration(fixture: fixture)
+        )
+        try createStoredRecord(cloud.record, in: fixture.jobStore)
+        let processing = TranscriptionRetryStartupProcessingRecorder(
+            result: processingResult(
+                raw: "startup fallback",
+                final: "startup fallback",
+                disposition: .fallback,
+                outcome: .failed(reason: "request-timed-out")
+            )
+        )
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: immediateDependencies(text: "provider resumed")
+        )
+        workflow.onEvent = events.record
+
+        workflow.resumeAtStartup(
+            input: try makeStartupInput(
+                cloud: cloud,
+                item: item,
+                fixture: fixture,
+                processing: processing
+            ),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        guard case .fallback(let completion)? = events.outcomes.last else {
+            throw TranscriptionRetryWorkflowTestFailure("startup fallback outcome")
+        }
+        try expect(completion.interactiveTranscript == nil, "startup fallback history only")
+        try expectEqual(
+            events.persistedEvents.last?.effects.invalidatesMeetingSummary,
+            false,
+            "startup fallback Summary effect"
+        )
+    }
+
+    @MainActor
+    private static func testStartupProviderFailurePreservesPlaceholderAndSidecar()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem(
+            rawTranscript: "",
+            postProcessedTranscript: ""
+        )
+        let cloud = try makeCloudState(
+            historyID: item.id,
+            fixture: fixture,
+            configuration: defaultCloudConfiguration(fixture: fixture),
+            completedPrefix: ["stored prefix"]
+        )
+        try createStoredRecord(cloud.record, in: fixture.jobStore)
+        let processing = TranscriptionRetryStartupProcessingRecorder(
+            result: processingResult()
+        )
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: failingDependencies(
+                TranscriptionRetryInjectedError.provider
+            )
+        )
+        workflow.onEvent = events.record
+
+        workflow.resumeAtStartup(
+            input: try makeStartupInput(
+                cloud: cloud,
+                item: item,
+                fixture: fixture,
+                processing: processing
+            ),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        guard case .failed(let failure)? = events.outcomes.last else {
+            throw TranscriptionRetryWorkflowTestFailure("startup failure outcome")
+        }
+        try expect(!failure.historyPersisted, "startup failure not persisted")
+        try expect(history.persistedItems.isEmpty, "startup placeholder unchanged")
+        try expectEqual(
+            try fixture.jobStore.load(historyID: item.id),
+            cloud.record,
+            "startup failure sidecar"
+        )
+    }
+
+    @MainActor
+    private static func testStartupCancellationPreservesPlaceholderAndSidecar()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem(rawTranscript: "", postProcessedTranscript: "")
+        let cloud = try makeCloudState(
+            historyID: item.id,
+            fixture: fixture,
+            configuration: defaultCloudConfiguration(fixture: fixture),
+            completedPrefix: ["stored prefix"]
+        )
+        try createStoredRecord(cloud.record, in: fixture.jobStore)
+        let processing = TranscriptionRetryStartupProcessingRecorder(
+            result: processingResult()
+        )
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let gate = TranscriptionRetryControlledTranscriber()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: TranscriptionRetryWorkflowDependencies(
+                transcribe: { _, _, _, context in
+                    try await gate.run(
+                        context: context,
+                        emitsProgress: false
+                    )
+                },
+                makeAttemptToken: { UUID() }
+            )
+        )
+        workflow.onEvent = events.record
+
+        workflow.resumeAtStartup(
+            input: try makeStartupInput(
+                cloud: cloud,
+                item: item,
+                fixture: fixture,
+                processing: processing
+            ),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+        await gate.waitUntilStarted()
+        workflow.cancel(noteID: item.id)
+        await gate.succeed(transcriptionResult(text: "late startup"))
+        await drainTasks()
+
+        try expect(history.persistedItems.isEmpty, "startup cancellation not persisted")
+        try expectEqual(
+            try fixture.jobStore.load(historyID: item.id),
+            cloud.record,
+            "startup cancellation sidecar"
+        )
+    }
+
+    @MainActor
+    private static func testStartupMissingHistoryDoesNotStartProvider()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let cloud = try makeCloudState(
+            historyID: item.id,
+            fixture: fixture,
+            configuration: defaultCloudConfiguration(fixture: fixture)
+        )
+        let processing = TranscriptionRetryStartupProcessingRecorder(
+            result: processingResult()
+        )
+        let invocation = TranscriptionRetryInvocationRecorder()
+        let missingHistory = TranscriptionRetryHistoryRecorder(item: nil)
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: TranscriptionRetryWorkflowDependencies(
+                transcribe: { execution, _, dependencies, _ in
+                    await invocation.record(
+                        execution: execution,
+                        dependencies: dependencies
+                    )
+                    return transcriptionResult(text: "must not start")
+                },
+                makeAttemptToken: { UUID() }
+            )
+        )
+
+        workflow.resumeAtStartup(
+            input: try makeStartupInput(
+                cloud: cloud,
+                item: item,
+                fixture: fixture,
+                processing: processing,
+                history: []
+            ),
+            runtime: fixture.runtime(
+                history: missingHistory.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+        await drainTasks()
+
+        try expectEqual(await invocation.count(), 0, "missing startup provider")
+        try expectEqual(workflow.state, .initial, "missing startup state")
+    }
+
+    @MainActor
+    private static func testStartupSeedsAndClearsStoredProgress()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let cloud = try makeCloudState(
+            historyID: item.id,
+            fixture: fixture,
+            configuration: defaultCloudConfiguration(fixture: fixture),
+            completedPrefix: ["stored prefix"]
+        )
+        try createStoredRecord(cloud.record, in: fixture.jobStore)
+        let processing = TranscriptionRetryStartupProcessingRecorder(
+            result: processingResult(raw: "resumed", final: "resumed")
+        )
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let gate = TranscriptionRetryControlledTranscriber()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: TranscriptionRetryWorkflowDependencies(
+                transcribe: { _, _, _, context in
+                    try await gate.run(
+                        context: context,
+                        emitsProgress: false
+                    )
+                },
+                makeAttemptToken: { UUID() }
+            )
+        )
+        workflow.onEvent = events.record
+
+        workflow.resumeAtStartup(
+            input: try makeStartupInput(
+                cloud: cloud,
+                item: item,
+                fixture: fixture,
+                processing: processing
+            ),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+        await gate.waitUntilStarted()
+        try await waitUntil {
+            workflow.state.progressByNoteID[item.id] != nil
+        }
+        try expectEqual(
+            workflow.state.progressByNoteID[item.id],
+            CloudTranscriptionDisplayProgress(
+                completedChunkCount: cloud.record.completedChunks.count,
+                totalChunkCount: cloud.record.plan.chunks.count,
+                activeAttempt: nil
+            ),
+            "startup seeded progress"
+        )
+        await gate.succeed(transcriptionResult(text: "resumed"))
+        try await waitUntil { events.outcomes.count == 1 }
+        try expect(workflow.state.progressByNoteID[item.id] == nil, "startup progress cleared")
+    }
+
+    @MainActor
+    private static func makeStartupInput(
+        cloud: TranscriptionRetryCloudTestState,
+        item: PipelineHistoryItem,
+        fixture: TranscriptionRetryFixture,
+        processing: TranscriptionRetryStartupProcessingRecorder,
+        dependencyCount: TranscriptionRetryCounter = TranscriptionRetryCounter(),
+        history: [PipelineHistoryItem]? = nil
+    ) throws -> TranscriptionRetryStartupInput {
+        TranscriptionRetryStartupInput(
+            reconciliation: CloudTranscriptionReconciliation(
+                resumable: [cloud.record],
+                waitingForRetry: [],
+                invalid: []
+            ),
+            runtime: try requireCloudRuntime(cloud.execution),
+            history: history ?? [item],
+            audioDirectory: fixture.audioURL.deletingLastPathComponent(),
+            cloudDependenciesFactory: {
+                dependencyCount.increment()
+                return makeCloudDependencies(
+                    temporaryRoot: fixture.temporaryRoot
+                )
+            },
+            makeProcessingBehavior: { item, completion in
+                processing.behavior(item: item, completion: completion)
+            }
+        )
+    }
+
+    private static func requireCloudRuntime(
+        _ execution: TranscriptionExecutionSnapshot
+    ) throws -> CloudTranscriptionExecutionSnapshot {
+        guard case .cloud(let runtime, _) = execution else {
+            throw TranscriptionRetryWorkflowTestFailure("expected cloud execution")
+        }
+        return runtime
+    }
+
+    private static func replacingAlgorithmVersion(
+        in record: CloudTranscriptionJobRecord,
+        with algorithmVersion: Int
+    ) -> CloudTranscriptionJobRecord {
+        let plan = CloudTranscriptionChunkPlan(
+            algorithmVersion: algorithmVersion,
+            encodedUploadCeilingBytes: record.plan.encodedUploadCeilingBytes,
+            sourceFrameCount: record.plan.sourceFrameCount,
+            chunks: record.plan.chunks,
+            planID: record.plan.planID
+        )
+        return CloudTranscriptionJobRecord(
+            schemaVersion: record.schemaVersion,
+            historyID: record.historyID,
+            createdAt: record.createdAt,
+            updatedAt: record.updatedAt,
+            phase: record.phase,
+            identity: record.identity,
+            plan: plan,
+            completedChunks: record.completedChunks,
+            engineLanguageCode: record.engineLanguageCode,
+            firstIncompleteChunkIndex: record.firstIncompleteChunkIndex,
+            lastFailure: record.lastFailure,
+            completionPolicy: record.completionPolicy
+        )
+    }
+
     @MainActor
     private static func drainTasks() async {
         for _ in 0..<5 {
@@ -2128,6 +2749,7 @@ struct TranscriptionRetryWorkflowTests {
         audioFileName: String = "recording.wav",
         rawTranscript: String = "old raw",
         postProcessedTranscript: String = "old final",
+        contextSummary: String = "stored context",
         aiProcessingOutcome: String = "succeeded",
         transcriptFileName: String? = nil
     ) -> PipelineHistoryItem {
@@ -2137,7 +2759,7 @@ struct TranscriptionRetryWorkflowTests {
             rawTranscript: rawTranscript,
             postProcessedTranscript: postProcessedTranscript,
             postProcessingPrompt: "old prompt",
-            contextSummary: "stored context",
+            contextSummary: contextSummary,
             contextScreenshotDataURL: nil,
             contextScreenshotStatus: "No screenshot",
             postProcessingStatus: "Done",
@@ -2382,6 +3004,43 @@ private final class TranscriptionRetryAssetRecorder: @unchecked Sendable {
 }
 
 @MainActor
+private final class TranscriptionRetryStartupProcessingRecorder {
+    private let result: TranscriptionRetryProcessingResult
+    private(set) var items: [PipelineHistoryItem] = []
+    private(set) var completions: [TranscriptionCompletionSnapshot] = []
+
+    init(result: TranscriptionRetryProcessingResult) {
+        self.result = result
+    }
+
+    func behavior(
+        item: PipelineHistoryItem,
+        completion: TranscriptionCompletionSnapshot
+    ) -> TranscriptionRetryProcessingBehavior {
+        items.append(item)
+        completions.append(completion)
+        return TranscriptionRetryProcessingBehavior { _ in self.result }
+    }
+}
+
+private final class TranscriptionRetryCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    func increment() {
+        lock.lock()
+        defer { lock.unlock() }
+        storage += 1
+    }
+
+    func value() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
+@MainActor
 private final class TranscriptionRetryEventRecorder {
     private(set) var states: [TranscriptionRetryWorkflowState] = []
     private(set) var persistedEvents: [(
@@ -2527,7 +3186,7 @@ private struct TranscriptionRetryCloudTestState: Sendable {
     let execution: TranscriptionExecutionSnapshot
 }
 
-private enum TranscriptionRetryCloudMismatch: CaseIterable, Sendable {
+private enum TranscriptionRetryCloudMismatch: CaseIterable, Equatable, Sendable {
     case provider
     case model
     case language
@@ -2580,9 +3239,12 @@ private actor TranscriptionRetryControlledTranscriber {
     private var startedWaiters: [CheckedContinuation<Void, Never>] = []
 
     func run(
-        context: CloudTranscriptionExecutionContext?
+        context: CloudTranscriptionExecutionContext?,
+        emitsProgress: Bool = true
     ) async throws -> TranscriptionResult {
-        context?.progress(.uploading(index: 1, total: 3, attempt: 2))
+        if emitsProgress {
+            context?.progress(.uploading(index: 1, total: 3, attempt: 2))
+        }
         started = true
         let waiters = startedWaiters
         startedWaiters.removeAll()
@@ -2738,7 +3400,7 @@ private enum TranscriptionRetrySourceChange: Equatable, Sendable {
     }
 }
 
-private struct TranscriptionRetryFixture {
+private struct TranscriptionRetryFixture: Sendable {
     let root: URL
     let audioURL: URL
     let jobsDirectory: URL

@@ -201,6 +201,24 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         request: TranscriptionRetryWorkflowRequest,
         runtime: TranscriptionRetryWorkflowRuntime
     ) -> Bool {
+        guard request.origin == .manual,
+              request.deliveryPolicy == .interactive else {
+            return false
+        }
+        return start(
+            request: request,
+            runtime: runtime,
+            seededProgress: nil
+        )
+    }
+
+    @MainActor
+    @discardableResult
+    private func start(
+        request: TranscriptionRetryWorkflowRequest,
+        runtime: TranscriptionRetryWorkflowRuntime,
+        seededProgress: CloudTranscriptionDisplayProgress?
+    ) -> Bool {
         let noteID = request.sourceIdentity.noteID
         guard runtime.history.durability() == .durable else {
             onEvent?(
@@ -246,7 +264,11 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             session: session
         )
         state.retryingNoteIDs.insert(noteID)
-        state.progressByNoteID.removeValue(forKey: noteID)
+        if let seededProgress {
+            state.progressByNoteID[noteID] = seededProgress
+        } else {
+            state.progressByNoteID.removeValue(forKey: noteID)
+        }
         emitState()
 
         let dependencies = dependencies
@@ -294,6 +316,98 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         }
         activeAttempts[noteID]?.task = task
         return true
+    }
+
+    @MainActor
+    func resumeAtStartup(
+        input: TranscriptionRetryStartupInput,
+        runtime: TranscriptionRetryWorkflowRuntime
+    ) {
+        let reconciliation = CloudTranscriptionStartupReconciler(
+            store: runtime.cloud.jobStore,
+            audioRoot: input.audioDirectory
+        ).reconcile(
+            input.reconciliation,
+            runtime: input.runtime
+        )
+        let historyByID = Dictionary(
+            uniqueKeysWithValues: input.history.map { ($0.id, $0) }
+        )
+
+        for record in reconciliation.resumable {
+            guard let item = historyByID[record.historyID],
+                  let audioFileName = item.audioFileName,
+                  audioFileName == record.identity.source.audioFileName,
+                  Self.isSafeAudioBasename(audioFileName) else {
+                continue
+            }
+            let completion = TranscriptionCompletionSnapshot(
+                postProcessingEnabled:
+                    record.completionPolicy.postProcessingEnabled,
+                outputLanguage: record.completionPolicy.outputLanguage,
+                pressEnterCommandEnabled:
+                    record.completionPolicy.pressEnterCommandEnabled
+            )
+            let processing = input.makeProcessingBehavior(
+                item,
+                completion
+            )
+            let request = TranscriptionRetryWorkflowRequest(
+                origin: .startupResume,
+                deliveryPolicy: .historyOnly,
+                initialItem: item,
+                sourceIdentity: TranscriptionRetrySourceIdentity(
+                    noteID: item.id,
+                    noteTimestamp: item.timestamp,
+                    audioFileName: audioFileName
+                ),
+                audioURL: input.audioDirectory.appendingPathComponent(
+                    audioFileName,
+                    isDirectory: false
+                ),
+                execution: .cloud(input.runtime, completion),
+                cloudDependencies: input.cloudDependenciesFactory(),
+                processing: processing,
+                historyMetadata: TranscriptionRetryHistoryMetadata(
+                    customVocabulary: item.customVocabulary,
+                    customSystemPrompt: item.customSystemPrompt,
+                    usedLocalTranscription: false,
+                    usedPostProcessing: completion.postProcessingEnabled,
+                    transcriptionLanguageCode:
+                        item.transcriptionLanguageCode,
+                    localTranscriptionModelID:
+                        item.localTranscriptionModelID,
+                    successDebugStatus: "Resumed after relaunch"
+                ),
+                failureContext: TranscriptionRetryFailureContext(
+                    fallbackCode: .providerConfigurationInvalid,
+                    providerHost: input.runtime.baseURL.host,
+                    modelID: input.runtime.model,
+                    localBackend: nil
+                )
+            )
+            _ = start(
+                request: request,
+                runtime: runtime,
+                seededProgress: CloudTranscriptionDisplayProgress(
+                    completedChunkCount: record.completedChunks.count,
+                    totalChunkCount: record.plan.chunks.count,
+                    activeAttempt: nil
+                )
+            )
+        }
+    }
+
+    private static func isSafeAudioBasename(_ value: String) -> Bool {
+        guard !value.isEmpty,
+              value != ".",
+              value != "..",
+              !value.hasPrefix("/"),
+              !value.contains("/"),
+              !value.contains("\\") else {
+            return false
+        }
+        return URL(fileURLWithPath: value).lastPathComponent == value
     }
 
     static func classifyFailure(
