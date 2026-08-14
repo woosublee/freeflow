@@ -11,11 +11,6 @@ import os.log
 private let recordingLog = OSLog(subsystem: "com.woosublee.quill", category: "Recording")
 private let calendarLog = OSLog(subsystem: "com.woosublee.quill", category: "Calendar")
 
-enum HistoryArchivePostAction: Sendable {
-    case startFresh
-    case openRecovery
-}
-
 extension AIProcessingFeature {
     var modelFeature: AIModelFeature {
         switch self {
@@ -2034,9 +2029,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published private(set) var historyRecoverySnapshots: [HistoryRecoverySnapshotDescriptor] = []
     @Published private(set) var historyRecoveryInspections: [UUID: HistoryRecoveryInspection] = [:]
     @Published private(set) var historyRecoveryInspectionSnapshotID: UUID?
-    private var historyRecoveryInspectionQueue: [UUID] = []
-    private var historyRecoveryInspectionAttemptedIDs = Set<UUID>()
-    private var historyRecoveryInspectionRevision = 0
     @Published private(set) var isHistoryRecoveryOperationInProgress = false
     @Published private(set) var historyRecoveryOperationMessage: String?
     @Published private(set) var historyRecoveryImportResult: HistoryRecoveryImportResult?
@@ -2394,6 +2386,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     var credentialStore: CredentialStore {
         CredentialStore(layout: dependencies.credentialStorageLayout)
     }
+    private let historyWorkflow: HistoryArchiveRecoveryWorkflow
     private var pipelineHistoryStore: PipelineHistoryStore
     private var recordingJournalStore: RecordingJournalStore
     private var cloudTranscriptionJobStore: CloudTranscriptionJobStore
@@ -2436,21 +2429,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
             .recommended
         )
         let storageLayout = dependencies.storageLayout
-        let storageRoot = Self.preparedDirectory(storageLayout.rootDirectory)
-        let audioDirectory = Self.preparedDirectory(storageLayout.audioDirectory)
-        _ = Self.preparedDirectory(storageLayout.transcriptDirectory)
-        let recoveredArchiveSafety = HistoryArchiveTransition
-            .rollbackInterruptedTransactions(at: storageRoot)
-        if recoveredArchiveSafety != .unresolvedInterruptedTransaction {
-            _ = try? HistoryRecoveryService(storageRoot: storageRoot)
-                .removeExpiredCompletedSnapshots()
-        }
-        let initialHistoryArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        pipelineHistoryStore = dependencies.makePipelineHistoryStore(
-            storageLayout.historyStoreURL
+        let historyWorkflow = HistoryArchiveRecoveryWorkflow(
+            storageLayout: storageLayout,
+            makeHistoryStore: dependencies.makePipelineHistoryStore
         )
-        let initialHistoryUnavailable = pipelineHistoryStore.availability == .unavailable
-            || initialHistoryArchiveSafety == .unresolvedInterruptedTransaction
+        let historyStartup = historyWorkflow.prepareStartup()
+        self.historyWorkflow = historyWorkflow
+        pipelineHistoryStore = historyStartup.activeStore
+        let audioDirectory = storageLayout.audioDirectory
         recordingJournalStore = RecordingJournalStore(
             audioDirectory: audioDirectory
         )
@@ -2759,11 +2745,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         var savedHistory: [PipelineHistoryItem] = []
         var cloudReconciliation: CloudTranscriptionReconciliation?
 
-        if pipelineHistoryStore.availability == .ready {
-            pipelineHistoryStore.verifyHistoryReadable()
-        }
-        if initialHistoryArchiveSafety == .normal,
-           pipelineHistoryStore.availability == .ready {
+        if historyStartup.permitsNormalHistoryStartup {
             Self.recoverRecordingJournalsBeforeHistoryLoad(
                 recordingJournalStore: recordingJournalStore,
                 historyStore: pipelineHistoryStore,
@@ -2922,8 +2904,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             } else {
                 print("Skipping history startup work because persistent history is unavailable.")
             }
-        } else if initialHistoryArchiveSafety == .unresolvedArchive,
-                  pipelineHistoryStore.availability == .ready {
+        } else if historyStartup.permitsUnresolvedArchiveStartup {
             Self.recoverRecordingJournalsBeforeHistoryLoad(
                 recordingJournalStore: recordingJournalStore,
                 historyStore: pipelineHistoryStore,
@@ -3047,23 +3028,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.soundVolume = soundVolume
         self.voiceMacros = initialMacros
         self.pipelineHistory = savedHistory
-        self.isHistoryUnavailable = initialHistoryUnavailable
-        self.historyArchiveSafety = initialHistoryArchiveSafety
-        self.historyRecoverySnapshots = HistoryRecoveryService(storageRoot: storageRoot).listSnapshots()
-        if initialHistoryUnavailable {
-            self.historyPersistenceWarning = QuillUserIssueRecord(
-                code: .historyPersistenceUnavailable
-            )
-        } else {
-            switch pipelineHistoryStore.durability {
-            case .durable:
-                self.historyPersistenceWarning = nil
-            case .inMemory:
-                self.historyPersistenceWarning = QuillUserIssueRecord(
-                    code: .historyPersistenceUnavailable
-                )
-            }
-        }
+        self.isHistoryUnavailable = historyStartup.state.isHistoryUnavailable
+        self.historyArchiveSafety = historyStartup.state.archiveSafety
+        self.historyRecoverySnapshots = historyStartup.state.snapshots
+        self.historyPersistenceWarning = historyStartup.state.showsPersistenceWarning
+            ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+            : nil
         self.hasAccessibility = initialAccessibility
         self.hasScreenRecordingPermission = initialScreenCapturePermission
         self.launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -3120,6 +3090,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         if shouldRestoreMutedAudio {
             _ = SystemAudioStatus.setDefaultOutputMuted(false)
             UserDefaults.standard.removeObject(forKey: pendingMutedAudioRestoreStorageKey)
+        }
+
+        historyWorkflow.onEvent = { [weak self] event in
+            self?.applyHistoryWorkflowEvent(event)
         }
 
         overlayManager.onStopButtonPressed = { [weak self] in
@@ -4933,6 +4907,129 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
+    private func applyHistoryWorkflowEvent(
+        _ event: HistoryWorkflowEvent
+    ) {
+        switch event {
+        case .stateChanged(let state):
+            applyHistoryWorkflowState(state)
+        case .installRuntime(let replacement):
+            applyHistoryRuntimeReplacement(replacement)
+        case .failed(let failure):
+            applyHistoryWorkflowFailure(failure)
+        case .performPostAction(let postAction):
+            if postAction == .openRecovery {
+                openHistoryRecoverySettings()
+            }
+        }
+    }
+
+    @MainActor
+    private func applyHistoryWorkflowState(
+        _ state: HistoryWorkflowState
+    ) {
+        historyArchiveSafety = state.archiveSafety
+        isHistoryArchiveTransitioning = state.archiveActivity != .idle
+        historyRecoverySnapshots = state.snapshots
+        historyRecoveryInspections = state.inspections
+        historyRecoveryInspectionSnapshotID = state.inspectionSnapshotID
+        isHistoryRecoveryOperationInProgress =
+            state.recoveryOperation != .idle
+        historyRecoveryOperationMessage = recoveryOperationMessage(
+            for: state.recoveryOperation
+        )
+        historyRecoveryImportResult = state.importResult
+        isHistoryUnavailable = state.isHistoryUnavailable
+        historyPersistenceWarning = state.showsPersistenceWarning
+            ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+            : nil
+    }
+
+    @MainActor
+    private func applyHistoryRuntimeReplacement(
+        _ replacement: HistoryRuntimeReplacement
+    ) {
+        switch replacement {
+        case .fresh(let runtime):
+            pipelineHistoryStore = runtime.historyStore
+            recordingJournalStore = runtime.recordingJournalStore
+            cloudTranscriptionJobStore = runtime.cloudTranscriptionJobStore
+            pipelineHistory = []
+            retryingItemIDs = []
+            pendingAudioImportJobIDs = []
+            cloudTranscriptionProgressByHistoryID = [:]
+            meetingSummaryGeneratingNoteIDs = []
+            meetingSummaryPendingRevealNoteIDs = []
+            forgetAllWarningBannerState()
+        case .recovered(let historyStore, let history):
+            pipelineHistoryStore = historyStore
+            pipelineHistory = history
+        }
+    }
+
+    @MainActor
+    private func recoveryOperationMessage(
+        for operation: HistoryRecoveryWorkflowOperation
+    ) -> String? {
+        switch operation {
+        case .idle:
+            return nil
+        case .importing:
+            return localizedCatalogString("Recovering history…")
+        case .cancellingScheduledDeletion:
+            return localizedCatalogString("Cancelling scheduled deletion…")
+        case .deletingSnapshot:
+            return localizedCatalogString("Deleting recovery snapshot…")
+        }
+    }
+
+    @MainActor
+    private func applyHistoryWorkflowFailure(
+        _ failure: HistoryWorkflowFailure
+    ) {
+        switch failure {
+        case .historyUnavailable,
+             .archiveTransitionFailed,
+             .freshStoreVerificationFailed:
+            errorMessage = historyUnavailableMessage
+        case .recoveryImportFailed,
+             .activeStoreReopenFailed:
+            errorMessage = localizedCatalogString(
+                "History recovery could not be completed."
+            )
+        case .snapshotOperationFailed:
+            errorMessage = localizedCatalogString(
+                "Recovery snapshot operation could not be completed."
+            )
+        case .inspectionFailed:
+            break
+        }
+    }
+
+    @MainActor
+    private func historyWorkflowAdmissionContext()
+        -> HistoryWorkflowAdmissionContext {
+        HistoryWorkflowAdmissionContext(
+            isRecording: isRecording,
+            isTranscribing: isTranscribing,
+            hasRetryWork: !retryingItemIDs.isEmpty,
+            hasActiveTranscriptionJobs: !activeTranscriptionJobs.isEmpty,
+            hasPendingAudioImports: !pendingAudioImportJobIDs.isEmpty,
+            hasCloudHistoryWork:
+                cloudTranscriptionHistoryCoordinator.hasActiveWork,
+            hasMeetingSummaryWork:
+                !meetingSummaryGeneratingNoteIDs.isEmpty,
+            hasActiveRecordingJournal:
+                activeRecordingID != nil
+                    || activeSegmentedJournalController != nil,
+            hasPendingRecordingFinalization:
+                pendingRecordingJournalFinalizationCount != 0,
+            hasPendingRecordingStart: pendingRecordingStartCount != 0,
+            hasPendingAudioOnlyStops: !pendingAudioOnlyStopIDs.isEmpty
+        )
+    }
+
+    @MainActor
     func openHistoryRecoverySettings() {
         refreshHistoryRecoverySnapshots()
         guard !historyRecoverySnapshots.isEmpty else { return }
@@ -4943,289 +5040,71 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func refreshHistoryRecoverySnapshots() {
-        historyRecoverySnapshots = HistoryRecoveryService(
-            storageRoot: storageLayout.rootDirectory
-        ).listSnapshots()
-        let currentIDs = Set(historyRecoverySnapshots.map(\.id))
-        historyRecoveryInspections = historyRecoveryInspections.filter {
-            currentIDs.contains($0.key)
-        }
+        historyWorkflow.refreshSnapshots()
     }
 
     @MainActor
     func beginHistoryRecoveryInspection() {
-        guard !isHistoryRecoveryOperationInProgress,
-              historyRecoveryInspectionSnapshotID == nil else {
-            return
-        }
-        historyRecoveryInspectionAttemptedIDs = []
-        historyRecoveryInspectionQueue = historyRecoverySnapshots.compactMap { snapshot in
-            snapshot.integrity == .ready ? snapshot.id : nil
-        }
-        startNextHistoryRecoveryInspection()
+        historyWorkflow.beginInspection(activeHistory: pipelineHistory)
     }
 
     @MainActor
     func ensureHistoryRecoveryInspection() {
-        guard historyRecoveryInspectionSnapshotID == nil,
-              historyRecoveryInspectionQueue.isEmpty,
-              historyRecoveryInspectionAttemptedIDs.isEmpty,
-              historyRecoveryInspections.isEmpty else {
-            return
-        }
-        beginHistoryRecoveryInspection()
+        historyWorkflow.ensureInspection(activeHistory: pipelineHistory)
     }
 
     @MainActor
     @discardableResult
     func retryHistoryRecoveryInspection(id: UUID) -> Bool {
-        guard !isHistoryRecoveryOperationInProgress,
-              historyRecoverySnapshots.contains(where: {
-                  $0.id == id && $0.integrity == .ready
-              }) else {
-            return false
-        }
-        historyRecoveryInspectionAttemptedIDs.remove(id)
-        historyRecoveryInspectionQueue.removeAll { $0 == id }
-        historyRecoveryInspectionQueue.insert(id, at: 0)
-        startNextHistoryRecoveryInspection()
-        return true
-    }
-
-    @MainActor
-    private func startNextHistoryRecoveryInspection() {
-        guard !isHistoryRecoveryOperationInProgress,
-              historyRecoveryInspectionSnapshotID == nil else {
-            return
-        }
-        while !historyRecoveryInspectionQueue.isEmpty {
-            let snapshotID = historyRecoveryInspectionQueue.removeFirst()
-            guard !historyRecoveryInspectionAttemptedIDs.contains(snapshotID),
-                  historyRecoverySnapshots.contains(where: {
-                      $0.id == snapshotID && $0.integrity == .ready
-                  }) else {
-                continue
-            }
-            historyRecoveryInspectionAttemptedIDs.insert(snapshotID)
-            historyRecoveryInspectionSnapshotID = snapshotID
-            let inspectionRevision = historyRecoveryInspectionRevision
-            let storageRoot = dependencies.storageLayout.rootDirectory
-            let activeHistory = pipelineHistory
-            let appStateReference = WeakAppStateReference(self)
-            Task.detached(priority: .userInitiated) {
-                do {
-                    let inspection = try HistoryRecoveryService(storageRoot: storageRoot)
-                        .inspectSnapshot(id: snapshotID, against: activeHistory)
-                    await MainActor.run {
-                        appStateReference.value?.completeHistoryRecoveryInspection(
-                            inspection,
-                            snapshotID: snapshotID,
-                            inspectionRevision: inspectionRevision,
-                            storageRoot: storageRoot
-                        )
-                    }
-                } catch {
-                    await MainActor.run {
-                        appStateReference.value?.completeHistoryRecoveryInspectionFailure(
-                            snapshotID: snapshotID,
-                            inspectionRevision: inspectionRevision,
-                            storageRoot: storageRoot
-                        )
-                    }
-                }
-            }
-            return
-        }
+        historyWorkflow.retryInspection(
+            id: id,
+            activeHistory: pipelineHistory
+        ) == .accepted
     }
 
     @MainActor
     func invalidateHistoryRecoveryInspectionResults() {
-        historyRecoveryInspectionRevision &+= 1
-        historyRecoveryInspections = [:]
-        historyRecoveryInspectionQueue = []
-        historyRecoveryInspectionAttemptedIDs = []
-        guard selectedSettingsTab == .recovery,
-              !isHistoryRecoveryOperationInProgress else {
-            return
-        }
-        historyRecoveryInspectionQueue = historyRecoverySnapshots.compactMap { snapshot in
-            guard snapshot.integrity == .ready,
-                  snapshot.status != .inspectionFailed else {
-                return nil
-            }
-            return snapshot.id
-        }
-        historyRecoveryInspectionAttemptedIDs = Set(
-            historyRecoverySnapshots.compactMap { snapshot in
-                snapshot.status == .inspectionFailed ? snapshot.id : nil
-            }
+        historyWorkflow.invalidateInspection(
+            activeHistory: pipelineHistory,
+            shouldReschedule:
+                selectedSettingsTab == .recovery
+                    && !isHistoryRecoveryOperationInProgress
         )
-        startNextHistoryRecoveryInspection()
     }
 
     @MainActor
     @discardableResult
     func importHistoryRecoverySnapshot(id: UUID) -> Bool {
-        guard requireAvailableHistoryForMutation(),
-              !isHistoryRecoveryOperationInProgress,
-              !isRecording,
-              !isTranscribing,
-              retryingItemIDs.isEmpty,
-              activeTranscriptionJobs.isEmpty,
-              pendingAudioImportJobIDs.isEmpty,
-              !cloudTranscriptionHistoryCoordinator.hasActiveWork,
-              meetingSummaryGeneratingNoteIDs.isEmpty,
-              activeRecordingID == nil,
-              activeSegmentedJournalController == nil,
-              pendingRecordingJournalFinalizationCount == 0,
-              pendingRecordingStartCount == 0,
-              pendingAudioOnlyStopIDs.isEmpty,
-              historyRecoverySnapshots.contains(where: {
-                  $0.id == id && $0.integrity == .ready
-              }) else {
-            return false
-        }
-        historyRecoveryImportResult = nil
-        do {
-            try pipelineHistoryStore.detachForArchiveVerification()
-        } catch {
-            errorMessage = historyUnavailableMessage
-            return false
-        }
-
-        let storageRoot = dependencies.storageLayout.rootDirectory
-        let storeURL = dependencies.storageLayout.historyStoreURL
-        let audioDirectory = dependencies.storageLayout.audioDirectory
-        let transcriptDirectory = dependencies.storageLayout.transcriptDirectory
-        let makeStore = dependencies.makePipelineHistoryStore
-        let appStateReference = WeakAppStateReference(self)
-        isHistoryRecoveryOperationInProgress = true
-        historyRecoveryOperationMessage = localizedCatalogString("Recovering history…")
-        Task.detached(priority: .userInitiated) {
-            let activeStore = makeStore(storeURL)
-            do {
-                guard activeStore.availability == .ready,
-                      activeStore.durability == .durable,
-                      activeStore.verifyHistoryReadable() else {
-                    throw HistoryRecoveryServiceError.snapshotNotReady
-                }
-                let result = try HistoryRecoveryService(storageRoot: storageRoot).importSnapshot(
-                    id: id,
-                    into: activeStore,
-                    audioDirectory: audioDirectory,
-                    transcriptDirectory: transcriptDirectory
-                )
-                try activeStore.detachForArchiveVerification()
-                await MainActor.run {
-                    appStateReference.value?.completeHistoryRecoveryImport(
-                        result,
-                        storageRoot: storageRoot
-                    )
-                }
-            } catch {
-                try? activeStore.detachForArchiveVerification()
-                await MainActor.run {
-                    appStateReference.value?.completeHistoryRecoveryOperationFailure(
-                        at: storageRoot
-                    )
-                }
-            }
-        }
-        return true
+        guard requireAvailableHistoryForMutation() else { return false }
+        return historyWorkflow.requestImport(
+            snapshotID: id,
+            context: historyWorkflowAdmissionContext(),
+            currentStore: pipelineHistoryStore,
+            activeHistory: pipelineHistory,
+            shouldRescheduleInspection: selectedSettingsTab == .recovery
+        ) == .accepted
     }
 
     @MainActor
     @discardableResult
     func cancelHistoryRecoveryScheduledDeletion(id: UUID) -> Bool {
-        guard !isHistoryRecoveryOperationInProgress,
-              historyRecoveryInspectionSnapshotID == nil,
-              historyRecoverySnapshots.contains(where: {
-                  $0.id == id && $0.integrity == .ready && $0.status == .completed
-              }) else {
-            return false
-        }
-        runHistoryRecoverySnapshotOperation(
-            message: localizedCatalogString("Cancelling scheduled deletion…")
-        ) { service in
-            try service.cancelScheduledDeletion(for: id)
-        }
-        return true
+        historyWorkflow.requestCancelScheduledDeletion(
+            snapshotID: id,
+            activeStore: pipelineHistoryStore,
+            activeHistory: pipelineHistory,
+            shouldRescheduleInspection: selectedSettingsTab == .recovery
+        ) == .accepted
     }
 
     @MainActor
     @discardableResult
     func deleteHistoryRecoverySnapshot(id: UUID) -> Bool {
-        guard !isHistoryRecoveryOperationInProgress,
-              historyRecoveryInspectionSnapshotID == nil,
-              historyRecoverySnapshots.contains(where: { $0.id == id }) else {
-            return false
-        }
-        runHistoryRecoverySnapshotOperation(
-            message: localizedCatalogString("Deleting recovery snapshot…")
-        ) { service in
-            try service.deleteSnapshot(id: id)
-        }
-        return true
-    }
-
-    @MainActor
-    private func runHistoryRecoverySnapshotOperation(
-        message: String,
-        operation: @escaping @Sendable (HistoryRecoveryService) throws -> Void
-    ) {
-        let storageRoot = dependencies.storageLayout.rootDirectory
-        let appStateReference = WeakAppStateReference(self)
-        historyRecoveryImportResult = nil
-        isHistoryRecoveryOperationInProgress = true
-        historyRecoveryOperationMessage = message
-        Task.detached(priority: .userInitiated) {
-            do {
-                try operation(HistoryRecoveryService(storageRoot: storageRoot))
-                await MainActor.run {
-                    appStateReference.value?.completeHistoryRecoverySnapshotOperation(
-                        at: storageRoot
-                    )
-                }
-            } catch {
-                await MainActor.run {
-                    appStateReference.value?.completeHistoryRecoverySnapshotOperationFailure(
-                        at: storageRoot
-                    )
-                }
-            }
-        }
-    }
-
-    @MainActor
-    private func completeHistoryRecoverySnapshotOperation(at storageRoot: URL) {
-        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        refreshHistoryRecoverySnapshots()
-        isHistoryRecoveryOperationInProgress = false
-        historyRecoveryOperationMessage = nil
-        synchronizeHistoryPersistenceState()
-        startNextHistoryRecoveryInspection()
-    }
-
-    @MainActor
-    private func completeHistoryRecoverySnapshotOperationFailure(at storageRoot: URL) {
-        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        refreshHistoryRecoverySnapshots()
-        isHistoryRecoveryOperationInProgress = false
-        historyRecoveryOperationMessage = nil
-        synchronizeHistoryPersistenceState()
-        invalidateHistoryRecoveryInspectionResults()
-        errorMessage = localizedCatalogString("Recovery snapshot operation could not be completed.")
-    }
-
-    @discardableResult
-    private static func preparedDirectory(_ directory: URL) -> URL {
-        if !FileManager.default.fileExists(atPath: directory.path) {
-            try? FileManager.default.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true
-            )
-        }
-        return directory
+        historyWorkflow.requestDeleteSnapshot(
+            snapshotID: id,
+            activeStore: pipelineHistoryStore,
+            activeHistory: pipelineHistory,
+            shouldRescheduleInspection: selectedSettingsTab == .recovery
+        ) == .accepted
     }
 
     private static func recoverRecordingJournalsBeforeHistoryLoad(
@@ -6494,42 +6373,34 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
+    @MainActor
     private func synchronizeHistoryPersistenceState() {
-        let unavailable = pipelineHistoryStore.availability == .unavailable
-            || historyArchiveSafety == .unresolvedInterruptedTransaction
-        let warning: QuillUserIssueRecord?
-        if unavailable {
-            warning = QuillUserIssueRecord(code: .historyPersistenceUnavailable)
-        } else {
-            warning = nil
-        }
-        guard isHistoryUnavailable != unavailable || historyPersistenceWarning != warning else { return }
-        isHistoryUnavailable = unavailable
-        historyPersistenceWarning = warning
+        applyHistoryWorkflowState(
+            historyWorkflow.synchronize(activeStore: pipelineHistoryStore)
+        )
     }
 
-    private func loadPipelineHistory() -> [PipelineHistoryItem] {
-        let history = pipelineHistoryStore.loadAllHistory()
-        synchronizeHistoryPersistenceState()
-        return history
-    }
-
+    @MainActor
     @discardableResult
     private func requireAvailableHistoryForMutation() -> Bool {
-        guard !isHistoryArchiveTransitioning else {
-            errorMessage = localizedCatalogString("Archiving recording history is still in progress.")
-            return false
-        }
-        guard !isHistoryRecoveryOperationInProgress else {
-            errorMessage = localizedCatalogString("History recovery is still in progress.")
-            return false
-        }
         synchronizeHistoryPersistenceState()
-        guard !isHistoryUnavailable else {
+        switch HistoryWorkflowAdmission.mutation(
+            state: historyWorkflow.state
+        ) {
+        case .accepted:
+            return true
+        case .rejected(.archiveTransitionInProgress):
+            errorMessage = localizedCatalogString(
+                "Archiving recording history is still in progress."
+            )
+        case .rejected(.recoveryOperationInProgress):
+            errorMessage = localizedCatalogString(
+                "History recovery is still in progress."
+            )
+        default:
             errorMessage = historyUnavailableMessage
-            return false
         }
-        return true
+        return false
     }
 
     @MainActor
@@ -6538,200 +6409,19 @@ final class AppState: ObservableObject, @unchecked Sendable {
         postAction: HistoryArchivePostAction = .startFresh
     ) -> Bool {
         synchronizeHistoryPersistenceState()
-        guard isHistoryUnavailable,
-              (historyArchiveSafety == .normal || historyArchiveSafety == .unresolvedArchive),
-              !isHistoryArchiveTransitioning,
-              !isHistoryRecoveryOperationInProgress else {
-            return false
-        }
-        guard !isRecording,
-              !isTranscribing,
-              retryingItemIDs.isEmpty,
-              activeTranscriptionJobs.isEmpty,
-              pendingAudioImportJobIDs.isEmpty,
-              !cloudTranscriptionHistoryCoordinator.hasActiveWork,
-              meetingSummaryGeneratingNoteIDs.isEmpty,
-              activeRecordingID == nil,
-              activeSegmentedJournalController == nil,
-              pendingRecordingJournalFinalizationCount == 0,
-              pendingRecordingStartCount == 0,
-              pendingAudioOnlyStopIDs.isEmpty else {
+        let result = historyWorkflow.requestArchive(
+            context: historyWorkflowAdmissionContext(),
+            currentStore: pipelineHistoryStore,
+            postAction: postAction
+        )
+        if result == .rejected(.applicationBusy) {
             errorMessage = localizedCatalogString(
                 "Finish the current recording or transcription before archiving history."
             )
-            return false
-        }
-
-        do {
-            try pipelineHistoryStore.detachForHistoryArchive()
-        } catch {
+        } else if result == .rejected(.historyUnavailable) {
             errorMessage = historyUnavailableMessage
-            return false
         }
-
-        let storageRoot = dependencies.storageLayout.rootDirectory
-        let makeStore = dependencies.makePipelineHistoryStore
-        let appStateReference = WeakAppStateReference(self)
-        isHistoryArchiveTransitioning = true
-        historyArchiveSafety = .transitioning
-        Task.detached(priority: .userInitiated) {
-            do {
-                let result = try HistoryArchiveTransition(
-                    makeStore: makeStore
-                ).archiveAndCreateFreshHistory(at: storageRoot)
-                await MainActor.run {
-                    appStateReference.value?.completeHistoryArchiveTransition(
-                        result,
-                        storageRoot: storageRoot,
-                        postAction: postAction
-                    )
-                }
-            } catch {
-                await MainActor.run {
-                    appStateReference.value?.completeHistoryArchiveTransitionFailure(
-                        at: storageRoot
-                    )
-                }
-            }
-        }
-        return true
-    }
-
-    @MainActor
-    private func completeHistoryArchiveTransition(
-        _ result: HistoryArchiveTransitionResult,
-        storageRoot: URL,
-        postAction: HistoryArchivePostAction
-    ) {
-        let activeStore = dependencies.makePipelineHistoryStore(
-            dependencies.storageLayout.historyStoreURL
-        )
-        guard activeStore.availability == .ready,
-              activeStore.durability == .durable,
-              activeStore.verifyHistoryReadable() else {
-            completeHistoryArchiveTransitionFailure(at: storageRoot)
-            return
-        }
-        pipelineHistoryStore = activeStore
-        let storageLayout = dependencies.storageLayout
-        _ = Self.preparedDirectory(storageLayout.rootDirectory)
-        let audioDirectory = Self.preparedDirectory(storageLayout.audioDirectory)
-        _ = Self.preparedDirectory(storageLayout.transcriptDirectory)
-        recordingJournalStore = RecordingJournalStore(
-            audioDirectory: audioDirectory
-        )
-        cloudTranscriptionJobStore = CloudTranscriptionJobStore(
-            jobsDirectory: storageLayout.cloudTranscriptionJobsDirectory,
-            temporaryRoot: storageLayout.cloudTranscriptionTemporaryDirectory
-        )
-        pipelineHistory = []
-        retryingItemIDs = []
-        pendingAudioImportJobIDs = []
-        cloudTranscriptionProgressByHistoryID = [:]
-        meetingSummaryGeneratingNoteIDs = []
-        meetingSummaryPendingRevealNoteIDs = []
-        forgetAllWarningBannerState()
-        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        refreshHistoryRecoverySnapshots()
-        isHistoryArchiveTransitioning = false
-        synchronizeHistoryPersistenceState()
-        if postAction == .openRecovery {
-            openHistoryRecoverySettings()
-        }
-    }
-
-    @MainActor
-    private func completeHistoryRecoveryInspection(
-        _ inspection: HistoryRecoveryInspection,
-        snapshotID: UUID,
-        inspectionRevision: Int,
-        storageRoot: URL
-    ) {
-        guard historyRecoveryInspectionSnapshotID == snapshotID else { return }
-        historyRecoveryInspectionSnapshotID = nil
-        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        refreshHistoryRecoverySnapshots()
-        if inspectionRevision == historyRecoveryInspectionRevision,
-           historyRecoverySnapshots.contains(where: { $0.id == inspection.snapshotID }) {
-            historyRecoveryInspections[inspection.snapshotID] = inspection
-        }
-        synchronizeHistoryPersistenceState()
-        startNextHistoryRecoveryInspection()
-    }
-
-    @MainActor
-    private func completeHistoryRecoveryInspectionFailure(
-        snapshotID: UUID,
-        inspectionRevision: Int,
-        storageRoot: URL
-    ) {
-        guard historyRecoveryInspectionSnapshotID == snapshotID else { return }
-        historyRecoveryInspectionSnapshotID = nil
-        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        refreshHistoryRecoverySnapshots()
-        if inspectionRevision == historyRecoveryInspectionRevision {
-            historyRecoveryInspections.removeValue(forKey: snapshotID)
-        }
-        synchronizeHistoryPersistenceState()
-        startNextHistoryRecoveryInspection()
-    }
-
-    @MainActor
-    private func completeHistoryRecoveryImport(
-        _ result: HistoryRecoveryImportResult,
-        storageRoot: URL
-    ) {
-        let activeStore = dependencies.makePipelineHistoryStore(
-            dependencies.storageLayout.historyStoreURL
-        )
-        guard activeStore.availability == .ready,
-              activeStore.durability == .durable,
-              activeStore.verifyHistoryReadable() else {
-            completeHistoryRecoveryOperationFailure(at: storageRoot)
-            return
-        }
-        pipelineHistoryStore = activeStore
-        pipelineHistory = loadPipelineHistory()
-        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        refreshHistoryRecoverySnapshots()
-        isHistoryRecoveryOperationInProgress = false
-        historyRecoveryOperationMessage = nil
-        if result.failedRecordCount > 0 || result.conflictRecordCount > 0 {
-            historyRecoveryImportResult = result
-        } else {
-            historyRecoveryImportResult = nil
-        }
-        synchronizeHistoryPersistenceState()
-        invalidateHistoryRecoveryInspectionResults()
-    }
-
-    @MainActor
-    private func completeHistoryRecoveryOperationFailure(at storageRoot: URL) {
-        let activeStore = dependencies.makePipelineHistoryStore(
-            dependencies.storageLayout.historyStoreURL
-        )
-        if activeStore.availability == .ready,
-           activeStore.durability == .durable,
-           activeStore.verifyHistoryReadable() {
-            pipelineHistoryStore = activeStore
-            pipelineHistory = loadPipelineHistory()
-        }
-        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        refreshHistoryRecoverySnapshots()
-        isHistoryRecoveryOperationInProgress = false
-        historyRecoveryOperationMessage = nil
-        historyRecoveryImportResult = nil
-        synchronizeHistoryPersistenceState()
-        invalidateHistoryRecoveryInspectionResults()
-        errorMessage = localizedCatalogString("History recovery could not be completed.")
-    }
-
-    @MainActor
-    private func completeHistoryArchiveTransitionFailure(at storageRoot: URL) {
-        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        isHistoryArchiveTransitioning = false
-        synchronizeHistoryPersistenceState()
-        errorMessage = historyUnavailableMessage
+        return result == .accepted
     }
 
     @MainActor

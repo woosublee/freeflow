@@ -78,32 +78,9 @@ struct AppStateHistoryProtectionSourceTests {
             )
         }
 
-        // Every archive-guard condition can only actually block anything while
-        // history is simultaneously unavailable, since `archiveOldHistoryAndStartFresh`
-        // itself requires `isHistoryUnavailable == true` as its own precondition
-        // — and `requireAvailableHistoryForMutation()` blocks the public entry
-        // points (`importAudioFile`, recording start, retry, meeting-summary
-        // generation) from ever running while history is unavailable. That
-        // combination cannot be constructed through the public API without a
-        // real audio/recording/summary pipeline, so these guards remain a
-        // narrow existence check rather than a simulated race.
-        let archiveGuardRange = try source.range(
-            from: "func archiveOldHistoryAndStartFresh(",
-            to: "@MainActor\n    func clearPipelineHistory()"
-        )
-        let archiveGuardBody = String(source[archiveGuardRange])
-        for requiredGuard in [
-            "pendingAudioImportJobIDs.isEmpty",
-            "!cloudTranscriptionHistoryCoordinator.hasActiveWork",
-            "meetingSummaryGeneratingNoteIDs.isEmpty",
-            "pendingRecordingJournalFinalizationCount == 0",
-            "pendingRecordingStartCount == 0"
-        ] {
-            try expect(
-                archiveGuardBody.contains(requiredGuard),
-                "archive continues to wait for \(requiredGuard) before moving history files"
-            )
-        }
+        // Archive admission now has table-driven behavior coverage in
+        // HistoryArchiveRecoveryWorkflowTests. This remaining source check
+        // protects the separate mid-write audio-import tracking invariant.
         try expect(
             source.contains("pendingAudioImportJobIDs.insert(jobID)")
                 && source.contains("pendingAudioImportJobIDs.remove(jobID)"),
@@ -183,46 +160,6 @@ struct AppStateHistoryProtectionSourceTests {
             "delayed orphan cleanup uses the startup reference snapshot time"
         )
 
-        // Recovery inspection invalidation must clear stale scheduling state
-        // before any rescheduling can occur, and must only reschedule while
-        // Settings is actually showing the recovery tab. Reproducing this
-        // through the public API requires driving Settings tab navigation
-        // alongside recovery timing, which is out of scope for this suite.
-        let invalidationRange = try source.range(
-            from: "func invalidateHistoryRecoveryInspectionResults()",
-            to: "func importHistoryRecoverySnapshot(id: UUID) -> Bool"
-        )
-        let invalidation = String(source[invalidationRange])
-        try expectOrdered(
-            [
-                "historyRecoveryInspections = [:]",
-                "historyRecoveryInspectionQueue = []",
-                "historyRecoveryInspectionAttemptedIDs = []",
-                "guard selectedSettingsTab == .recovery,"
-            ],
-            in: invalidation,
-            label: "recovery inspection invalidation clears stale scheduling state before it can return"
-        )
-
-        // A new recovery import must clear any prior partial-result feedback
-        // before it starts, so a stale result from an earlier import cannot be
-        // shown alongside a new one. This requires observing state exactly at
-        // the instant between synchronous clearing and the detached import
-        // task starting, which is not reliably observable from outside.
-        let importRange = try source.range(
-            from: "func importHistoryRecoverySnapshot(id: UUID) -> Bool",
-            to: "func cancelHistoryRecoveryScheduledDeletion(id: UUID) -> Bool"
-        )
-        let recoveryImport = String(source[importRange])
-        try expectOrdered(
-            [
-                "historyRecoveryImportResult = nil",
-                "try pipelineHistoryStore.detachForArchiveVerification()"
-            ],
-            in: recoveryImport,
-            label: "a new recovery import clears prior partial feedback before detaching history"
-        )
-
         print("AppStateHistoryProtectionSourceTests passed")
     }
 
@@ -239,20 +176,6 @@ struct AppStateHistoryProtectionSourceTests {
             }
         }
         return source
-    }
-
-    private static func expectOrdered(
-        _ markers: [String],
-        in source: String,
-        label: String
-    ) throws {
-        var lowerBound = source.startIndex
-        for marker in markers {
-            guard let range = source.range(of: marker, range: lowerBound..<source.endIndex) else {
-                throw TestFailure("\(label): missing or misordered \(marker)")
-            }
-            lowerBound = range.upperBound
-        }
     }
 
     private static func expect(

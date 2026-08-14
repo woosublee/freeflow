@@ -28,7 +28,10 @@ struct QuillUserIssueUIContractTests {
             menuBar,
             appState
         )
-        try testRecoveryImportOutcomePersistsOutsideProgressOverlay(appState, historyRecovery)
+        try testRecoveryImportOutcomePersistsOutsideProgressOverlay(
+            appState,
+            historyRecovery
+        )
         try testRecoveryCountGrammarUsesSingularCatalogKeys(historyRecovery)
         print("QuillUserIssueUIContractTests passed")
     }
@@ -304,9 +307,13 @@ struct QuillUserIssueUIContractTests {
         _ historyRecovery: String
     ) throws {
         try expect(
-            appState.contains("@Published private(set) var historyRecoveryImportResult")
-                && appState.contains("historyRecoveryImportResult = result"),
-            "AppState publishes partial recovery import outcomes after the operation ends"
+            appState.contains(
+                "@Published private(set) var historyRecoveryImportResult"
+            )
+                && appState.contains(
+                    "historyRecoveryImportResult = state.importResult"
+                ),
+            "workflow partial recovery outcomes reach AppState after the operation ends"
         )
         try expect(
             historyRecovery.contains("appState.historyRecoveryImportResult")
