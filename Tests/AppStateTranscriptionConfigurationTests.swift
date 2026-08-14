@@ -245,7 +245,7 @@ struct AppStateTranscriptionConfigurationTests {
         try testAudioOnlyRetryCreatesTranscriptFileAndPreservesMetadata()
         try testHistoryReconstructionPreservesMeetingSummaryMetadata()
         try testSuccessfulTranscriptionHistoryReceivesSpokenLanguage()
-        try await testResumedRetryPersistsAIProcessingOutcome()
+        try await testResumedRetryPersistsAIOutcomeAndCommandFallbackWhitespace()
         try testHistoryDeletionForgetsSummaryGenerationStateAfterPersistence()
         try testRealtimeConfiguredLanguageUsesOneRequestAndResolutionValue()
         try testAudioOnlyRetryDeletesNewTranscriptFileWhenStale()
@@ -3665,7 +3665,7 @@ struct AppStateTranscriptionConfigurationTests {
         precondition(history.contains("spokenLanguageResolution: effectiveSpokenLanguage?.source"))
     }
 
-    private static func testResumedRetryPersistsAIProcessingOutcome() async throws {
+    private static func testResumedRetryPersistsAIOutcomeAndCommandFallbackWhitespace() async throws {
         try await AppStateTestStorage.withIsolatedStorage { environment in
             try FileManager.default.createDirectory(
                 at: environment.storageLayout.audioDirectory,
@@ -3674,11 +3674,17 @@ struct AppStateTranscriptionConfigurationTests {
             resetDefaults()
             defer { resetDefaults() }
             let rawTranscript = "재실행 후 복구된 원본 전사문"
+            let commandFallback = "  들여쓴 선택 영역\n"
             let historyID = UUID()
+            let commandHistoryID = UUID()
             let fileName = "\(historyID.uuidString).wav"
+            let commandFileName = "\(commandHistoryID.uuidString).wav"
             let audioURL = environment.storageLayout.audioDirectory
                 .appendingPathComponent(fileName)
+            let commandAudioURL = environment.storageLayout.audioDirectory
+                .appendingPathComponent(commandFileName)
             try writeTestWAV(at: audioURL)
+            try writeTestWAV(at: commandAudioURL)
 
             let store = PipelineHistoryStore(storeURL: environment.storageLayout.historyStoreURL)
             var dependencies = environment.dependencies
@@ -3706,7 +3712,30 @@ struct AppStateTranscriptionConfigurationTests {
                 usedPostProcessing: true,
                 transcriptionLanguageCode: "ko"
             )
+            let commandItem = PipelineHistoryItem(
+                intent: .commandManual,
+                selectedText: commandFallback,
+                id: commandHistoryID,
+                timestamp: Date(timeIntervalSince1970: 2),
+                rawTranscript: "",
+                postProcessedTranscript: "",
+                postProcessingPrompt: nil,
+                contextSummary: "",
+                contextScreenshotDataURL: nil,
+                contextScreenshotStatus: "No screenshot",
+                postProcessingStatus: PipelineHistoryItem
+                    .cloudTranscribingStatus,
+                aiProcessingOutcome: "succeeded",
+                debugStatus: "Cloud transcription in progress",
+                customVocabulary: "",
+                audioFileName: commandFileName,
+                usedLocalTranscription: false,
+                usedContextCapture: false,
+                usedPostProcessing: true,
+                transcriptionLanguageCode: "ko"
+            )
             _ = try store.append(originalItem, maxCount: 10)
+            _ = try store.append(commandItem, maxCount: 10)
 
             let jobStore = CloudTranscriptionJobStore(
                 jobsDirectory: environment.storageLayout.cloudTranscriptionJobsDirectory,
@@ -3720,9 +3749,18 @@ struct AppStateTranscriptionConfigurationTests {
                 historyID: historyID,
                 audioURL: audioURL
             )
+            let commandRecord = try makeResumableCloudRecord(
+                historyID: commandHistoryID,
+                audioURL: commandAudioURL
+            )
             let session = jobStore.beginSession(historyID: historyID)
             try jobStore.create(record, session: session)
             jobStore.invalidateSession(historyID: historyID)
+            let commandSession = jobStore.beginSession(
+                historyID: commandHistoryID
+            )
+            try jobStore.create(commandRecord, session: commandSession)
+            jobStore.invalidateSession(historyID: commandHistoryID)
 
             let defaults = UserDefaults.standard
             defer {
@@ -3787,9 +3825,12 @@ struct AppStateTranscriptionConfigurationTests {
                 AppState(dependencies: configuredDependencies)
             }
             await waitUntil(timeoutNanoseconds: 3_000_000_000) {
-                store.loadAllHistory().contains {
-                    $0.id == historyID
-                        && $0.debugStatus == "Resumed after relaunch"
+                let history = store.loadAllHistory()
+                return [historyID, commandHistoryID].allSatisfy { id in
+                    history.contains {
+                        $0.id == id
+                            && $0.debugStatus == "Resumed after relaunch"
+                    }
                 }
             }
 
@@ -3808,6 +3849,30 @@ struct AppStateTranscriptionConfigurationTests {
                 )
                 precondition(item.debugStatus == "Resumed after relaunch")
             }
+            let commandInMemory = try requireHistoryItem(
+                withID: commandHistoryID,
+                in: appState.pipelineHistory
+            )
+            let commandPersisted = try requireHistoryItem(
+                withID: commandHistoryID,
+                in: store.loadAllHistory()
+            )
+            for item in [commandInMemory, commandPersisted] {
+                precondition(item.rawTranscript == rawTranscript)
+                precondition(
+                    item.postProcessedTranscript == commandFallback,
+                    "startup Resume must preserve whitespace-sensitive command fallback text"
+                )
+                precondition(
+                    item.aiProcessingOutcome == "failed:request-timed-out"
+                )
+                let issue = try QuillUserIssueRecord.decodePersistedStatus(
+                    item.postProcessingStatus
+                )
+                precondition(issue.code == .requestTimedOut)
+                precondition(issue.context.operation == .commandTransform)
+                precondition(item.debugStatus == "Resumed after relaunch")
+            }
             await MainActor.run {
                 precondition(
                     appState.lastTranscript.isEmpty,
@@ -3816,6 +3881,10 @@ struct AppStateTranscriptionConfigurationTests {
                 precondition(
                     appState.noteRetryGeneration(for: historyID) == 1,
                     "durable startup Resume advances warning generation"
+                )
+                precondition(
+                    appState.noteRetryGeneration(for: commandHistoryID) == 1,
+                    "command Resume advances warning generation"
                 )
             }
         }

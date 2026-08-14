@@ -585,7 +585,6 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             token: token,
             revision: revision
         ) else {
-            onEvent?(.completed(noteID, .stale))
             return
         }
 
@@ -645,7 +644,6 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             if let createdTranscriptFileName {
                 try? runtime.assets.deleteTranscript(createdTranscriptFileName)
             }
-            onEvent?(.completed(noteID, .stale))
             return
         }
 
@@ -693,7 +691,6 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             token: token,
             revision: revision
         ) else {
-            onEvent?(.completed(noteID, .stale))
             return
         }
         onEvent?(
@@ -870,7 +867,6 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             token: token,
             revision: revision
         ) else {
-            onEvent?(.completed(noteID, .stale))
             return
         }
         onEvent?(

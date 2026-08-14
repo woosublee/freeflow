@@ -38,6 +38,7 @@ struct TranscriptionRetryWorkflowTests {
         try await testSidecarDeletionFailurePreservesDurableSuccess()
         try await testInvalidateRejectsLateSuccess()
         try await testCancelRejectsLateFailureAndClearsState()
+        try await testCancellationDuringPostProcessingEmitsOneTerminalOutcome()
         try await testForgetRemovesNoteState()
         try await testForgetAllRejectsEveryLateCompletion()
         try await testNewerAttemptRejectsOlderSuccessAndProgress()
@@ -1484,6 +1485,57 @@ struct TranscriptionRetryWorkflowTests {
     }
 
     @MainActor
+    private static func testCancellationDuringPostProcessingEmitsOneTerminalOutcome()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let processingGate = TranscriptionRetryControlledTranscriber()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: immediateDependencies(text: "provider raw")
+        )
+        workflow.onEvent = events.record
+        let processing = TranscriptionRetryProcessingBehavior { _ in
+            _ = try? await processingGate.run(
+                context: nil,
+                emitsProgress: false
+            )
+            return processingResult(
+                raw: "processed raw",
+                final: "processed final"
+            )
+        }
+
+        _ = workflow.startManual(
+            request: try makeRequest(
+                item: item,
+                fixture: fixture,
+                processing: processing
+            ),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+        await processingGate.waitUntilStarted()
+        workflow.cancel(noteID: item.id)
+        await processingGate.succeed(
+            transcriptionResult(text: "processing released")
+        )
+        await drainTasks()
+
+        try expectEqual(
+            events.outcomes,
+            [.cancelled],
+            "post-processing cancellation terminal outcome"
+        )
+        try expect(history.persistedItems.isEmpty, "cancelled processing not persisted")
+        try expect(events.persistedEvents.isEmpty, "cancelled processing has no item event")
+    }
+
+    @MainActor
     private static func testForgetRemovesNoteState() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
@@ -1779,6 +1831,11 @@ struct TranscriptionRetryWorkflowTests {
         try await waitUntil { assets.deleted() == ["created.txt"] }
         try expectEqual(assets.saved(), ["created.txt"], "stale created transcript")
         try expectEqual(assets.deleted(), ["created.txt"], "stale cleanup transcript")
+        try expectEqual(
+            events.outcomes,
+            [.cancelled],
+            "stale asset emits only the cancellation terminal outcome"
+        )
         try expect(events.persistedEvents.isEmpty, "stale asset has no item event")
     }
 

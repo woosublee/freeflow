@@ -3029,6 +3029,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
         scheduleNoteBrowserTranscriptionModeNormalizationForSelectedInput()
         self.precomputeMacros()
+        transcriptionRetryWorkflow.onEvent = { [weak self] event in
+            self?.applyTranscriptionRetryWorkflowEvent(event)
+        }
         if let cloudReconciliation {
             let cloudDependenciesFactory = dependencies
                 .makeRetryCloudTranscriptionDependencies
@@ -3083,9 +3086,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         meetingSummaryWorkflow.onEvent = { [weak self] event in
             self?.applyMeetingSummaryWorkflowEvent(event)
-        }
-        transcriptionRetryWorkflow.onEvent = { [weak self] event in
-            self?.applyTranscriptionRetryWorkflowEvent(event)
         }
 
         overlayManager.onStopButtonPressed = { [weak self] in
@@ -7149,10 +7149,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         do {
             let request = try transcriptionRetryWorkflowRequest(for: item)
-            _ = transcriptionRetryWorkflow.startManual(
+            if transcriptionRetryWorkflow.startManual(
                 request: request,
                 runtime: transcriptionRetryWorkflowRuntime()
-            )
+            ) {
+                cloudTranscriptionProgressByHistoryID.removeValue(
+                    forKey: item.id
+                )
+            }
         } catch {
             let issue = userIssue(
                 for: error,
@@ -7289,7 +7293,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 voiceMacros: capturedMacros,
                 customVocabulary: capturedVocabulary,
                 customSystemPrompt: capturedSystemPrompt,
-                completion: capturedCompletion
+                completion: capturedCompletion,
+                trimsFinalTranscript: true
             )
         }
 
@@ -7378,7 +7383,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         voiceMacros: [VoiceMacro],
         customVocabulary: String,
         customSystemPrompt: String,
-        completion: TranscriptionCompletionSnapshot
+        completion: TranscriptionCompletionSnapshot,
+        trimsFinalTranscript: Bool
     ) async -> TranscriptionRetryProcessingResult {
         let parsedTranscript = parseTranscriptCommands(
             from: transcription.text,
@@ -7420,9 +7426,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
             )
         return TranscriptionRetryProcessingResult(
             rawTranscript: parsedTranscript.transcript,
-            finalTranscript: result.finalTranscript.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            ),
+            finalTranscript: trimsFinalTranscript
+                ? result.finalTranscript.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                : result.finalTranscript,
             prompt: result.prompt,
             postProcessingStatus: status,
             aiProcessingOutcome: result.aiProcessingOutcome,
@@ -10525,7 +10533,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         voiceMacros: voiceMacros,
                         customVocabulary: customVocabulary,
                         customSystemPrompt: customSystemPrompt,
-                        completion: completion
+                        completion: completion,
+                        trimsFinalTranscript: false
                     )
                 }
             }

@@ -170,9 +170,13 @@ struct AppStateCloudTranscriptionIntegrationSourceTests {
             from: "func retryTranscription(item: PipelineHistoryItem)",
             to: "private func copyRetryTranscriptToPasteboardIfNeeded"
         )
-        try expect(
-            retryFlow.contains("transcriptionRetryWorkflow.startManual("),
-            "Manual Retry delegates orchestration to the workflow"
+        try expectOrdered(
+            [
+                "if transcriptionRetryWorkflow.startManual(",
+                "cloudTranscriptionProgressByHistoryID.removeValue("
+            ],
+            in: retryFlow,
+            label: "Manual Retry delegates and clears replaced legacy progress"
         )
         let startupFlow = block(
             source,
@@ -198,6 +202,7 @@ struct AppStateCloudTranscriptionIntegrationSourceTests {
                 "cloudTranscriptionJobStore.invalidateSession(",
                 "cloudTranscriptionJobStore.reconcile(",
                 "startupNoteAssetStore.sweepOrphans(",
+                "transcriptionRetryWorkflow.onEvent =",
                 "scheduleCloudTranscriptionAutoResume("
             ],
             in: initializer,
