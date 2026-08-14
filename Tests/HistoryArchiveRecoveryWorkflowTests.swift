@@ -14,6 +14,10 @@ struct HistoryArchiveRecoveryWorkflowTests {
         try testPublishedUnresolvedArchivePermitsProtectedStartupBranch()
         try testRetentionFailureStillLoadsRecoveryCatalog()
         try testStartupUsesOriginatingStoreFactory()
+        try await testArchiveInstallsVerifiedRuntimeBeforeIdleState()
+        try await testArchiveVerificationFailureNeverInstallsRuntime()
+        try await testArchiveTransitionFailureNeverInstallsRuntime()
+        try await testArchiveCapturesOriginatingDependencies()
         print("HistoryArchiveRecoveryWorkflowTests passed")
     }
 
@@ -242,6 +246,238 @@ struct HistoryArchiveRecoveryWorkflowTests {
         }
     }
 
+    private static func testArchiveInstallsVerifiedRuntimeBeforeIdleState() async throws {
+        try await withArchiveWorkflow { workflow, startup, eventRecorder, _ in
+            let command = await MainActor.run {
+                workflow.requestArchive(
+                    context: .init(),
+                    currentStore: startup.activeStore,
+                    postAction: .openRecovery
+                )
+            }
+            try expect(command == .accepted, "archive command is accepted")
+            try await waitUntil {
+                eventRecorder.kinds.contains(.postAction)
+            }
+            try expect(
+                eventRecorder.kinds == [
+                    .stateChanged,
+                    .runtimeInstalled,
+                    .stateChanged,
+                    .postAction,
+                ],
+                "verified runtime installs before idle state and post-action"
+            )
+            try expect(
+                workflow.state.archiveActivity == .idle
+                    && !workflow.state.isHistoryUnavailable,
+                "successful archive returns the workflow to available idle state"
+            )
+        }
+    }
+
+    private static func testArchiveVerificationFailureNeverInstallsRuntime() async throws {
+        try await withArchiveWorkflow(
+            freshStoreUnavailable: true
+        ) { workflow, startup, eventRecorder, _ in
+            let command = await MainActor.run {
+                workflow.requestArchive(
+                    context: .init(),
+                    currentStore: startup.activeStore,
+                    postAction: .startFresh
+                )
+            }
+            try expect(command == .accepted, "archive failure begins asynchronously")
+            try await waitUntil {
+                eventRecorder.failures.contains(.freshStoreVerificationFailed)
+            }
+            try expect(
+                !eventRecorder.kinds.contains(.runtimeInstalled),
+                "fresh-store verification failure never installs a runtime"
+            )
+            try expect(
+                workflow.state.archiveActivity == .idle
+                    && workflow.state.isHistoryUnavailable,
+                "verification failure leaves protected idle state"
+            )
+        }
+    }
+
+    private static func testArchiveTransitionFailureNeverInstallsRuntime() async throws {
+        try await withArchiveWorkflow(
+            transitionShouldFail: true
+        ) { workflow, startup, eventRecorder, _ in
+            let command = await MainActor.run {
+                workflow.requestArchive(
+                    context: .init(),
+                    currentStore: startup.activeStore,
+                    postAction: .startFresh
+                )
+            }
+            try expect(command == .accepted, "archive transition begins asynchronously")
+            try await waitUntil {
+                eventRecorder.failures.contains(.archiveTransitionFailed)
+            }
+            try expect(
+                !eventRecorder.kinds.contains(.runtimeInstalled),
+                "archive transition failure never installs a runtime"
+            )
+        }
+    }
+
+    private static func testArchiveCapturesOriginatingDependencies() async throws {
+        try await withTemporaryDirectoryAsync { root in
+            let layout = AppStateStorageLayout(rootDirectory: root)
+            let storeRecorder = ArchiveStoreFactoryRecorder()
+            let originatingTransition = ArchiveTransitionRecorder()
+            let unrelatedTransition = ArchiveTransitionRecorder()
+            var dependencies = archiveDependencies(
+                root: root,
+                storeRecorder: storeRecorder,
+                transitionRecorder: originatingTransition
+            )
+            let workflow = HistoryArchiveRecoveryWorkflow(
+                storageLayout: layout,
+                dependencies: dependencies
+            )
+            let startup = workflow.prepareStartup()
+            let eventRecorder = WorkflowEventRecorder()
+            await MainActor.run { eventRecorder.attach(to: workflow) }
+            dependencies.archiveAndCreateFreshHistory = { root, _ in
+                unrelatedTransition.record()
+                return archiveTransitionResult(root: root)
+            }
+
+            let command = await MainActor.run {
+                workflow.requestArchive(
+                    context: .init(),
+                    currentStore: startup.activeStore,
+                    postAction: .startFresh
+                )
+            }
+            try expect(command == .accepted, "archive command is accepted")
+            try await waitUntil {
+                eventRecorder.kinds.contains(.postAction)
+            }
+            try expect(
+                originatingTransition.count == 1,
+                "archive uses the transition captured by the workflow"
+            )
+            try expect(
+                unrelatedTransition.count == 0,
+                "later dependency mutation cannot redirect an active workflow"
+            )
+        }
+    }
+
+    private static func withArchiveWorkflow(
+        freshStoreUnavailable: Bool = false,
+        transitionShouldFail: Bool = false,
+        _ operation: (
+            HistoryArchiveRecoveryWorkflow,
+            HistoryStartupResult,
+            WorkflowEventRecorder,
+            ArchiveTransitionRecorder
+        ) async throws -> Void
+    ) async throws {
+        try await withTemporaryDirectoryAsync { root in
+            let storeRecorder = ArchiveStoreFactoryRecorder(
+                freshStoreUnavailable: freshStoreUnavailable
+            )
+            let transitionRecorder = ArchiveTransitionRecorder(
+                shouldFail: transitionShouldFail
+            )
+            let workflow = HistoryArchiveRecoveryWorkflow(
+                storageLayout: AppStateStorageLayout(rootDirectory: root),
+                dependencies: archiveDependencies(
+                    root: root,
+                    storeRecorder: storeRecorder,
+                    transitionRecorder: transitionRecorder
+                )
+            )
+            let startup = workflow.prepareStartup()
+            let eventRecorder = WorkflowEventRecorder()
+            await MainActor.run { eventRecorder.attach(to: workflow) }
+            try await operation(
+                workflow,
+                startup,
+                eventRecorder,
+                transitionRecorder
+            )
+        }
+    }
+
+    private static func archiveDependencies(
+        root: URL,
+        storeRecorder: ArchiveStoreFactoryRecorder,
+        transitionRecorder: ArchiveTransitionRecorder
+    ) -> HistoryArchiveRecoveryWorkflowDependencies {
+        var dependencies = HistoryArchiveRecoveryWorkflowDependencies.live(
+            makeHistoryStore: { storeRecorder.makeStore(at: $0) }
+        )
+        dependencies.rollbackInterruptedTransactions = { _ in .normal }
+        dependencies.inspectArchiveSafety = { _ in
+            transitionRecorder.count > 0 ? .unresolvedArchive : .normal
+        }
+        dependencies.removeExpiredSnapshots = { _ in [] }
+        dependencies.listSnapshots = { _ in [] }
+        dependencies.archiveAndCreateFreshHistory = { storageRoot, _ in
+            try transitionRecorder.perform(root: storageRoot)
+        }
+        return dependencies
+    }
+
+    private static func archiveTransitionResult(
+        root: URL
+    ) -> HistoryArchiveTransitionResult {
+        let snapshotID = UUID()
+        return HistoryArchiveTransitionResult(
+            snapshot: HistoryArchiveSnapshot(
+                schemaVersion: HistoryArchiveSnapshot.currentSchemaVersion,
+                id: snapshotID,
+                archivedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                components: []
+            ),
+            recoveryDirectory: root
+                .appendingPathComponent("Recovery", isDirectory: true)
+                .appendingPathComponent(
+                    "history-\(snapshotID.uuidString.lowercased())",
+                    isDirectory: true
+                )
+        )
+    }
+
+    private static func waitUntil(
+        timeout: TimeInterval = 2,
+        _ condition: @escaping @Sendable () -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() >= deadline {
+                throw HistoryWorkflowTestFailure(
+                    "timed out waiting for asynchronous history workflow"
+                )
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    private static func withTemporaryDirectoryAsync(
+        _ operation: (URL) async throws -> Void
+    ) async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "history-workflow-archive-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await operation(root)
+    }
+
     private static func withTemporaryWorkflow(
         _ operation: (
             HistoryArchiveRecoveryWorkflow,
@@ -365,6 +601,122 @@ private final class StartupOperationRecorder: @unchecked Sendable {
             recordedStoreURLs.append(url)
             recordedStores.append(store)
         }
+    }
+}
+
+private enum RecordedWorkflowEventKind: Equatable {
+    case stateChanged
+    case runtimeInstalled
+    case failed
+    case postAction
+}
+
+private final class WorkflowEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedKinds: [RecordedWorkflowEventKind] = []
+    private var recordedFailures: [HistoryWorkflowFailure] = []
+
+    var kinds: [RecordedWorkflowEventKind] {
+        lock.withHistoryWorkflowLock { recordedKinds }
+    }
+
+    var failures: [HistoryWorkflowFailure] {
+        lock.withHistoryWorkflowLock { recordedFailures }
+    }
+
+    @MainActor
+    func attach(to workflow: HistoryArchiveRecoveryWorkflow) {
+        workflow.onEvent = { [weak self] event in
+            self?.record(event)
+        }
+    }
+
+    private func record(_ event: HistoryWorkflowEvent) {
+        lock.withHistoryWorkflowLock {
+            switch event {
+            case .stateChanged:
+                recordedKinds.append(.stateChanged)
+            case .installRuntime:
+                recordedKinds.append(.runtimeInstalled)
+            case .failed(let failure):
+                recordedKinds.append(.failed)
+                recordedFailures.append(failure)
+            case .performPostAction:
+                recordedKinds.append(.postAction)
+            }
+        }
+    }
+}
+
+private final class ArchiveStoreFactoryRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var callCount = 0
+    private let freshStoreUnavailable: Bool
+
+    init(freshStoreUnavailable: Bool = false) {
+        self.freshStoreUnavailable = freshStoreUnavailable
+    }
+
+    func makeStore(at url: URL) -> PipelineHistoryStore {
+        let call = lock.withHistoryWorkflowLock { () -> Int in
+            callCount += 1
+            return callCount
+        }
+        guard call > 1, !freshStoreUnavailable else {
+            return PipelineHistoryStore(
+                storeURL: url,
+                persistentStoreLoader: { _ in
+                    HistoryWorkflowTestFailure(
+                        "intentional unavailable archive store"
+                    )
+                }
+            )
+        }
+        return PipelineHistoryStore(storeURL: url)
+    }
+}
+
+private final class ArchiveTransitionRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var executionCount = 0
+    private let shouldFail: Bool
+
+    init(shouldFail: Bool = false) {
+        self.shouldFail = shouldFail
+    }
+
+    var count: Int {
+        lock.withHistoryWorkflowLock { executionCount }
+    }
+
+    func record() {
+        lock.withHistoryWorkflowLock {
+            executionCount += 1
+        }
+    }
+
+    func perform(root: URL) throws -> HistoryArchiveTransitionResult {
+        record()
+        if shouldFail {
+            throw HistoryWorkflowTestFailure(
+                "intentional archive transition failure"
+            )
+        }
+        let snapshotID = UUID()
+        return HistoryArchiveTransitionResult(
+            snapshot: HistoryArchiveSnapshot(
+                schemaVersion: HistoryArchiveSnapshot.currentSchemaVersion,
+                id: snapshotID,
+                archivedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                components: []
+            ),
+            recoveryDirectory: root
+                .appendingPathComponent("Recovery", isDirectory: true)
+                .appendingPathComponent(
+                    "history-\(snapshotID.uuidString.lowercased())",
+                    isDirectory: true
+                )
+        )
     }
 }
 

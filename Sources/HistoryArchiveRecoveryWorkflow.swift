@@ -394,6 +394,49 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
     }
 
     @MainActor
+    @discardableResult
+    func requestArchive(
+        context: HistoryWorkflowAdmissionContext,
+        currentStore: PipelineHistoryStore,
+        postAction: HistoryArchivePostAction
+    ) -> HistoryWorkflowCommandResult {
+        let admission = HistoryWorkflowAdmission.archive(
+            state: state,
+            context: context
+        )
+        guard admission == .accepted else { return admission }
+        do {
+            try currentStore.detachForHistoryArchive()
+        } catch {
+            emit(.failed(.historyUnavailable))
+            return .rejected(.historyUnavailable)
+        }
+
+        state.archiveActivity = .transitioning(postAction: postAction)
+        state.archiveSafety = .transitioning
+        emitState()
+
+        let root = storageLayout.rootDirectory
+        let dependencies = dependencies
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                _ = try dependencies.archiveAndCreateFreshHistory(
+                    root,
+                    dependencies.makeHistoryStore
+                )
+                await self?.completeArchiveSuccess(
+                    postAction: postAction
+                )
+            } catch {
+                await self?.completeArchiveFailure(
+                    .archiveTransitionFailed
+                )
+            }
+        }
+        return .accepted
+    }
+
+    @MainActor
     func synchronize(activeStore: PipelineHistoryStore) {
         let unavailable = activeStore.availability == .unavailable
             || state.archiveSafety == .unresolvedInterruptedTransaction
@@ -406,6 +449,85 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
         state.isHistoryUnavailable = unavailable
         state.showsPersistenceWarning = showsWarning
         emitState()
+    }
+
+    @MainActor
+    private func completeArchiveSuccess(
+        postAction: HistoryArchivePostAction
+    ) {
+        let activeStore = dependencies.makeHistoryStore(
+            storageLayout.historyStoreURL
+        )
+        guard activeStore.availability == .ready,
+              activeStore.durability == .durable,
+              activeStore.verifyHistoryReadable() else {
+            completeArchiveFailure(.freshStoreVerificationFailed)
+            return
+        }
+
+        Self.prepareDirectory(storageLayout.rootDirectory)
+        let audioDirectory = Self.prepareDirectory(
+            storageLayout.audioDirectory
+        )
+        Self.prepareDirectory(storageLayout.transcriptDirectory)
+        Self.prepareDirectory(storageLayout.cloudTranscriptionJobsDirectory)
+        Self.prepareDirectory(storageLayout.cloudTranscriptionTemporaryDirectory)
+        let runtime = HistoryFreshRuntime(
+            historyStore: activeStore,
+            recordingJournalStore:
+                dependencies.makeRecordingJournalStore(audioDirectory),
+            cloudTranscriptionJobStore:
+                dependencies.makeCloudTranscriptionJobStore(storageLayout)
+        )
+        emit(.installRuntime(.fresh(runtime)))
+        refreshSafetyAndSnapshots()
+        state.archiveActivity = .idle
+        synchronizeStateForVerifiedStore(activeStore)
+        emitState()
+        emit(.performPostAction(postAction))
+    }
+
+    @MainActor
+    private func completeArchiveFailure(
+        _ failure: HistoryWorkflowFailure
+    ) {
+        state.archiveSafety = dependencies.inspectArchiveSafety(
+            storageLayout.rootDirectory
+        )
+        state.archiveActivity = .idle
+        state.isHistoryUnavailable = true
+        state.showsPersistenceWarning = true
+        emitState()
+        emit(.failed(failure))
+    }
+
+    @MainActor
+    private func refreshSafetyAndSnapshots() {
+        state.archiveSafety = dependencies.inspectArchiveSafety(
+            storageLayout.rootDirectory
+        )
+        state.snapshots = dependencies.listSnapshots(
+            storageLayout.rootDirectory
+        )
+        let currentIDs = Set(state.snapshots.map(\.id))
+        state.inspections = state.inspections.filter {
+            currentIDs.contains($0.key)
+        }
+        if state.archiveSafety == .unresolvedInterruptedTransaction {
+            state.isHistoryUnavailable = true
+            state.showsPersistenceWarning = true
+        }
+    }
+
+    @MainActor
+    private func synchronizeStateForVerifiedStore(
+        _ activeStore: PipelineHistoryStore
+    ) {
+        state.isHistoryUnavailable =
+            activeStore.availability == .unavailable
+                || state.archiveSafety == .unresolvedInterruptedTransaction
+        state.showsPersistenceWarning = state.isHistoryUnavailable
+            || activeStore.durability == .inMemory
     }
 
     @discardableResult
