@@ -12,7 +12,6 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         try verifiesDeleteUsesCommonCleanup(source)
         try verifiesClearUsesCommonCleanup(source)
         try verifiesTrimmedAssetsUseCommonCleanup(source)
-        try verifiesIncompatibleRetryInvalidatesBeforeReplacement(source)
         try verifiesActiveCloudTasksAreInstalled(source)
         try verifiesLateCloudCallbacksCannotWriteHistory(source)
         print("AppStateCloudTranscriptionCleanupSourceTests passed")
@@ -26,6 +25,7 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         )
         try expectOrdered(
             [
+                "transcriptionRetryWorkflow.forget(noteID: assets.historyID)",
                 "cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(",
                 "retryingItemIDs.remove(assets.historyID)",
                 "try? noteAssetStore.deleteAssets(",
@@ -44,6 +44,7 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         )
         try expectOrdered(
             [
+                "transcriptionRetryWorkflow.cancel(noteID: id)",
                 "cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(",
                 "pipelineHistoryStore.delete(",
                 "beforeDeleting:",
@@ -63,6 +64,7 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         )
         try expectOrdered(
             [
+                "transcriptionRetryWorkflow.cancel(noteID: historyID)",
                 "cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(",
                 "pipelineHistoryStore.clearAll(",
                 "beforeDeleting:",
@@ -114,31 +116,6 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         }
     }
 
-    private static func verifiesIncompatibleRetryInvalidatesBeforeReplacement(
-        _ source: String
-    ) throws {
-        let retry = block(
-            source,
-            from: "private func prepareCloudRetryContext(",
-            to: "private func makeCloudExecutionContext("
-        )
-        try expect(
-            retry.contains(
-                "$0.completionPolicy == completion.cloudJobPolicy"
-            ),
-            "incompatible retry compares the persisted completion policy"
-        )
-        try expectOrdered(
-            [
-                "cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(",
-                "cloudTranscriptionJobStore.beginSession(",
-                "cloudTranscriptionJobStore.replaceForIncompatibleRetry("
-            ],
-            in: retry,
-            label: "incompatible retry invalidates old runtime before replacement"
-        )
-    }
-
     private static func verifiesActiveCloudTasksAreInstalled(
         _ source: String
     ) throws {
@@ -170,21 +147,6 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
             ],
             in: recordingFlow,
             label: "initial recording cloud task installation"
-        )
-
-        let retryFlow = block(
-            source,
-            from: "func retryTranscription(item: PipelineHistoryItem)",
-            to: "private func copyRetryTranscriptToPasteboardIfNeeded"
-        )
-        try expectOrdered(
-            [
-                "let task = Task",
-                "installCloudTranscriptionTask(",
-                "context: snapshot.cloudExecutionContext"
-            ],
-            in: retryFlow,
-            label: "retry cloud task installation"
         )
     }
 
@@ -225,20 +187,6 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
                 separatedBy: "requiresCloudExecution: !capturedUseLocalTranscription"
             ).count >= 2,
             "recording cloud callbacks reject a missing invalidated context"
-        )
-
-        let retryFlow = block(
-            source,
-            from: "func retryTranscription(item: PipelineHistoryItem)",
-            to: "private func copyRetryTranscriptToPasteboardIfNeeded"
-        )
-        try expect(
-            retryFlow.contains("guard self.isCurrentCloudTranscriptionExecution("),
-            "retry callbacks require the active cloud session"
-        )
-        try expect(
-            retryFlow.contains("requiresCloudExecution: snapshot.requiresCloudExecution"),
-            "retry cloud callbacks reject a missing invalidated context"
         )
 
         let completion = block(

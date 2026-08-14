@@ -17,8 +17,7 @@ struct AppStateCloudTranscriptionIntegrationSourceTests {
         try verifiesRecordingPlaceholderPrecedesCloudExecution(appState)
         try verifiesHistoryCommitPrecedesSidecarDeletion(appState)
         try verifiesPartialCloudTextStaysOutOfHistory(appState)
-        try verifiesExplicitRetryPolicy(appState)
-        try verifiesManualRetryCapturesCurrentCompletionPolicy(appState)
+        try verifiesRetryWorkflowAdapters(appState)
         try verifiesStartupReconciliationOrder(appState)
         try verifiesStartupResumeIsHistoryOnly(appState)
         print("AppStateCloudTranscriptionIntegrationSourceTests passed")
@@ -163,114 +162,26 @@ struct AppStateCloudTranscriptionIntegrationSourceTests {
         )
     }
 
-    private static func verifiesExplicitRetryPolicy(_ source: String) throws {
-        let retryOptions = block(
-            source,
-            from: "private func retryOptions(for audioURL: URL)",
-            to: "func retryTranscription(item: PipelineHistoryItem)"
-        )
-        let retrySnapshot = block(
-            source,
-            from: "private func makeRetrySnapshot(for item: PipelineHistoryItem)",
-            to: "private func makeRetryHistoryItem("
-        )
-        try expect(
-            retrySnapshot.contains("options.explicitRetryChoice"),
-            "retry uses the explicitly selected backend without fallback"
-        )
-        try expect(
-            !retrySnapshot.contains("options.defaultChoice"),
-            "retry never silently selects a different backend"
-        )
-        try expect(
-            retryOptions.contains("CanonicalPCM16WAV.validateFile(at: audioURL)"),
-            "oversized cloud retry is allowed only for strict canonical WAV"
-        )
-        try expect(
-            retrySnapshot.contains("execution = .local("),
-            "local retry snapshots the full-source local execution"
-        )
-        try expect(
-            retrySnapshot.contains("execution = .cloud("),
-            "cloud retry snapshots the selected provider execution"
-        )
-        let retryFlow = block(
-            source,
-            from: "func retryTranscription(item: PipelineHistoryItem)",
-            to: "private func copyRetryTranscriptToPasteboardIfNeeded"
-        )
-        try expect(
-            retryFlow.contains("snapshot.execution\n                    .makeTranscriptionService("),
-            "retry service is built only from the immutable snapshot"
-        )
-        try expect(
-            retryFlow.contains("completeCloudTranscriptionHistory("),
-            "successful cloud or local retry clears sidecar after history save"
-        )
-    }
-
-    private static func verifiesManualRetryCapturesCurrentCompletionPolicy(
+    private static func verifiesRetryWorkflowAdapters(
         _ source: String
     ) throws {
-        let retrySnapshotType = block(
-            source,
-            from: "private struct RetrySnapshot",
-            to: "private struct TranscriptCommandParsingResult"
-        )
-        let retrySnapshotBuilder = block(
-            source,
-            from: "private func makeRetrySnapshot(for item: PipelineHistoryItem)",
-            to: "private func makeRetryHistoryItem("
-        )
         let retryFlow = block(
             source,
             from: "func retryTranscription(item: PipelineHistoryItem)",
             to: "private func copyRetryTranscriptToPasteboardIfNeeded"
         )
-        let retryHistory = block(
+        try expect(
+            retryFlow.contains("transcriptionRetryWorkflow.startManual("),
+            "Manual Retry delegates orchestration to the workflow"
+        )
+        let startupFlow = block(
             source,
-            from: "private func makeRetryHistoryItem(",
-            to: "func updatePermissionStatus("
-        )
-
-        try expect(
-            retrySnapshotBuilder.contains(
-                "postProcessingEnabled: !disablePostProcessing"
-            ),
-            "manual retry captures the current Post-processing setting"
+            from: "private func scheduleCloudTranscriptionAutoResume(",
+            to: "private func installCloudTranscriptionTask("
         )
         try expect(
-            !retrySnapshotBuilder.contains("item.usedPostProcessing"),
-            "manual retry does not restore the previous attempt's Post-processing flag"
-        )
-        try expect(
-            !retrySnapshotType.contains("let outputLanguage: String")
-                && !retrySnapshotType.contains("let postProcessingEnabled: Bool"),
-            "retry snapshot keeps completion policy only in its execution snapshot"
-        )
-        try expect(
-            retryFlow.contains("let completion = snapshot.execution.completion"),
-            "retry processing reads one immutable completion snapshot"
-        )
-        try expect(
-            retryFlow.contains(
-                "pressEnterCommandEnabled: completion.pressEnterCommandEnabled"
-            ),
-            "retry command parsing uses the captured completion policy"
-        )
-        try expect(
-            retryFlow.contains("outputLanguage: completion.outputLanguage")
-                && retryFlow.contains(
-                    "postProcessingEnabled: completion.postProcessingEnabled"
-                ),
-            "retry processing uses the captured Post-processing policy"
-        )
-        try expect(
-            retryHistory.contains("let completion = snapshot.execution.completion")
-                && retryHistory.contains(
-                    "usedPostProcessing: completion.postProcessingEnabled"
-                ),
-            "retry history records the Post-processing policy actually used"
+            startupFlow.contains("transcriptionRetryWorkflow.resumeAtStartup("),
+            "startup Resume delegates orchestration to the workflow"
         )
     }
 
@@ -325,12 +236,20 @@ struct AppStateCloudTranscriptionIntegrationSourceTests {
     }
 
     private static func verifiesStartupResumeIsHistoryOnly(_ source: String) throws {
+        let initializer = block(
+            source,
+            from: "if let cloudReconciliation {",
+            to: "speechRecognitionAuthorizationStatus ="
+        )
+        try expect(
+            initializer.contains("Task { @MainActor"),
+            "auto-resume is deferred until initialization finishes"
+        )
         let autoResume = block(
             source,
             from: "private func scheduleCloudTranscriptionAutoResume(",
-            to: "private func resumeCloudTranscriptionAfterLaunch("
+            to: "private func installCloudTranscriptionTask("
         )
-        try expect(autoResume.contains("Task { @MainActor"), "auto-resume is deferred until initialization finishes")
         guard let providerGuard = autoResume.range(
             of: "guard hasTranscriptionAPIKey else { return }"
         ), let runtimeSnapshot = autoResume.range(
@@ -345,33 +264,12 @@ struct AppStateCloudTranscriptionIntegrationSourceTests {
             "keyless startup leaves the persisted cloud sidecar for manual retry"
         )
         try expect(
-            autoResume.contains("completionDelivery: .historyOnly"),
-            "startup resume uses history-only completion delivery"
-        )
-        let resume = block(
-            source,
-            from: "private func resumeCloudTranscriptionAfterLaunch(",
-            to: "private func prepareCloudTranscriptionJob("
+            autoResume.contains("TranscriptionRetryStartupInput("),
+            "startup Resume passes one captured input batch to the workflow"
         )
         try expect(
-            resume.contains("guard completionDelivery == .historyOnly"),
-            "resume helper enforces history-only delivery"
-        )
-        try expect(
-            resume.contains(
-                "postProcessingEnabled: record.completionPolicy.postProcessingEnabled"
-            )
-                && resume.contains(
-                    "outputLanguage: record.completionPolicy.outputLanguage"
-                )
-                && resume.contains(
-                    "pressEnterCommandEnabled: record.completionPolicy.pressEnterCommandEnabled"
-                ),
-            "startup resume preserves the persisted completion policy"
-        )
-        try expect(
-            !resume.contains("disablePostProcessing"),
-            "startup resume does not replace persisted policy with current settings"
+            autoResume.contains("transcriptionRetryWorkflow.resumeAtStartup("),
+            "startup Resume delegates delivery and persistence policy to the workflow"
         )
         for forbidden in [
             "writeDictationStringToPasteboard",
@@ -380,8 +278,8 @@ struct AppStateCloudTranscriptionIntegrationSourceTests {
             "copyRetryTranscriptToPasteboardIfNeeded"
         ] {
             try expect(
-                !resume.contains(forbidden),
-                "startup resume never performs interactive delivery: \(forbidden)"
+                !autoResume.contains(forbidden),
+                "startup adapter never performs interactive delivery: \(forbidden)"
             )
         }
     }

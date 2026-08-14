@@ -238,14 +238,15 @@ struct QuillUserIssueUIContractTests {
             appState.contains("func dismissWarningBanner(noteID: UUID, code: QuillUserIssueCode)"),
             "AppState exposes a dismissal setter"
         )
-        let retryBody = block(
+        let retryEvents = block(
             appState,
-            from: "func retryTranscription(item: PipelineHistoryItem)",
-            to: "private func copyRetryTranscriptToPasteboardIfNeeded"
+            from: "private func applyTranscriptionRetryWorkflowEvent(",
+            to: "private func applyTranscriptionRetryWorkflowState("
         )
         try expect(
-            retryBody.contains("incrementNoteRetryGeneration(for: snapshot.item.id)"),
-            "saved retry results invalidate stale dismissals"
+            retryEvents.contains("if effects.advancesWarningGeneration")
+                && retryEvents.contains("incrementNoteRetryGeneration(for: item.id)"),
+            "persisted Retry effects invalidate stale dismissals"
         )
     }
 

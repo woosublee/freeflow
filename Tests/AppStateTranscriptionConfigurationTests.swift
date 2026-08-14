@@ -172,7 +172,7 @@ struct AppStateTranscriptionConfigurationTests {
         testTimeoutFailureReasonOverridesCommandFallback()
         testStoppedTranscriptionSettingsSnapshotCapturesHistoryMetadata()
         try testAppStateCreatedTranscriptionServicesPassLegacyMlxWhisperToggle()
-        try testRetrySnapshotGatesStoredContextByCurrentToggleAndUsability()
+        try testRetryRequestGatesStoredContextByCurrentToggleAndUsability()
         try testAppStateCapturesNativeWhisperExecutionBeforeImportAndRetryTasks()
         try testNoteBrowserTranscriptionMenuUsesFlatNativeCheckedItems()
         await testAudioImportConfigurationUsesChoiceDerivedBackend()
@@ -1308,7 +1308,7 @@ struct AppStateTranscriptionConfigurationTests {
     // contextSummary, gated by the CURRENT context-capture toggle and by
     // whether the stored summary is actually usable (old notes may still
     // carry the stop-time placeholder sentence).
-    private static func testRetrySnapshotGatesStoredContextByCurrentToggleAndUsability() throws {
+    private static func testRetryRequestGatesStoredContextByCurrentToggleAndUsability() throws {
         let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
         let requestBody = sourceBlock(
             in: source,
@@ -3544,7 +3544,7 @@ struct AppStateTranscriptionConfigurationTests {
         // Retry no longer injects the stored contextSummary unconditionally:
         // it is gated by the current context toggle and by whether the
         // stored summary is actually usable (see
-        // testRetrySnapshotGatesStoredContextByCurrentToggleAndUsability).
+        // testRetryRequestGatesStoredContextByCurrentToggleAndUsability).
         assert(retryRequest.contains("let usesStoredContext = !isAudioOnly && !disableContextCapture"))
         assert(
             retryRequest.contains(
