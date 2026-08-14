@@ -78,6 +78,7 @@ FULL_SOURCE_APP_STATE_TESTS = \
 	Tests/AppStateHistoryProtectionSourceTests.swift \
 	Tests/AppStateTranscriptionConfigurationTests.swift \
 	Tests/AppStateAIProcessingBackendTests.swift \
+	Tests/MeetingSummaryWorkflowTests.swift \
 	Tests/MeetingSummaryAppStateTests.swift
 GROUPED_TEST_SOURCES = $(FULL_SOURCE_TRANSCRIPTION_TESTS) $(FULL_SOURCE_APP_STATE_TESTS)
 GROUPED_RUNNER_SOURCES = Tests/FullSourceTranscriptionTestRunner.swift Tests/FullSourceAppStateTestRunner.swift
