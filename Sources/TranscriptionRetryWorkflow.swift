@@ -259,17 +259,11 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
                     outcome: .cancelled
                 )
             } catch {
-                self?.finishAttempt(
-                    noteID: noteID,
-                    token: token,
-                    outcome: .failed(
-                        TranscriptionRetryFailure(
-                            issue: QuillUserIssueRecord(
-                                code: request.failureContext.fallbackCode
-                            ),
-                            historyPersisted: false
-                        )
-                    )
+                self?.finishFailedAttempt(
+                    error,
+                    request: request,
+                    runtime: runtime,
+                    token: token
                 )
             }
         }
@@ -279,6 +273,53 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         }
         activeAttempts[noteID]?.task = task
         return true
+    }
+
+    static func classifyFailure(
+        _ error: Error,
+        context: TranscriptionRetryFailureContext
+    ) -> QuillUserIssueError {
+        if let issue = error as? QuillUserIssueError {
+            return issue
+        }
+        if let code = urlErrorCode(in: error) {
+            return QuillUserIssueError.cloudTransport(
+                URLError(code),
+                providerHost: context.providerHost,
+                modelID: context.modelID
+            )
+        }
+        let nsError = error as NSError
+        return QuillUserIssueError(
+            record: QuillUserIssueRecord(
+                code: context.fallbackCode,
+                context: QuillUserIssueContext(
+                    providerHost: context.localBackend == nil
+                        ? context.providerHost
+                        : nil,
+                    modelID: context.modelID,
+                    localBackend: context.localBackend
+                )
+            ),
+            privateDiagnostic: "\(nsError.domain) \(nsError.code)"
+        )
+    }
+
+    private static func urlErrorCode(in error: Error) -> URLError.Code? {
+        var current: Error? = error
+        var depth = 0
+        while let candidate = current, depth < 8 {
+            if let urlError = candidate as? URLError {
+                return urlError.code
+            }
+            let nsError = candidate as NSError
+            if nsError.domain == NSURLErrorDomain {
+                return URLError.Code(rawValue: nsError.code)
+            }
+            current = nsError.userInfo[NSUnderlyingErrorKey] as? Error
+            depth += 1
+        }
+        return nil
     }
 
     @MainActor
@@ -465,6 +506,113 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             outcome = .fallback(completion)
         }
         finishAttempt(noteID: noteID, token: token, outcome: outcome)
+    }
+
+    @MainActor
+    private func finishFailedAttempt(
+        _ error: Error,
+        request: TranscriptionRetryWorkflowRequest,
+        runtime: TranscriptionRetryWorkflowRuntime,
+        token: UUID
+    ) {
+        let noteID = request.sourceIdentity.noteID
+        guard activeAttempts[noteID]?.token == token else { return }
+        let issue = Self.classifyFailure(
+            error,
+            context: request.failureContext
+        )
+
+        let currentItem: PipelineHistoryItem
+        do {
+            guard let item = try runtime.history.item(noteID) else {
+                finishAttempt(noteID: noteID, token: token, outcome: .stale)
+                return
+            }
+            currentItem = item
+        } catch {
+            finishAttempt(
+                noteID: noteID,
+                token: token,
+                outcome: .persistenceFailed(
+                    QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+                )
+            )
+            return
+        }
+        guard currentItem.timestamp == request.sourceIdentity.noteTimestamp,
+              currentItem.audioFileName == request.sourceIdentity.audioFileName else {
+            finishAttempt(noteID: noteID, token: token, outcome: .stale)
+            return
+        }
+
+        guard request.origin == .manual else {
+            finishAttempt(
+                noteID: noteID,
+                token: token,
+                outcome: .failed(
+                    TranscriptionRetryFailure(
+                        issue: issue.record,
+                        historyPersisted: false
+                    )
+                )
+            )
+            return
+        }
+
+        let replacement = PipelineHistoryTranscriptionReplacement(
+            rawTranscript: currentItem.rawTranscript,
+            postProcessedTranscript: currentItem.postProcessedTranscript,
+            postProcessingPrompt: currentItem.postProcessingPrompt,
+            postProcessingStatus: issue.persistedStatus,
+            aiProcessingOutcome: currentItem.aiProcessingOutcome,
+            debugStatus: "Retry failed",
+            customVocabulary: request.historyMetadata.customVocabulary,
+            customSystemPrompt: request.historyMetadata.customSystemPrompt,
+            usedLocalTranscription: request.historyMetadata.usedLocalTranscription,
+            usedPostProcessing: request.historyMetadata.usedPostProcessing,
+            transcriptionLanguageCode:
+                request.historyMetadata.transcriptionLanguageCode,
+            spokenLanguage: currentItem.spokenLanguage,
+            localTranscriptionModelID:
+                request.historyMetadata.localTranscriptionModelID,
+            transcriptFileName: currentItem.transcriptFileName
+        )
+        let updatedItem = currentItem.replacingTranscription(
+            with: replacement
+        )
+        do {
+            try runtime.history.persist(updatedItem, true)
+        } catch {
+            finishAttempt(
+                noteID: noteID,
+                token: token,
+                outcome: .persistenceFailed(
+                    QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+                )
+            )
+            return
+        }
+
+        guard activeAttempts[noteID]?.token == token else { return }
+        onEvent?(
+            .itemPersisted(
+                updatedItem,
+                TranscriptionRetryPersistedEffects(
+                    advancesWarningGeneration: true,
+                    invalidatesMeetingSummary: false
+                )
+            )
+        )
+        finishAttempt(
+            noteID: noteID,
+            token: token,
+            outcome: .failed(
+                TranscriptionRetryFailure(
+                    issue: issue.record,
+                    historyPersisted: true
+                )
+            )
+        )
     }
 
     @MainActor

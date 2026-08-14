@@ -14,6 +14,16 @@ struct TranscriptionRetryWorkflowTests {
         try await testManualFallbackUsesFallbackOutcome()
         try await testCommandFallbackUsesCapturedDispositionAndReason()
         try await testProgressBelongsToCurrentAttempt()
+        try await testManualProviderFailurePersistsVersionedIssue()
+        try await testManualFailureUsesCapturedIssueContext()
+        try await testManualFailurePreservesCurrentTranscriptAIAndSummary()
+        try await testManualFailurePreservesSummaryActionCompletion()
+        try await testTimeoutFallbackPersistsRawTranscriptAndFailedOutcome()
+        try testFailureDiagnosticsExcludeCredentialValues()
+        try await testTranscriptAssetFailureRemainsBestEffortSuccess()
+        try await testHistorySaveFailureDeletesCreatedTranscriptAndSuppressesEffects()
+        try await testHistoryLookupFailureMapsToPersistenceFailure()
+        try await testMissingHistoryMapsToStale()
         print("TranscriptionRetryWorkflowTests passed")
     }
 
@@ -540,6 +550,421 @@ struct TranscriptionRetryWorkflowTests {
         try expect(!workflow.state.retryingNoteIDs.contains(item.id), "retry state cleared")
     }
 
+    @MainActor
+    private static func testManualProviderFailurePersistsVersionedIssue()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let expectedIssue = QuillUserIssueError(
+            record: QuillUserIssueRecord(code: .providerUnavailable),
+            privateDiagnostic: "safe provider diagnostic"
+        )
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: failingDependencies(expectedIssue)
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: item, fixture: fixture),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        let saved = try require(history.persistedItems.last, "persisted provider failure")
+        guard case .failed(let failure)? = events.outcomes.last else {
+            throw TranscriptionRetryWorkflowTestFailure("provider failure outcome")
+        }
+        try expectEqual(saved.userIssueRecord?.code, .providerUnavailable, "failure code")
+        try expect(saved.postProcessingStatus.hasPrefix("user-issue:v1:"), "versioned issue")
+        try expectEqual(failure.issue.code, .providerUnavailable, "typed failure code")
+        try expect(failure.historyPersisted, "manual failure persisted")
+        try expectEqual(
+            events.persistedEvents.last?.effects,
+            TranscriptionRetryPersistedEffects(
+                advancesWarningGeneration: true,
+                invalidatesMeetingSummary: false
+            ),
+            "manual failure effects"
+        )
+    }
+
+    @MainActor
+    private static func testManualFailureUsesCapturedIssueContext() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        var providerHost = "captured.example"
+        var modelID = "captured-model"
+        var localBackend: String?
+        let capturedContext = TranscriptionRetryFailureContext(
+            fallbackCode: .providerUnavailable,
+            providerHost: providerHost,
+            modelID: modelID,
+            localBackend: localBackend
+        )
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: failingDependencies(
+                TranscriptionRetryInjectedError.provider
+            )
+        )
+        workflow.onEvent = events.record
+        let request = try makeRequest(
+            item: item,
+            fixture: fixture,
+            failureContext: capturedContext
+        )
+        providerHost = "mutated.example"
+        modelID = "mutated-model"
+        localBackend = "mutated-backend"
+
+        _ = workflow.startManual(
+            request: request,
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        let issue = try require(
+            history.persistedItems.last?.userIssueRecord,
+            "captured issue"
+        )
+        try expectEqual(issue.context.providerHost, "captured.example", "provider host")
+        try expectEqual(issue.context.modelID, "captured-model", "failure model")
+        try expect(issue.context.localBackend == nil, "cloud issue has no local backend")
+        try expectEqual(providerHost, "mutated.example", "external host mutation")
+        try expectEqual(modelID, "mutated-model", "external model mutation")
+        try expectEqual(localBackend, "mutated-backend", "external backend mutation")
+    }
+
+    @MainActor
+    private static func testManualFailurePreservesCurrentTranscriptAIAndSummary()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let summary = makeMeetingSummary(actionCompleted: false)
+        let initial = makeHistoryItem(rawTranscript: "starting raw")
+            .withMeetingSummary(summary)
+        let current = makeHistoryItem(
+            id: initial.id,
+            timestamp: initial.timestamp,
+            rawTranscript: "current raw",
+            postProcessedTranscript: "current final",
+            aiProcessingOutcome: "failed:current"
+        )
+        .withMeetingSummary(summary)
+        let history = TranscriptionRetryHistoryRecorder(item: current)
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: failingDependencies(
+                TranscriptionRetryInjectedError.provider
+            )
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: initial, fixture: fixture),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        let saved = try require(history.persistedItems.last, "preserved failure item")
+        try expectEqual(saved.rawTranscript, "current raw", "failure raw")
+        try expectEqual(saved.postProcessedTranscript, "current final", "failure final")
+        try expectEqual(saved.aiProcessingOutcome, "failed:current", "failure AI outcome")
+        try expectEqual(saved.meetingSummary, summary, "failure Summary")
+        try expectEqual(saved.customTitle, "Current title", "failure custom title")
+        try expectEqual(saved.debugStatus, "Retry failed", "failure debug status")
+    }
+
+    @MainActor
+    private static func testManualFailurePreservesSummaryActionCompletion()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let summary = makeMeetingSummary(actionCompleted: true)
+        let item = makeHistoryItem().withMeetingSummary(summary)
+        let originalJSON = try require(item.meetingSummaryJSON, "summary JSON")
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: failingDependencies(
+                TranscriptionRetryInjectedError.provider
+            )
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: item, fixture: fixture),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        let saved = try require(history.persistedItems.last, "action completion item")
+        try expectEqual(saved.meetingSummaryJSON, originalJSON, "summary JSON bytes")
+        try expectEqual(
+            saved.meetingSummary?.content.actionItems.first?.isCompleted,
+            true,
+            "action completion"
+        )
+    }
+
+    @MainActor
+    private static func testTimeoutFallbackPersistsRawTranscriptAndFailedOutcome()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: immediateDependencies(text: "timeout raw")
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(
+                item: item,
+                fixture: fixture,
+                processing: fixedProcessingBehavior(
+                    processingResult(
+                        raw: "timeout raw",
+                        final: "timeout raw",
+                        disposition: .fallback,
+                        outcome: .failed(reason: "request-timed-out")
+                    )
+                )
+            ),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        let saved = try require(history.persistedItems.last, "timeout fallback item")
+        try expectEqual(saved.rawTranscript, "timeout raw", "timeout raw")
+        try expectEqual(saved.postProcessedTranscript, "timeout raw", "timeout final")
+        try expectEqual(
+            saved.aiProcessingOutcome,
+            "failed:request-timed-out",
+            "timeout outcome"
+        )
+    }
+
+    private static func testFailureDiagnosticsExcludeCredentialValues() throws {
+        let credential = "quill-secret-sentinel-318"
+        let wrapped = NSError(
+            domain: "RetryWrapper",
+            code: 7,
+            userInfo: [
+                NSUnderlyingErrorKey: URLError(.timedOut),
+                NSLocalizedDescriptionKey: credential
+            ]
+        )
+        let issue = TranscriptionRetryWorkflow.classifyFailure(
+            wrapped,
+            context: TranscriptionRetryFailureContext(
+                fallbackCode: .providerConfigurationInvalid,
+                providerHost: "provider.example",
+                modelID: "whisper-large-v3",
+                localBackend: nil
+            )
+        )
+        let reflectedRecord = String(reflecting: issue.record)
+
+        try expectEqual(issue.record.code, .requestTimedOut, "wrapped URL error")
+        try expect(!issue.privateDiagnostic.contains(credential), "diagnostic credential")
+        try expect(!reflectedRecord.contains(credential), "record credential")
+    }
+
+    @MainActor
+    private static func testTranscriptAssetFailureRemainsBestEffortSuccess()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let assets = TranscriptionRetryAssetRecorder()
+        assets.saveError = TranscriptionRetryInjectedError.assetSave
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: immediateDependencies(text: "provider raw")
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: item, fixture: fixture),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: assets.access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        let saved = try require(history.persistedItems.last, "asset failure item")
+        let completion = try requireSuccessCompletion(events.outcomes.last)
+        try expect(saved.transcriptFileName == nil, "asset filename remains nil")
+        try expect(!completion.transcriptAssetPersisted, "asset failure is best effort")
+    }
+
+    @MainActor
+    private static func testHistorySaveFailureDeletesCreatedTranscriptAndSuppressesEffects()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        history.persistError = TranscriptionRetryInjectedError.historySave
+        let assets = TranscriptionRetryAssetRecorder()
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: immediateDependencies(text: "provider raw")
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: item, fixture: fixture),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: assets.access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        try expectEqual(assets.deleted(), ["created.txt"], "created asset cleanup")
+        try expect(events.persistedEvents.isEmpty, "no durable item event")
+        try expectEqual(
+            events.outcomes,
+            [
+                .persistenceFailed(
+                    QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+                )
+            ],
+            "history failure outcome"
+        )
+    }
+
+    @MainActor
+    private static func testHistoryLookupFailureMapsToPersistenceFailure()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        history.lookupError = TranscriptionRetryInjectedError.historyRead
+        let assets = TranscriptionRetryAssetRecorder()
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: immediateDependencies(text: "provider raw")
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: item, fixture: fixture),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: assets.access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        try expectEqual(
+            events.outcomes,
+            [
+                .persistenceFailed(
+                    QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+                )
+            ],
+            "history lookup outcome"
+        )
+        try expect(history.persistedItems.isEmpty, "lookup failure not persisted")
+        try expect(assets.saved().isEmpty, "lookup failure creates no asset")
+    }
+
+    @MainActor
+    private static func testMissingHistoryMapsToStale() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: nil)
+        let assets = TranscriptionRetryAssetRecorder()
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: immediateDependencies(text: "provider raw")
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: item, fixture: fixture),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: assets.access()
+            )
+        )
+
+        try await waitUntil { events.outcomes.count == 1 }
+        try expectEqual(events.outcomes, [.stale], "missing history outcome")
+        try expect(history.persistedItems.isEmpty, "missing history not persisted")
+        try expect(assets.saved().isEmpty, "missing history creates no asset")
+    }
+
+    private static func failingDependencies<E: Error & Sendable>(
+        _ error: E
+    ) -> TranscriptionRetryWorkflowDependencies {
+        TranscriptionRetryWorkflowDependencies(
+            transcribe: { _, _, _, _ in throw error },
+            makeAttemptToken: { UUID() }
+        )
+    }
+
+    private static func makeMeetingSummary(
+        actionCompleted: Bool
+    ) -> MeetingSummaryEnvelope {
+        MeetingSummaryEnvelope(
+            schemaVersion: MeetingSummaryEnvelope.currentSchemaVersion,
+            promptVersion: 1,
+            generatedAt: Date(timeIntervalSince1970: 3_000),
+            sourceFingerprint: String(repeating: "b", count: 64),
+            modelID: "summary/model",
+            backendKind: .cloud,
+            content: MeetingSummaryContent(
+                overview: MeetingSummaryEvidenceText(
+                    text: "Existing overview",
+                    sourceQuotes: []
+                ),
+                keyPoints: [],
+                decisions: [],
+                actionItems: [
+                    MeetingSummaryActionItem(
+                        id: UUID(uuidString: "00000000-0000-0000-0000-000000000318")!,
+                        task: "Ship the workflow",
+                        owner: "Team",
+                        dueDate: nil,
+                        sourceQuote: nil,
+                        isCompleted: actionCompleted
+                    )
+                ],
+                openQuestions: []
+            )
+        )
+    }
+
     private static func immediateDependencies(
         text: String
     ) -> TranscriptionRetryWorkflowDependencies {
@@ -645,6 +1070,7 @@ struct TranscriptionRetryWorkflowTests {
         audioFileName: String = "recording.wav",
         rawTranscript: String = "old raw",
         postProcessedTranscript: String = "old final",
+        aiProcessingOutcome: String = "succeeded",
         transcriptFileName: String? = nil
     ) -> PipelineHistoryItem {
         PipelineHistoryItem(
@@ -657,6 +1083,7 @@ struct TranscriptionRetryWorkflowTests {
             contextScreenshotDataURL: nil,
             contextScreenshotStatus: "No screenshot",
             postProcessingStatus: "Done",
+            aiProcessingOutcome: aiProcessingOutcome,
             debugStatus: "old debug",
             customVocabulary: "stored vocabulary",
             customSystemPrompt: "stored system prompt",
@@ -711,7 +1138,14 @@ struct TranscriptionRetryWorkflowTests {
         fixture: TranscriptionRetryFixture,
         execution: TranscriptionExecutionSnapshot? = nil,
         cloudDependencies: CloudTranscriptionDependencies? = nil,
-        processing: TranscriptionRetryProcessingBehavior? = nil
+        processing: TranscriptionRetryProcessingBehavior? = nil,
+        failureContext: TranscriptionRetryFailureContext =
+            TranscriptionRetryFailureContext(
+                fallbackCode: .providerConfigurationInvalid,
+                providerHost: "provider.example",
+                modelID: "whisper-large-v3",
+                localBackend: nil
+            )
     ) throws -> TranscriptionRetryWorkflowRequest {
         guard let audioFileName = item.audioFileName else {
             throw TranscriptionRetryWorkflowTestFailure("missing audio filename")
@@ -739,12 +1173,7 @@ struct TranscriptionRetryWorkflowTests {
                 localTranscriptionModelID: "captured/local",
                 successDebugStatus: "Retried"
             ),
-            failureContext: TranscriptionRetryFailureContext(
-                fallbackCode: .providerConfigurationInvalid,
-                providerHost: "provider.example",
-                modelID: "whisper-large-v3",
-                localBackend: nil
-            )
+            failureContext: failureContext
         )
     }
 
@@ -1044,9 +1473,17 @@ private struct TranscriptionRetryFixture {
     }
 }
 
+private enum TranscriptionRetryInjectedError: Error, Sendable {
+    case provider
+    case assetSave
+    case historySave
+    case historyRead
+}
+
 private struct TranscriptionRetryWorkflowTestFailure:
     Error,
-    CustomStringConvertible {
+    CustomStringConvertible,
+    Sendable {
     let description: String
 
     init(_ description: String) {
