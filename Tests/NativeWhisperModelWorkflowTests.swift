@@ -4,10 +4,17 @@ import Foundation
 @main
 #endif
 struct NativeWhisperModelWorkflowTests {
+    @MainActor
     static func main() async throws {
         try testInitialStateIsNotInstalled()
         try testRefreshInstallStatusUpdatesStateAndEmitsEvent()
         try await testStartInstallEmitsProgressAndSucceeds()
+        try await testCancelInstallEmitsCancelledOutcome()
+        try await testFailedInstallEmitsFailedOutcomeWithIssue()
+        try testDeleteModelSuccessClearsIssueAndRefreshesStatus()
+        try testDeleteModelFailureSetsIssue()
+        try await testWaitUntilQuiescedResumesAfterCompletion()
+        try testTerminationCleanupBlocksNewInstalls()
         print("NativeWhisperModelWorkflowTests passed")
     }
 
@@ -66,6 +73,140 @@ struct NativeWhisperModelWorkflowTests {
             },
             "installCompleted(.succeeded) event fired"
         )
+    }
+
+    @MainActor
+    private static func testCancelInstallEmitsCancelledOutcome() async throws {
+        let harness = ControlledInstallHarness()
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: harness.dependencies(finalStatus: .notInstalled)
+        )
+        var events: [NativeWhisperModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.startInstall()
+        workflow.cancelInstall()
+        try expect(workflow.state.installProgress.isCancelled, "progress marked cancelled")
+
+        harness.complete(.failure(.cancelled))
+        try await waitUntil { !workflow.state.isInstalling }
+
+        try expect(
+            events.contains { if case .installCompleted(.cancelled) = $0 { return true }; return false },
+            "installCompleted(.cancelled) event fired"
+        )
+    }
+
+    @MainActor
+    private static func testFailedInstallEmitsFailedOutcomeWithIssue() async throws {
+        let harness = ControlledInstallHarness()
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: harness.dependencies(finalStatus: .notInstalled)
+        )
+        var events: [NativeWhisperModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.startInstall()
+        harness.complete(.failure(.downloadFailed("offline")))
+        try await waitUntil { !workflow.state.isInstalling }
+
+        try expectEqual(
+            workflow.state.installIssue?.code,
+            .localModelMissing,
+            "failed install sets localModelMissing issue"
+        )
+        try expect(
+            events.contains {
+                if case .installCompleted(.failed(let issue)) = $0 {
+                    return issue.code == .localModelMissing
+                }
+                return false
+            },
+            "installCompleted(.failed) event fired with matching issue"
+        )
+    }
+
+    @MainActor
+    private static func testDeleteModelSuccessClearsIssueAndRefreshesStatus() throws {
+        final class DeleteTracker {
+            var called = false
+        }
+        let tracker = DeleteTracker()
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: AppStateNativeWhisperDependencies(
+                installStatus: { _ in .notInstalled },
+                startInstall: { _, _, completion in
+                    completion(.failure(.alreadyInProgress))
+                    return NativeWhisperInstallTask()
+                },
+                progressSchedule: { _, operation in operation() },
+                deleteModel: { _ in tracker.called = true },
+                makeExecutionSnapshot: { .live(store: NativeWhisperModelStore()) }
+            )
+        )
+        workflow.deleteModel()
+        try expect(tracker.called, "delete was invoked")
+        try expect(workflow.state.installIssue == nil, "issue cleared on success")
+    }
+
+    @MainActor
+    private static func testDeleteModelFailureSetsIssue() throws {
+        struct DeleteFailure: Error {}
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: AppStateNativeWhisperDependencies(
+                installStatus: { _ in .notInstalled },
+                startInstall: { _, _, completion in
+                    completion(.failure(.alreadyInProgress))
+                    return NativeWhisperInstallTask()
+                },
+                progressSchedule: { _, operation in operation() },
+                deleteModel: { _ in throw DeleteFailure() },
+                makeExecutionSnapshot: { .live(store: NativeWhisperModelStore()) }
+            )
+        )
+        workflow.deleteModel()
+        try expectEqual(
+            workflow.state.installIssue?.code,
+            .localModelMissing,
+            "delete failure sets localModelMissing issue"
+        )
+    }
+
+    @MainActor
+    private static func testWaitUntilQuiescedResumesAfterCompletion() async throws {
+        let harness = ControlledInstallHarness()
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: harness.dependencies(finalStatus: .ready)
+        )
+        workflow.startInstall()
+
+        let quiesceTask = Task { await workflow.waitUntilQuiesced() }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        try expect(!quiesceTask.isCancelled, "quiesce task still waiting")
+
+        harness.complete(.success(()))
+        await quiesceTask.value
+    }
+
+    @MainActor
+    private static func testTerminationCleanupBlocksNewInstalls() throws {
+        var startCount = 0
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: AppStateNativeWhisperDependencies(
+                installStatus: { _ in .notInstalled },
+                startInstall: { _, _, completion in
+                    startCount += 1
+                    completion(.failure(.alreadyInProgress))
+                    return NativeWhisperInstallTask()
+                },
+                progressSchedule: { _, operation in operation() },
+                deleteModel: { _ in },
+                makeExecutionSnapshot: { .live(store: NativeWhisperModelStore()) }
+            )
+        )
+        workflow.beginTerminationCleanup()
+        workflow.startInstall()
+        try expectEqual(startCount, 0, "no install starts after termination cleanup begins")
     }
 
     @MainActor
