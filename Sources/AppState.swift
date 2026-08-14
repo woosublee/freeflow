@@ -2029,9 +2029,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published private(set) var historyRecoverySnapshots: [HistoryRecoverySnapshotDescriptor] = []
     @Published private(set) var historyRecoveryInspections: [UUID: HistoryRecoveryInspection] = [:]
     @Published private(set) var historyRecoveryInspectionSnapshotID: UUID?
-    private var historyRecoveryInspectionQueue: [UUID] = []
-    private var historyRecoveryInspectionAttemptedIDs = Set<UUID>()
-    private var historyRecoveryInspectionRevision = 0
     @Published private(set) var isHistoryRecoveryOperationInProgress = false
     @Published private(set) var historyRecoveryOperationMessage: String?
     @Published private(set) var historyRecoveryImportResult: HistoryRecoveryImportResult?
@@ -4931,21 +4928,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func applyHistoryWorkflowState(
         _ state: HistoryWorkflowState
     ) {
-        let completedArchive = isHistoryArchiveTransitioning
-            && state.archiveActivity == .idle
         historyArchiveSafety = state.archiveSafety
         isHistoryArchiveTransitioning = state.archiveActivity != .idle
-        if completedArchive {
-            historyRecoverySnapshots = state.snapshots
-            historyRecoveryInspections = state.inspections
-            historyRecoveryInspectionSnapshotID = state.inspectionSnapshotID
-            isHistoryRecoveryOperationInProgress =
-                state.recoveryOperation != .idle
-            historyRecoveryOperationMessage = recoveryOperationMessage(
-                for: state.recoveryOperation
-            )
-            historyRecoveryImportResult = state.importResult
-        }
+        historyRecoverySnapshots = state.snapshots
+        historyRecoveryInspections = state.inspections
+        historyRecoveryInspectionSnapshotID = state.inspectionSnapshotID
         isHistoryUnavailable = state.isHistoryUnavailable
         historyPersistenceWarning = state.showsPersistenceWarning
             ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
@@ -5047,124 +5034,36 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func refreshHistoryRecoverySnapshots() {
-        historyRecoverySnapshots = HistoryRecoveryService(
-            storageRoot: storageLayout.rootDirectory
-        ).listSnapshots()
-        let currentIDs = Set(historyRecoverySnapshots.map(\.id))
-        historyRecoveryInspections = historyRecoveryInspections.filter {
-            currentIDs.contains($0.key)
-        }
+        historyWorkflow.refreshSnapshots()
     }
 
     @MainActor
     func beginHistoryRecoveryInspection() {
-        guard !isHistoryRecoveryOperationInProgress,
-              historyRecoveryInspectionSnapshotID == nil else {
-            return
-        }
-        historyRecoveryInspectionAttemptedIDs = []
-        historyRecoveryInspectionQueue = historyRecoverySnapshots.compactMap { snapshot in
-            snapshot.integrity == .ready ? snapshot.id : nil
-        }
-        startNextHistoryRecoveryInspection()
+        historyWorkflow.beginInspection(activeHistory: pipelineHistory)
     }
 
     @MainActor
     func ensureHistoryRecoveryInspection() {
-        guard historyRecoveryInspectionSnapshotID == nil,
-              historyRecoveryInspectionQueue.isEmpty,
-              historyRecoveryInspectionAttemptedIDs.isEmpty,
-              historyRecoveryInspections.isEmpty else {
-            return
-        }
-        beginHistoryRecoveryInspection()
+        historyWorkflow.ensureInspection(activeHistory: pipelineHistory)
     }
 
     @MainActor
     @discardableResult
     func retryHistoryRecoveryInspection(id: UUID) -> Bool {
-        guard !isHistoryRecoveryOperationInProgress,
-              historyRecoverySnapshots.contains(where: {
-                  $0.id == id && $0.integrity == .ready
-              }) else {
-            return false
-        }
-        historyRecoveryInspectionAttemptedIDs.remove(id)
-        historyRecoveryInspectionQueue.removeAll { $0 == id }
-        historyRecoveryInspectionQueue.insert(id, at: 0)
-        startNextHistoryRecoveryInspection()
-        return true
-    }
-
-    @MainActor
-    private func startNextHistoryRecoveryInspection() {
-        guard !isHistoryRecoveryOperationInProgress,
-              historyRecoveryInspectionSnapshotID == nil else {
-            return
-        }
-        while !historyRecoveryInspectionQueue.isEmpty {
-            let snapshotID = historyRecoveryInspectionQueue.removeFirst()
-            guard !historyRecoveryInspectionAttemptedIDs.contains(snapshotID),
-                  historyRecoverySnapshots.contains(where: {
-                      $0.id == snapshotID && $0.integrity == .ready
-                  }) else {
-                continue
-            }
-            historyRecoveryInspectionAttemptedIDs.insert(snapshotID)
-            historyRecoveryInspectionSnapshotID = snapshotID
-            let inspectionRevision = historyRecoveryInspectionRevision
-            let storageRoot = dependencies.storageLayout.rootDirectory
-            let activeHistory = pipelineHistory
-            let appStateReference = WeakAppStateReference(self)
-            Task.detached(priority: .userInitiated) {
-                do {
-                    let inspection = try HistoryRecoveryService(storageRoot: storageRoot)
-                        .inspectSnapshot(id: snapshotID, against: activeHistory)
-                    await MainActor.run {
-                        appStateReference.value?.completeHistoryRecoveryInspection(
-                            inspection,
-                            snapshotID: snapshotID,
-                            inspectionRevision: inspectionRevision,
-                            storageRoot: storageRoot
-                        )
-                    }
-                } catch {
-                    await MainActor.run {
-                        appStateReference.value?.completeHistoryRecoveryInspectionFailure(
-                            snapshotID: snapshotID,
-                            inspectionRevision: inspectionRevision,
-                            storageRoot: storageRoot
-                        )
-                    }
-                }
-            }
-            return
-        }
+        historyWorkflow.retryInspection(
+            id: id,
+            activeHistory: pipelineHistory
+        ) == .accepted
     }
 
     @MainActor
     func invalidateHistoryRecoveryInspectionResults() {
-        historyRecoveryInspectionRevision &+= 1
-        historyRecoveryInspections = [:]
-        historyRecoveryInspectionQueue = []
-        historyRecoveryInspectionAttemptedIDs = []
-        guard selectedSettingsTab == .recovery,
-              !isHistoryRecoveryOperationInProgress else {
-            return
-        }
-        historyRecoveryInspectionQueue = historyRecoverySnapshots.compactMap { snapshot in
-            guard snapshot.integrity == .ready,
-                  snapshot.status != .inspectionFailed else {
-                return nil
-            }
-            return snapshot.id
-        }
-        historyRecoveryInspectionAttemptedIDs = Set(
-            historyRecoverySnapshots.compactMap { snapshot in
-                snapshot.status == .inspectionFailed ? snapshot.id : nil
-            }
+        historyWorkflow.invalidateInspection(
+            activeHistory: pipelineHistory,
+            shouldReschedule:
+                selectedSettingsTab == .recovery
+                    && !isHistoryRecoveryOperationInProgress
         )
-        startNextHistoryRecoveryInspection()
     }
 
     @MainActor
@@ -5307,7 +5206,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         isHistoryRecoveryOperationInProgress = false
         historyRecoveryOperationMessage = nil
         synchronizeHistoryPersistenceState()
-        startNextHistoryRecoveryInspection()
     }
 
     @MainActor
@@ -6655,42 +6553,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
             errorMessage = historyUnavailableMessage
         }
         return result == .accepted
-    }
-
-    @MainActor
-    private func completeHistoryRecoveryInspection(
-        _ inspection: HistoryRecoveryInspection,
-        snapshotID: UUID,
-        inspectionRevision: Int,
-        storageRoot: URL
-    ) {
-        guard historyRecoveryInspectionSnapshotID == snapshotID else { return }
-        historyRecoveryInspectionSnapshotID = nil
-        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        refreshHistoryRecoverySnapshots()
-        if inspectionRevision == historyRecoveryInspectionRevision,
-           historyRecoverySnapshots.contains(where: { $0.id == inspection.snapshotID }) {
-            historyRecoveryInspections[inspection.snapshotID] = inspection
-        }
-        synchronizeHistoryPersistenceState()
-        startNextHistoryRecoveryInspection()
-    }
-
-    @MainActor
-    private func completeHistoryRecoveryInspectionFailure(
-        snapshotID: UUID,
-        inspectionRevision: Int,
-        storageRoot: URL
-    ) {
-        guard historyRecoveryInspectionSnapshotID == snapshotID else { return }
-        historyRecoveryInspectionSnapshotID = nil
-        historyArchiveSafety = HistoryArchiveTransition.inspect(at: storageRoot)
-        refreshHistoryRecoverySnapshots()
-        if inspectionRevision == historyRecoveryInspectionRevision {
-            historyRecoveryInspections.removeValue(forKey: snapshotID)
-        }
-        synchronizeHistoryPersistenceState()
-        startNextHistoryRecoveryInspection()
     }
 
     @MainActor

@@ -323,6 +323,10 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
     let dependencies: HistoryArchiveRecoveryWorkflowDependencies
     private(set) var state = HistoryWorkflowState.initial
     var onEvent: (@MainActor (HistoryWorkflowEvent) -> Void)?
+    private var inspectionQueue: [UUID] = []
+    private var inspectionAttemptedIDs = Set<UUID>()
+    private var inspectionRevision = 0
+    private var inspectionActiveHistory: [PipelineHistoryItem] = []
 
     convenience init(
         storageLayout: AppStateStorageLayout,
@@ -394,6 +398,92 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
     }
 
     @MainActor
+    func refreshSnapshots() {
+        refreshSafetyAndSnapshots()
+        emitState()
+    }
+
+    @MainActor
+    func beginInspection(activeHistory: [PipelineHistoryItem]) {
+        guard state.recoveryOperation == .idle,
+              state.inspectionSnapshotID == nil else {
+            return
+        }
+        inspectionActiveHistory = activeHistory
+        inspectionAttemptedIDs = []
+        inspectionQueue = state.snapshots.compactMap {
+            $0.integrity == .ready ? $0.id : nil
+        }
+        startNextInspection()
+    }
+
+    @MainActor
+    func ensureInspection(activeHistory: [PipelineHistoryItem]) {
+        guard state.inspectionSnapshotID == nil,
+              inspectionQueue.isEmpty,
+              inspectionAttemptedIDs.isEmpty,
+              state.inspections.isEmpty else {
+            return
+        }
+        beginInspection(activeHistory: activeHistory)
+    }
+
+    @MainActor
+    func retryInspection(
+        id: UUID,
+        activeHistory: [PipelineHistoryItem]
+    ) -> HistoryWorkflowCommandResult {
+        guard state.recoveryOperation == .idle else {
+            return .rejected(.recoveryOperationInProgress)
+        }
+        guard state.inspectionSnapshotID != id else {
+            return .rejected(.inspectionInProgress)
+        }
+        guard state.snapshots.contains(where: {
+            $0.id == id && $0.integrity == .ready
+        }) else {
+            return .rejected(.snapshotUnavailable)
+        }
+        inspectionActiveHistory = activeHistory
+        inspectionAttemptedIDs.remove(id)
+        inspectionQueue.removeAll { $0 == id }
+        inspectionQueue.insert(id, at: 0)
+        startNextInspection()
+        return .accepted
+    }
+
+    @MainActor
+    func invalidateInspection(
+        activeHistory: [PipelineHistoryItem],
+        shouldReschedule: Bool
+    ) {
+        inspectionRevision &+= 1
+        state.inspections = [:]
+        inspectionQueue = []
+        inspectionAttemptedIDs = []
+        inspectionActiveHistory = activeHistory
+        emitState()
+
+        guard shouldReschedule,
+              state.recoveryOperation == .idle else {
+            return
+        }
+        inspectionQueue = state.snapshots.compactMap { snapshot in
+            guard snapshot.integrity == .ready,
+                  snapshot.status != .inspectionFailed else {
+                return nil
+            }
+            return snapshot.id
+        }
+        inspectionAttemptedIDs = Set(
+            state.snapshots.compactMap { snapshot in
+                snapshot.status == .inspectionFailed ? snapshot.id : nil
+            }
+        )
+        startNextInspection()
+    }
+
+    @MainActor
     @discardableResult
     func requestArchive(
         context: HistoryWorkflowAdmissionContext,
@@ -446,6 +536,87 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
         state.showsPersistenceWarning = state.isHistoryUnavailable
             || activeStore.durability == .inMemory
         return state
+    }
+
+    @MainActor
+    private func startNextInspection() {
+        guard state.recoveryOperation == .idle,
+              state.inspectionSnapshotID == nil else {
+            return
+        }
+        while !inspectionQueue.isEmpty {
+            let snapshotID = inspectionQueue.removeFirst()
+            guard !inspectionAttemptedIDs.contains(snapshotID),
+                  state.snapshots.contains(where: {
+                      $0.id == snapshotID && $0.integrity == .ready
+                  }) else {
+                continue
+            }
+            inspectionAttemptedIDs.insert(snapshotID)
+            state.inspectionSnapshotID = snapshotID
+            emitState()
+            let revision = inspectionRevision
+            let activeHistory = inspectionActiveHistory
+            let root = storageLayout.rootDirectory
+            let inspectSnapshot = dependencies.inspectSnapshot
+            Task.detached(priority: .userInitiated) { [weak self] in
+                do {
+                    let inspection = try inspectSnapshot(
+                        root,
+                        snapshotID,
+                        activeHistory
+                    )
+                    await self?.completeInspection(
+                        inspection,
+                        snapshotID: snapshotID,
+                        revision: revision
+                    )
+                } catch {
+                    await self?.completeInspectionFailure(
+                        snapshotID: snapshotID,
+                        revision: revision
+                    )
+                }
+            }
+            return
+        }
+    }
+
+    @MainActor
+    private func completeInspection(
+        _ inspection: HistoryRecoveryInspection,
+        snapshotID: UUID,
+        revision: Int
+    ) {
+        guard state.inspectionSnapshotID == snapshotID else { return }
+        state.inspectionSnapshotID = nil
+        refreshSafetyAndSnapshots()
+        if inspectionRevision == revision,
+           state.snapshots.contains(where: {
+               $0.id == inspection.snapshotID
+           }) {
+            state.inspections[inspection.snapshotID] = inspection
+        }
+        emitState()
+        startNextInspection()
+    }
+
+    @MainActor
+    private func completeInspectionFailure(
+        snapshotID: UUID,
+        revision: Int
+    ) {
+        guard state.inspectionSnapshotID == snapshotID else { return }
+        state.inspectionSnapshotID = nil
+        refreshSafetyAndSnapshots()
+        if inspectionRevision == revision {
+            state.inspections.removeValue(forKey: snapshotID)
+        }
+        emitState()
+        if inspectionRevision == revision {
+            emit(.failed(.inspectionFailed(snapshotID)))
+        }
+        startNextInspection()
     }
 
     @MainActor

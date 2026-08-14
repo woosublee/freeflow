@@ -18,6 +18,11 @@ struct HistoryArchiveRecoveryWorkflowTests {
         try await testArchiveVerificationFailureNeverInstallsRuntime()
         try await testArchiveTransitionFailureNeverInstallsRuntime()
         try await testArchiveCapturesOriginatingDependencies()
+        try await testInspectionQueueRunsReadySnapshotsInOrder()
+        try await testInspectionRetryMovesSnapshotToFront()
+        try await testInspectionRejectsDuplicateCurrentSnapshot()
+        try await testInspectionInvalidationDropsStaleCompletion()
+        try await testInspectionFailureContinuesToNextSnapshot()
         print("HistoryArchiveRecoveryWorkflowTests passed")
     }
 
@@ -370,6 +375,176 @@ struct HistoryArchiveRecoveryWorkflowTests {
         }
     }
 
+    private static func testInspectionQueueRunsReadySnapshotsInOrder() async throws {
+        let ids = [UUID(), UUID()]
+        try await withInspectionWorkflow(snapshotIDs: ids) { workflow, recorder in
+            await MainActor.run {
+                workflow.beginInspection(activeHistory: [])
+            }
+            try await waitUntil {
+                workflow.state.inspections.count == ids.count
+            }
+            try expect(
+                recorder.startedIDs == ids,
+                "ready snapshots inspect in catalog order"
+            )
+        }
+    }
+
+    private static func testInspectionRetryMovesSnapshotToFront() async throws {
+        let ids = [UUID(), UUID(), UUID()]
+        try await withInspectionWorkflow(snapshotIDs: ids) { workflow, recorder in
+            recorder.block(id: ids[0])
+            await MainActor.run {
+                workflow.beginInspection(activeHistory: [])
+            }
+            try await waitUntil { recorder.startedIDs == [ids[0]] }
+            let retryResult = await MainActor.run {
+                workflow.retryInspection(id: ids[2], activeHistory: [])
+            }
+            try expect(retryResult == .accepted, "eligible retry is accepted")
+            recorder.release(id: ids[0])
+            try await waitUntil { recorder.startedIDs.count == ids.count }
+            try expect(
+                recorder.startedIDs == [ids[0], ids[2], ids[1]],
+                "retry moves one queued snapshot to the front"
+            )
+        }
+    }
+
+    private static func testInspectionRejectsDuplicateCurrentSnapshot() async throws {
+        let id = UUID()
+        try await withInspectionWorkflow(snapshotIDs: [id]) { workflow, recorder in
+            recorder.block(id: id)
+            await MainActor.run {
+                workflow.beginInspection(activeHistory: [])
+            }
+            try await waitUntil { recorder.startedIDs == [id] }
+            let retryResult = await MainActor.run {
+                workflow.retryInspection(id: id, activeHistory: [])
+            }
+            try expect(
+                retryResult == .rejected(.inspectionInProgress),
+                "retry cannot duplicate the current snapshot inspection"
+            )
+            recorder.release(id: id)
+            try await waitUntil { workflow.state.inspections[id] != nil }
+            try expect(
+                recorder.startedIDs == [id],
+                "current snapshot is inspected only once"
+            )
+        }
+    }
+
+    private static func testInspectionInvalidationDropsStaleCompletion() async throws {
+        let id = UUID()
+        try await withInspectionWorkflow(snapshotIDs: [id]) { workflow, recorder in
+            recorder.block(id: id)
+            await MainActor.run {
+                workflow.beginInspection(activeHistory: [])
+            }
+            try await waitUntil { recorder.startedIDs == [id] }
+            await MainActor.run {
+                workflow.invalidateInspection(
+                    activeHistory: [],
+                    shouldReschedule: false
+                )
+            }
+            recorder.release(id: id)
+            try await waitUntil { recorder.completedIDs.contains(id) }
+            try await waitUntil { workflow.state.inspectionSnapshotID == nil }
+            try expect(
+                workflow.state.inspections[id] == nil,
+                "invalidated inspection completion cannot restore stale results"
+            )
+        }
+    }
+
+    private static func testInspectionFailureContinuesToNextSnapshot() async throws {
+        let ids = [UUID(), UUID()]
+        try await withInspectionWorkflow(snapshotIDs: ids) { workflow, recorder in
+            recorder.fail(id: ids[0])
+            await MainActor.run {
+                workflow.beginInspection(activeHistory: [])
+            }
+            try await waitUntil {
+                workflow.state.inspections[ids[1]] != nil
+            }
+            try expect(
+                recorder.startedIDs == ids,
+                "inspection failure continues to the next queued snapshot"
+            )
+            try expect(
+                workflow.state.inspections[ids[0]] == nil,
+                "failed snapshot has no inspection result"
+            )
+        }
+    }
+
+    private static func withInspectionWorkflow(
+        snapshotIDs: [UUID],
+        _ operation: (
+            HistoryArchiveRecoveryWorkflow,
+            InspectionOperationRecorder
+        ) async throws -> Void
+    ) async throws {
+        try await withTemporaryDirectoryAsync { root in
+            let recorder = InspectionOperationRecorder(
+                descriptors: snapshotIDs.map {
+                    recoverySnapshotDescriptor(id: $0, root: root)
+                }
+            )
+            var dependencies = HistoryArchiveRecoveryWorkflowDependencies.live(
+                makeHistoryStore: { PipelineHistoryStore(storeURL: $0) }
+            )
+            dependencies.rollbackInterruptedTransactions = { _ in .normal }
+            dependencies.inspectArchiveSafety = { _ in .normal }
+            dependencies.removeExpiredSnapshots = { _ in [] }
+            dependencies.listSnapshots = { _ in recorder.descriptors }
+            dependencies.inspectSnapshot = { _, id, _ in
+                try recorder.inspect(id: id)
+            }
+            let workflow = HistoryArchiveRecoveryWorkflow(
+                storageLayout: AppStateStorageLayout(rootDirectory: root),
+                dependencies: dependencies
+            )
+            _ = workflow.prepareStartup()
+            try await operation(workflow, recorder)
+        }
+    }
+
+    private static func recoverySnapshotDescriptor(
+        id: UUID,
+        root: URL,
+        status: HistoryRecoverySnapshotStatus = .available,
+        integrity: HistoryRecoverySnapshotIntegrity = .ready
+    ) -> HistoryRecoverySnapshotDescriptor {
+        let snapshot = HistoryArchiveSnapshot(
+            schemaVersion: HistoryArchiveSnapshot.currentSchemaVersion,
+            id: id,
+            archivedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            components: []
+        )
+        return HistoryRecoverySnapshotDescriptor(
+            snapshot: snapshot,
+            snapshotURL: root
+                .appendingPathComponent("Recovery", isDirectory: true)
+                .appendingPathComponent(
+                    "history-\(id.uuidString.lowercased())",
+                    isDirectory: true
+                ),
+            payloadByteCount: 0,
+            integrity: integrity,
+            state: HistoryRecoveryState(
+                snapshotID: id,
+                status: status,
+                completedAt: status == .completed
+                    ? Date(timeIntervalSince1970: 1_700_000_000)
+                    : nil
+            )
+        )
+    }
+
     private static func withArchiveWorkflow(
         freshStoreUnavailable: Bool = false,
         transitionShouldFail: Bool = false,
@@ -716,6 +891,68 @@ private final class ArchiveTransitionRecorder: @unchecked Sendable {
                     "history-\(snapshotID.uuidString.lowercased())",
                     isDirectory: true
                 )
+        )
+    }
+}
+
+private final class InspectionOperationRecorder: @unchecked Sendable {
+    let descriptors: [HistoryRecoverySnapshotDescriptor]
+    private let lock = NSLock()
+    private var started: [UUID] = []
+    private var completed: [UUID] = []
+    private var blocked: [UUID: DispatchSemaphore] = [:]
+    private var failingIDs = Set<UUID>()
+
+    init(descriptors: [HistoryRecoverySnapshotDescriptor]) {
+        self.descriptors = descriptors
+    }
+
+    var startedIDs: [UUID] {
+        lock.withHistoryWorkflowLock { started }
+    }
+
+    var completedIDs: [UUID] {
+        lock.withHistoryWorkflowLock { completed }
+    }
+
+    func block(id: UUID) {
+        lock.withHistoryWorkflowLock {
+            blocked[id] = DispatchSemaphore(value: 0)
+        }
+    }
+
+    func release(id: UUID) {
+        let semaphore = lock.withHistoryWorkflowLock {
+            blocked[id]
+        }
+        semaphore?.signal()
+    }
+
+    func fail(id: UUID) {
+        lock.withHistoryWorkflowLock {
+            _ = failingIDs.insert(id)
+        }
+    }
+
+    func inspect(id: UUID) throws -> HistoryRecoveryInspection {
+        let configuration = lock.withHistoryWorkflowLock {
+            started.append(id)
+            return (blocked[id], failingIDs.contains(id))
+        }
+        configuration.0?.wait()
+        lock.withHistoryWorkflowLock {
+            completed.append(id)
+        }
+        if configuration.1 {
+            throw HistoryWorkflowTestFailure(
+                "intentional inspection failure"
+            )
+        }
+        return HistoryRecoveryInspection(
+            snapshotID: id,
+            readableRecordCount: 1,
+            alreadyPresentRecordCount: 0,
+            conflictRecordCount: 0
         )
     }
 }

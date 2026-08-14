@@ -160,27 +160,6 @@ struct AppStateHistoryProtectionSourceTests {
             "delayed orphan cleanup uses the startup reference snapshot time"
         )
 
-        // Recovery inspection invalidation must clear stale scheduling state
-        // before any rescheduling can occur, and must only reschedule while
-        // Settings is actually showing the recovery tab. Reproducing this
-        // through the public API requires driving Settings tab navigation
-        // alongside recovery timing, which is out of scope for this suite.
-        let invalidationRange = try source.range(
-            from: "func invalidateHistoryRecoveryInspectionResults()",
-            to: "func importHistoryRecoverySnapshot(id: UUID) -> Bool"
-        )
-        let invalidation = String(source[invalidationRange])
-        try expectOrdered(
-            [
-                "historyRecoveryInspections = [:]",
-                "historyRecoveryInspectionQueue = []",
-                "historyRecoveryInspectionAttemptedIDs = []",
-                "guard selectedSettingsTab == .recovery,"
-            ],
-            in: invalidation,
-            label: "recovery inspection invalidation clears stale scheduling state before it can return"
-        )
-
         // A new recovery import must clear any prior partial-result feedback
         // before it starts, so a stale result from an earlier import cannot be
         // shown alongside a new one. This requires observing state exactly at
