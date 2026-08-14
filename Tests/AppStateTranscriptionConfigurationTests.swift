@@ -3161,7 +3161,8 @@ struct AppStateTranscriptionConfigurationTests {
         )
 
         assert(retry.contains("let transcriptFileName = snapshot.item.transcriptFileName == nil"))
-        assert(retry.contains("saveTranscriptFile("))
+        assert(retry.contains("noteAssetStore.saveTranscript("))
+        assert(!retry.contains("saveTranscriptFile("))
         assert(!retry.contains("let transcriptFileName = snapshot.item.machineStatus == .audioOnly"))
         assert(history.contains("capturedSelection: snapshot.item.capturedSelection"))
         assert(history.contains("systemPrompt: snapshot.item.systemPrompt"))
@@ -3469,8 +3470,9 @@ struct AppStateTranscriptionConfigurationTests {
             assert(cleanup.contains("let transcriptFileName = updatedItem.transcriptFileName"))
             let compactCleanup = cleanup.filter { !$0.isWhitespace }
             assert(compactCleanup.contains(
-                "Self.deleteTranscriptFile(transcriptFileName,transcriptDirectory:transcriptDirectory)"
+                "try?noteAssetStore.deleteTranscript(fileName:transcriptFileName)"
             ))
+            assert(!compactCleanup.contains("Self.deleteTranscriptFile"))
         }
     }
 

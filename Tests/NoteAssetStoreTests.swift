@@ -10,6 +10,10 @@ struct NoteAssetStoreTests {
         try testLoadTranscriptThrowsForMissingFile()
         try testDeleteTranscriptIsIdempotentForMissingFile()
         try testSaveAudioCopiesFileAndPreservesExtension()
+        try testSaveAudioRefreshesModificationDate()
+        try testAdoptStoppedAudioReusesCanonicalWAVInAudioDirectory()
+        try testAdoptStoppedAudioCopiesExternalFile()
+        try testAdoptStoppedAudioCopiesInvalidWAVAlreadyInAudioDirectory()
         try testSaveAudioThrowsWhenSourceFileIsMissing()
         try await testSaveSecurityScopedAudioThrowsWhenSourceFileIsMissing()
         try testDeleteAudioIsIdempotentForMissingFile()
@@ -17,10 +21,18 @@ struct NoteAssetStoreTests {
         try testDeleteTranscriptPropagatesNonMissingFileErrors()
         try testDeleteAudioPropagatesNonMissingFileErrors()
         try testDeleteAssetsStillDeletesTranscriptWhenAudioDeleteFails()
+        try testDeleteRejectsParentDirectoryTraversal()
+        try testLoadTranscriptRejectsParentDirectoryTraversal()
+        try testStoredAudioURLRejectsParentDirectoryTraversal()
+        try testSweepOrphansPreservesReferencedAndProtectedAssets()
+        try testSweepOrphansPreservesRecentAssets()
+        try testSweepOrphansDeletesOldUnreferencedAssets()
+        try testSweepOrphansRequiresTrustedReferences()
         try testStoredAudioURLResolvesFromItem()
         try testStoredAudioURLIsNilWithoutAudioFileName()
         try testPrepareDirectoriesCreatesAudioAndTranscriptDirectories()
         try testTwoStoresWithIndependentLayoutsDoNotShareFiles()
+        try testOneStoreCannotDeleteAnotherStoresTranscript()
         try testSaveTranscriptThrowsWhenDirectoryIsUnavailable()
         try testSaveAudioThrowsWhenDirectoryIsUnavailable()
         print("NoteAssetStoreTests passed")
@@ -80,6 +92,112 @@ struct NoteAssetStoreTests {
             try expect(saved.fileName.hasSuffix(".m4a"), "saved audio keeps the source extension")
             let copied = try Data(contentsOf: saved.fileURL)
             try expect(copied == contents, "saved audio contents match the source file")
+        }
+    }
+
+    private static func testSaveAudioRefreshesModificationDate() throws {
+        try withTemporaryStore { store in
+            let sourceURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(
+                    "note-asset-store-old-source-\(UUID().uuidString).m4a"
+                )
+            try Data("audio contents".utf8).write(to: sourceURL)
+            try setModificationDate(
+                of: sourceURL,
+                to: Date(timeIntervalSince1970: 0)
+            )
+            defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+            let saved = try store.saveAudio(from: sourceURL)
+            let modificationDate = try saved.fileURL.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate
+
+            try expect(
+                modificationDate.map {
+                    Date().timeIntervalSince($0) < 10
+                } == true,
+                "saved audio receives a fresh modification date"
+            )
+        }
+    }
+
+    private static func testAdoptStoppedAudioReusesCanonicalWAVInAudioDirectory() throws {
+        try withTemporaryStore { store in
+            let fileURL = store.storageLayout.audioDirectory
+                .appendingPathComponent("promoted.wav")
+            let originalData = canonicalWAVData(samples: [12, 34])
+            try originalData.write(to: fileURL)
+            let before = try audioFileNames(in: store)
+
+            let saved = try store.adoptOrSaveStoppedAudio(from: fileURL)
+
+            try expect(
+                saved.fileURL == fileURL.standardizedFileURL,
+                "canonical stopped audio is reused"
+            )
+            try expect(
+                saved.fileName == fileURL.lastPathComponent,
+                "canonical stopped audio keeps its name"
+            )
+            let savedData = try Data(contentsOf: saved.fileURL)
+            try expect(
+                savedData == originalData,
+                "reused audio remains unchanged"
+            )
+            let after = try audioFileNames(in: store)
+            try expect(
+                after == before,
+                "reusing canonical audio does not create a second file"
+            )
+        }
+    }
+
+    private static func testAdoptStoppedAudioCopiesExternalFile() throws {
+        try withTemporaryStore { store in
+            let sourceURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("note-asset-store-external-\(UUID().uuidString).wav")
+            let contents = canonicalWAVData(samples: [56, 78])
+            try contents.write(to: sourceURL)
+            defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+            let saved = try store.adoptOrSaveStoppedAudio(from: sourceURL)
+
+            try expect(
+                saved.fileURL != sourceURL.standardizedFileURL,
+                "external stopped audio is copied"
+            )
+            try expect(
+                saved.fileURL.deletingLastPathComponent()
+                    == store.storageLayout.audioDirectory.standardizedFileURL,
+                "external stopped audio is saved under the store audio directory"
+            )
+            let savedData = try Data(contentsOf: saved.fileURL)
+            try expect(
+                savedData == contents,
+                "copied stopped audio preserves contents"
+            )
+        }
+    }
+
+    private static func testAdoptStoppedAudioCopiesInvalidWAVAlreadyInAudioDirectory() throws {
+        try withTemporaryStore { store in
+            let sourceURL = store.storageLayout.audioDirectory
+                .appendingPathComponent("invalid.wav")
+            let contents = Data("not a canonical wav".utf8)
+            try contents.write(to: sourceURL)
+
+            let saved = try store.adoptOrSaveStoppedAudio(from: sourceURL)
+
+            try expect(
+                saved.fileURL != sourceURL.standardizedFileURL,
+                "invalid in-place WAV is copied instead of adopted"
+            )
+            let savedData = try Data(contentsOf: saved.fileURL)
+            try expect(
+                savedData == contents,
+                "copied invalid WAV preserves contents"
+            )
         }
     }
 
@@ -268,6 +386,203 @@ struct NoteAssetStoreTests {
         }
     }
 
+    private static func testDeleteRejectsParentDirectoryTraversal() throws {
+        try withTemporaryStore { store in
+            let siblingURL = store.storageLayout.rootDirectory
+                .appendingPathComponent("outside.wav")
+            try Data("preserve".utf8).write(to: siblingURL)
+
+            try store.deleteAudio(fileName: "../outside.wav")
+            try store.deleteTranscript(fileName: "../outside.wav")
+
+            try expect(
+                FileManager.default.fileExists(atPath: siblingURL.path),
+                "asset deletion cannot escape its storage directory"
+            )
+        }
+    }
+
+    private static func testLoadTranscriptRejectsParentDirectoryTraversal() throws {
+        try withTemporaryStore { store in
+            let siblingURL = store.storageLayout.rootDirectory
+                .appendingPathComponent("outside.txt")
+            try Data("private".utf8).write(to: siblingURL)
+
+            do {
+                _ = try store.loadTranscript(fileName: "../outside.txt")
+                throw TestFailure(
+                    "expected parent-directory transcript load to fail"
+                )
+            } catch let error as TestFailure {
+                throw error
+            } catch is NoteAssetStoreError {
+                // expected
+            }
+        }
+    }
+
+    private static func testStoredAudioURLRejectsParentDirectoryTraversal() throws {
+        try withTemporaryStore { store in
+            let item = makeItem(audioFileName: "../outside.wav")
+            try expect(
+                store.storedAudioURL(for: item) == nil,
+                "stored audio resolution cannot escape its directory"
+            )
+        }
+    }
+
+    private static func testSweepOrphansPreservesReferencedAndProtectedAssets() throws {
+        try withTemporaryStore { store in
+            let referencedAudioURL = store.storageLayout.audioDirectory
+                .appendingPathComponent("referenced.wav")
+            let protectedAudioURL = store.storageLayout.audioDirectory
+                .appendingPathComponent("protected.wav")
+            let inflightDirectory = store.storageLayout.audioDirectory
+                .appendingPathComponent("inflight", isDirectory: true)
+            let referencedTranscriptURL = store.storageLayout.transcriptDirectory
+                .appendingPathComponent("referenced.txt")
+            for fileURL in [
+                referencedAudioURL,
+                protectedAudioURL,
+                referencedTranscriptURL
+            ] {
+                try Data("fixture".utf8).write(to: fileURL)
+                try setModificationDate(
+                    of: fileURL,
+                    to: Date(timeIntervalSince1970: 0)
+                )
+            }
+            try FileManager.default.createDirectory(
+                at: inflightDirectory,
+                withIntermediateDirectories: true
+            )
+
+            store.sweepOrphans(
+                referencedAudioFileNames: [referencedAudioURL.lastPathComponent],
+                referencedTranscriptFileNames: [
+                    referencedTranscriptURL.lastPathComponent
+                ],
+                protectedInflightAudioFileNames: [
+                    protectedAudioURL.lastPathComponent
+                ],
+                referenceTrust: .complete,
+                now: Date(timeIntervalSince1970: 301)
+            )
+
+            for fileURL in [
+                referencedAudioURL,
+                protectedAudioURL,
+                inflightDirectory,
+                referencedTranscriptURL
+            ] {
+                try expect(
+                    FileManager.default.fileExists(atPath: fileURL.path),
+                    "orphan sweep preserves referenced and protected assets"
+                )
+            }
+        }
+    }
+
+    private static func testSweepOrphansPreservesRecentAssets() throws {
+        try withTemporaryStore { store in
+            let recentAudioURL = store.storageLayout.audioDirectory
+                .appendingPathComponent("recent.wav")
+            let recentTranscriptURL = store.storageLayout.transcriptDirectory
+                .appendingPathComponent("recent.txt")
+            let modificationDate = Date(timeIntervalSince1970: 2)
+            for fileURL in [recentAudioURL, recentTranscriptURL] {
+                try Data("fixture".utf8).write(to: fileURL)
+                try setModificationDate(of: fileURL, to: modificationDate)
+            }
+
+            store.sweepOrphans(
+                referencedAudioFileNames: [],
+                referencedTranscriptFileNames: [],
+                protectedInflightAudioFileNames: [],
+                referenceTrust: .complete,
+                now: Date(timeIntervalSince1970: 302)
+            )
+
+            for fileURL in [recentAudioURL, recentTranscriptURL] {
+                try expect(
+                    FileManager.default.fileExists(atPath: fileURL.path),
+                    "orphan sweep preserves assets at the 300-second boundary"
+                )
+            }
+        }
+    }
+
+    private static func testSweepOrphansDeletesOldUnreferencedAssets() throws {
+        try withTemporaryStore { store in
+            let oldAudioURL = store.storageLayout.audioDirectory
+                .appendingPathComponent("old.wav")
+            let oldTranscriptURL = store.storageLayout.transcriptDirectory
+                .appendingPathComponent("old.txt")
+            for fileURL in [oldAudioURL, oldTranscriptURL] {
+                try Data("fixture".utf8).write(to: fileURL)
+                try setModificationDate(
+                    of: fileURL,
+                    to: Date(timeIntervalSince1970: 0)
+                )
+            }
+
+            store.sweepOrphans(
+                referencedAudioFileNames: [],
+                referencedTranscriptFileNames: [],
+                protectedInflightAudioFileNames: [],
+                referenceTrust: .complete,
+                now: Date(timeIntervalSince1970: 301)
+            )
+
+            for fileURL in [oldAudioURL, oldTranscriptURL] {
+                try expect(
+                    !FileManager.default.fileExists(atPath: fileURL.path),
+                    "orphan sweep deletes assets older than 300 seconds"
+                )
+            }
+        }
+    }
+
+    private static func testSweepOrphansRequiresTrustedReferences() throws {
+        for trust in [
+            PipelineHistoryReferenceTrust.recovered,
+            PipelineHistoryReferenceTrust.unavailable
+        ] {
+            try withTemporaryStore { store in
+                let oldAudioURL = store.storageLayout.audioDirectory
+                    .appendingPathComponent("untrusted-\(UUID().uuidString).wav")
+                try Data("fixture".utf8).write(to: oldAudioURL)
+                try setModificationDate(
+                    of: oldAudioURL,
+                    to: Date(timeIntervalSince1970: 0)
+                )
+
+                store.sweepOrphans(
+                    referencedAudioFileNames: [],
+                    referencedTranscriptFileNames: [],
+                    protectedInflightAudioFileNames: [],
+                    referenceTrust: trust,
+                    now: Date(timeIntervalSince1970: 301)
+                )
+
+                try expect(
+                    FileManager.default.fileExists(atPath: oldAudioURL.path),
+                    "orphan sweep skips cleanup without complete reference trust"
+                )
+            }
+        }
+    }
+
+    private static func setModificationDate(
+        of fileURL: URL,
+        to date: Date
+    ) throws {
+        try FileManager.default.setAttributes(
+            [.modificationDate: date],
+            ofItemAtPath: fileURL.path
+        )
+    }
+
     private static func testStoredAudioURLResolvesFromItem() throws {
         try withTemporaryStore { store in
             let item = makeItem(audioFileName: "resolved.wav")
@@ -348,6 +663,37 @@ struct NoteAssetStoreTests {
         )
     }
 
+    private static func testOneStoreCannotDeleteAnotherStoresTranscript() throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note-asset-store-delete-isolation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let firstStore = NoteAssetStore(
+            storageLayout: AppStateStorageLayout(
+                rootDirectory: parent.appendingPathComponent("first", isDirectory: true)
+            )
+        )
+        let secondStore = NoteAssetStore(
+            storageLayout: AppStateStorageLayout(
+                rootDirectory: parent.appendingPathComponent("second", isDirectory: true)
+            )
+        )
+        firstStore.prepareDirectories()
+        secondStore.prepareDirectories()
+        let fileName = try firstStore.saveTranscript(
+            rawTranscript: "first store",
+            postProcessedTranscript: ""
+        )
+
+        try secondStore.deleteTranscript(fileName: fileName)
+
+        let originalURL = firstStore.storageLayout.transcriptDirectory
+            .appendingPathComponent(fileName)
+        try expect(
+            FileManager.default.fileExists(atPath: originalURL.path),
+            "a different store cannot delete the originating transcript"
+        )
+    }
+
     private static func testSaveTranscriptThrowsWhenDirectoryIsUnavailable() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("note-asset-store-blocked-transcript-\(UUID().uuidString)", isDirectory: true)
@@ -389,6 +735,24 @@ struct NoteAssetStoreTests {
         } catch is NoteAssetStoreError {
             // expected
         }
+    }
+
+    private static func canonicalWAVData(samples: [Int16]) -> Data {
+        var payload = Data()
+        for sample in samples {
+            let value = UInt16(bitPattern: sample)
+            payload.append(UInt8(value & 0x00ff))
+            payload.append(UInt8(value >> 8))
+        }
+        var data = CanonicalPCM16WAV.header(dataByteCount: UInt32(payload.count))
+        data.append(payload)
+        return data
+    }
+
+    private static func audioFileNames(in store: NoteAssetStore) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(
+            atPath: store.storageLayout.audioDirectory.path
+        ).sorted()
     }
 
     private static func makeItem(audioFileName: String?) -> PipelineHistoryItem {

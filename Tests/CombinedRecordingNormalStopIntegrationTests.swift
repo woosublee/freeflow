@@ -10,7 +10,6 @@ struct CombinedRecordingNormalStopIntegrationTests {
             try systemAudioOnlyNormalStopPromotesDegradedWAV()
             try committedBoundaryExcludesPhysicalTail()
             try writerFailurePreservesRecoverableJournal()
-            try promotedPermanentURLNeedsNoAdditionalSavedAudioCopy()
             print("CombinedRecordingNormalStopIntegrationTests passed")
         } catch {
             fputs("CombinedRecordingNormalStopIntegrationTests failed: \(error)\n", stderr)
@@ -125,14 +124,6 @@ struct CombinedRecordingNormalStopIntegrationTests {
                     throw TestFailure("writer failure must preserve \(source.fileName)")
                 }
             }
-        }
-    }
-
-    private static func promotedPermanentURLNeedsNoAdditionalSavedAudioCopy() throws {
-        let source = try String(contentsOfFile: "Sources/AppState.swift", encoding: .utf8)
-        guard source.contains("standardizedURL.deletingLastPathComponent() == audioDirectory"),
-              source.contains("return SavedAudioFile(\n            fileName: standardizedURL.lastPathComponent,\n            fileURL: standardizedURL\n        )") else {
-            throw TestFailure("promoted permanent WAV must be reused without another copy")
         }
     }
 

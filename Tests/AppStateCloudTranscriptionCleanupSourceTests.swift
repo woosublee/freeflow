@@ -22,13 +22,13 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         let cleanup = block(
             source,
             from: "private func cleanupDeletedPipelineHistoryAssets(",
-            to: "private static func deleteAudioFile("
+            to: "static func normalizeInterruptedHistoryItem("
         )
         try expectOrdered(
             [
                 "cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(",
                 "retryingItemIDs.remove(assets.historyID)",
-                "Self.deleteStoredFiles(assets, storageLayout: storageLayout)",
+                "try? noteAssetStore.deleteAssets(",
                 "cloudTranscriptionJobStore.delete("
             ],
             in: cleanup,
@@ -82,9 +82,10 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
         )
         try expectOrdered(
             [
+                "let startupNoteAssetStore = NoteAssetStore(",
                 "pipelineHistoryStore.trim(to: maxPipelineHistoryCount)",
                 "cloudTranscriptionJobStore.invalidateSession(",
-                "Self.deleteStoredFiles(removedAssets, storageLayout: storageLayout)",
+                "try? startupNoteAssetStore.deleteAssets(",
                 "cloudTranscriptionJobStore.delete("
             ],
             in: initializer,
@@ -107,7 +108,7 @@ struct AppStateCloudTranscriptionCleanupSourceTests {
                 to: cleanup.lowerBound
             )
             try expect(
-                distance < 1_500,
+                distance < 2_000,
                 "trimmed history assets use nearby common cleanup after \(marker)"
             )
         }
