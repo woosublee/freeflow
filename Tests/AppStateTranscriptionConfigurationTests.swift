@@ -7,6 +7,7 @@ import Foundation
 #endif
 struct AppStateTranscriptionConfigurationTests {
     static func main() async throws {
+        testDefaultDependenciesUseExplicitCredentialLayout()
         try testMakeTranscriptionServiceUsesLocalConfiguration()
         try testMakeTranscriptionServiceMapsEmptyLocalWhisperPathToNil()
         try testMakeTranscriptionServiceDefaultsLegacyMlxWhisperOff()
@@ -103,7 +104,7 @@ struct AppStateTranscriptionConfigurationTests {
         await testCombinedSourceDisabledWhenQueuedLiveOnlyChoiceNotRecording()
         await testLegacyMicrophoneSelectionSeedsDevicePreference()
         await testMicrophoneSelectionPersistsAcrossSourceChanges()
-        await testSystemDefaultAndSystemAudioNormalizesStoredAPIRealtimeOnStartup()
+        try await testSystemDefaultAndSystemAudioNormalizesStoredAPIRealtimeOnStartup()
         await testSystemDefaultAndSystemAudioStartupTurnsOffStoredRealtimeWithoutKey()
         await testSystemDefaultAndSystemAudioStartupTurnsOffStoredAppleLiveWithoutWhisper()
         await testSystemDefaultAndSystemAudioFallsBackFromStoredAppleLiveToInstalledNativeWhisperWithoutReentry()
@@ -146,6 +147,26 @@ struct AppStateTranscriptionConfigurationTests {
         print("AppStateTranscriptionConfigurationTests passed")
     }
 
+    private static let credentialStorageLayout = CredentialStorageLayout(
+        directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "quill-app-state-transcription-credentials-\(UUID().uuidString)",
+                isDirectory: true
+            )
+    )
+
+    private static var credentialStore: CredentialStore {
+        CredentialStore(layout: credentialStorageLayout)
+    }
+
+    private static func testDefaultDependenciesUseExplicitCredentialLayout() {
+        let dependencies = transcriptionTestDependencies()
+        precondition(
+            dependencies.credentialStorageLayout.directory
+                == credentialStorageLayout.directory
+        )
+    }
+
     private static func transcriptionTestDependencies(
         from base: AppStateDependencies = .live,
         status: @escaping @Sendable (NativeWhisperModel) -> NativeWhisperInstallStatus = {
@@ -153,6 +174,7 @@ struct AppStateTranscriptionConfigurationTests {
         }
     ) -> AppStateDependencies {
         var dependencies = base
+        dependencies.credentialStorageLayout = credentialStorageLayout
         dependencies.nativeWhisper.installStatus = status
         return dependencies
     }
@@ -1641,9 +1663,9 @@ struct AppStateTranscriptionConfigurationTests {
 
     private static func testAppStateInstancesKeepIndependentNativeWhisperEnvironments() async {
         resetDefaults()
-        var readyDependencies = AppStateDependencies.live
+        var readyDependencies = transcriptionTestDependencies()
         readyDependencies.nativeWhisper.installStatus = { _ in .ready }
-        var missingDependencies = AppStateDependencies.live
+        var missingDependencies = transcriptionTestDependencies()
         missingDependencies.nativeWhisper.installStatus = { _ in .notInstalled }
 
         let instances = await MainActor.run {
@@ -1662,7 +1684,7 @@ struct AppStateTranscriptionConfigurationTests {
     private static func testNativeWhisperDeletionUsesOriginatingDependency() async {
         resetDefaults()
         let harness = NativeWhisperModelDependencyHarness(status: .ready)
-        var dependencies = AppStateDependencies.live
+        var dependencies = transcriptionTestDependencies()
         dependencies.nativeWhisper.installStatus = harness.installStatus
         dependencies.nativeWhisper.deleteModel = harness.deleteModel
 
@@ -2143,13 +2165,16 @@ struct AppStateTranscriptionConfigurationTests {
         }
     }
 
-    private static func testSystemDefaultAndSystemAudioNormalizesStoredAPIRealtimeOnStartup() async {
+    private static func testSystemDefaultAndSystemAudioNormalizesStoredAPIRealtimeOnStartup() async throws {
         resetDefaults()
         let defaults = UserDefaults.standard
         defaults.set(AudioInputDevice.systemDefaultAndSystemAudioID, forKey: "selected_microphone_id")
         defaults.set(false, forKey: "use_local_transcription")
         defaults.set(true, forKey: "realtime_streaming_enabled")
-        AppSettingsStorage.save("global-key", account: "groq_api_key")
+        try credentialStore.save(
+            "global-key",
+            account: "groq_api_key"
+        )
 
         await MainActor.run {
             let appState = makeAppState()
@@ -2772,7 +2797,7 @@ struct AppStateTranscriptionConfigurationTests {
         )
         _ = try store.append(item, maxCount: 10)
 
-        var dependencies = AppStateDependencies.live
+        var dependencies = transcriptionTestDependencies()
         dependencies.storageLayout = storageLayout
         dependencies.makePipelineHistoryStore = { _ in store }
         let configuredDependencies = dependencies
@@ -3317,10 +3342,9 @@ struct AppStateTranscriptionConfigurationTests {
                 key: "post_processing_backend_choice"
             )
             // AppState will be constructed with `environment.dependencies`, so
-            // fixture credentials must be written through the same
+            // fixture credentials must be written through the same explicit
             // credentialStorageLayout it will actually read from, not the
-            // process-global AppSettingsStorage override resetDefaults()
-            // points elsewhere.
+            // transcription suite's separate credential layout.
             let credentialStore = CredentialStore(
                 layout: environment.dependencies.credentialStorageLayout
             )
@@ -3639,15 +3663,9 @@ struct AppStateTranscriptionConfigurationTests {
     }
 
     private static func resetDefaults() {
-        let isolatedSettingsDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(
-                "quill-app-state-transcription-tests-\(ProcessInfo.processInfo.globallyUniqueString)",
-                isDirectory: true
-            )
-        try? FileManager.default.removeItem(at: isolatedSettingsDirectory)
-        AppSettingsStorage.storageDirectoryOverride = isolatedSettingsDirectory
-        AppSettingsStorage.delete(account: "groq_api_key")
-        AppSettingsStorage.delete(account: "transcription_api_key")
+        try? FileManager.default.removeItem(
+            at: credentialStorageLayout.directory
+        )
         let defaults = UserDefaults.standard
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("app_state_transcription_test_") {
             defaults.removeObject(forKey: key)
