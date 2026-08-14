@@ -6601,7 +6601,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         return MeetingSummaryHistoryAccess(
             durability: { store.durability },
             item: { id in
-                store.loadAllHistory().first(where: { $0.id == id })
+                let history = store.loadAllHistory()
+                guard store.availability == .ready else {
+                    throw PipelineHistoryStoreError.storeUnavailable
+                }
+                return history.first(where: { $0.id == id })
             },
             persist: { item, requiresDurableStore in
                 try store.update(

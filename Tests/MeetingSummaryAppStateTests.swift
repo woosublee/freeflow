@@ -9,6 +9,7 @@ struct MeetingSummaryAppStateTests {
         try await testCreatedAppStateKeepsItsSummaryDependencySnapshot()
         try await testGenerationPersistsOnlyAfterSuccess()
         try await testNonDurableHistoryWarningPreventsSummaryPersistence()
+        try await testHistoryReadFailureMapsToPersistenceWarning()
         try await testLanguageMismatchPreservesSummaryAndRecordsAttempt()
         try await testSuccessfulAttemptSurvivesDurableReload()
         try await testFailedAttemptSurvivesDurableReload()
@@ -537,6 +538,76 @@ struct MeetingSummaryAppStateTests {
                     "new summary is not claimed as durably saved"
                 )
             }
+        }
+    }
+
+    private static func testHistoryReadFailureMapsToPersistenceWarning() async throws {
+        let directoryURL = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let failureToggle = MeetingSummaryFailureToggle()
+        let store = PipelineHistoryStore(
+            storeURL: directoryURL.appendingPathComponent(
+                "PipelineHistory.sqlite"
+            ),
+            historyFetcher: { context, request in
+                if failureToggle.isEnabled {
+                    throw MeetingSummaryAppStateTestFailure(
+                        "Injected history read failure"
+                    )
+                }
+                return try context.fetch(request)
+            }
+        )
+        let item = makeItem(
+            spokenLanguageCode: "en",
+            spokenLanguageResolution: .engineDetected
+        )
+        _ = try store.upsert(
+            item,
+            maxCount: 10,
+            requiresDurableStore: true
+        )
+        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
+        let generator = MeetingSummaryControlledGenerator()
+        let appState = await configuredPersistedAppState(
+            store: store,
+            generator: generator,
+            storageLayout: layout
+        )
+        let task = Task { @MainActor in
+            try await appState.generateMeetingSummary(id: item.id)
+        }
+        await generator.waitUntilStarted()
+        failureToggle.isEnabled = true
+        generator.complete(with: .success(generationResult))
+
+        do {
+            try await task.value
+            throw MeetingSummaryAppStateTestFailure(
+                "Expected history persistence warning"
+            )
+        } catch let issue as QuillUserIssueError {
+            precondition(
+                issue.record.code == .historyPersistenceUnavailable,
+                "history read failure maps to the persistence warning"
+            )
+        } catch let failure as MeetingSummaryAppStateTestFailure {
+            throw failure
+        } catch {
+            throw MeetingSummaryAppStateTestFailure(
+                "Expected persistence warning, got \(error)"
+            )
+        }
+
+        await MainActor.run {
+            precondition(
+                appState.pipelineHistory[0].meetingSummary == nil,
+                "failed history read does not claim a saved Summary"
+            )
+            precondition(
+                appState.meetingSummaryGeneratingNoteIDs.isEmpty,
+                "history read failure clears generation state"
+            )
         }
     }
 
@@ -1388,6 +1459,16 @@ private final class MeetingSummaryGeneratorStub:
         source: MeetingSummarySource
     ) async throws -> MeetingSummaryGenerationResult {
         try await operation(source)
+    }
+}
+
+private final class MeetingSummaryFailureToggle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isEnabled: Bool {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
     }
 }
 

@@ -194,13 +194,14 @@ The workflow receives a narrow, request-scoped history collaborator:
 ```swift
 struct MeetingSummaryHistoryAccess {
     var durability: @MainActor @Sendable () -> PipelineHistoryDurability
-    var item: @MainActor @Sendable (UUID) -> PipelineHistoryItem?
+    var item:
+        @MainActor @Sendable (UUID) throws -> PipelineHistoryItem?
     var persist:
         @MainActor @Sendable (PipelineHistoryItem, Bool) throws -> Void
 }
 ```
 
-`AppState` constructs it from the current `PipelineHistoryStore` for each generation request. It is not retained as workflow runtime state.
+`AppState` constructs it from the current `PipelineHistoryStore` for each generation request. It is not retained as workflow runtime state. The item lookup throws when the originating store becomes unreadable, allowing the workflow to distinguish a persistence outage from a genuinely missing or changed note.
 
 This request-scoped design coordinates with #317: an archive runtime replacement cannot leave the workflow permanently attached to an old store. Archive admission already blocks while Meeting Summary work is active, so the originating store remains valid for the duration of an accepted attempt.
 
@@ -290,7 +291,7 @@ After generator success or failure, the workflow reloads the current item throug
 2. the current revision matches the captured revision,
 3. and the current source fingerprint matches the attempt fingerprint.
 
-Any mismatch yields `sourceChanged`. The workflow writes neither a success result nor a failed attempt for stale work.
+Any mismatch yields `sourceChanged`. A history lookup failure yields `persistenceFailed` instead, so the caller surfaces the existing history-persistence warning. The workflow writes neither a success result nor a failed attempt for stale or unreadable history.
 
 ### Success
 

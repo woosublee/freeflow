@@ -26,7 +26,7 @@ struct MeetingSummaryHistoryAccess {
     var durability:
         @MainActor @Sendable () -> PipelineHistoryDurability
     var item:
-        @MainActor @Sendable (UUID) -> PipelineHistoryItem?
+        @MainActor @Sendable (UUID) throws -> PipelineHistoryItem?
     var persist:
         @MainActor @Sendable (PipelineHistoryItem, Bool) throws -> Void
 }
@@ -52,6 +52,12 @@ enum MeetingSummaryWorkflowOutcome {
     case invalidInput
     case sourceChanged
     case generationFailed(Error)
+    case persistenceFailed
+}
+
+private enum MeetingSummaryCurrentItemValidation {
+    case current(PipelineHistoryItem)
+    case stale
     case persistenceFailed
 }
 
@@ -111,17 +117,27 @@ final class MeetingSummaryWorkflow: @unchecked Sendable {
 
         var sourceItem = initialItem
         if let spokenLanguage = resolvedLanguage.resolvedSpokenLanguage {
-            guard let currentItem = currentItem(
+            let currentItem: PipelineHistoryItem
+            switch validateCurrentItem(
                 noteID: request.noteID,
                 revision: generationRevision,
                 sourceFingerprint: initialFingerprint,
                 history: history
-            ) else {
+            ) {
+            case .current(let item):
+                currentItem = item
+            case .stale:
                 finishGeneration(
                     noteID: request.noteID,
                     revision: generationRevision
                 )
                 return .sourceChanged
+            case .persistenceFailed:
+                finishGeneration(
+                    noteID: request.noteID,
+                    revision: generationRevision
+                )
+                return .persistenceFailed
             }
             let updated = currentItem.withSpokenLanguage(spokenLanguage)
             do {
@@ -158,17 +174,27 @@ final class MeetingSummaryWorkflow: @unchecked Sendable {
             )
         }
 
-        guard let currentItem = currentItem(
+        let currentItem: PipelineHistoryItem
+        switch validateCurrentItem(
             noteID: request.noteID,
             revision: generationRevision,
             sourceFingerprint: source.fingerprint,
             history: history
-        ) else {
+        ) {
+        case .current(let item):
+            currentItem = item
+        case .stale:
             finishGeneration(
                 noteID: request.noteID,
                 revision: generationRevision
             )
             return .sourceChanged
+        case .persistenceFailed:
+            finishGeneration(
+                noteID: request.noteID,
+                revision: generationRevision
+            )
+            return .persistenceFailed
         }
         let envelope = MeetingSummaryEnvelope(
             schemaVersion: MeetingSummaryEnvelope.currentSchemaVersion,
@@ -393,14 +419,21 @@ final class MeetingSummaryWorkflow: @unchecked Sendable {
         languageContext: MeetingSummaryLanguageContext?,
         sourceFingerprint: String
     ) -> MeetingSummaryWorkflowOutcome {
-        guard let currentItem = currentItem(
+        let currentItem: PipelineHistoryItem
+        switch validateCurrentItem(
             noteID: request.noteID,
             revision: revision,
             sourceFingerprint: sourceFingerprint,
             history: history
-        ) else {
+        ) {
+        case .current(let item):
+            currentItem = item
+        case .stale:
             finishGeneration(noteID: request.noteID, revision: revision)
             return .sourceChanged
+        case .persistenceFailed:
+            finishGeneration(noteID: request.noteID, revision: revision)
+            return .persistenceFailed
         }
         if let summaryError = error as? MeetingSummaryError,
            summaryError == .sourceChanged {
@@ -443,19 +476,29 @@ final class MeetingSummaryWorkflow: @unchecked Sendable {
     }
 
     @MainActor
-    private func currentItem(
+    private func validateCurrentItem(
         noteID: UUID,
         revision: Int,
         sourceFingerprint: String,
         history: MeetingSummaryHistoryAccess
-    ) -> PipelineHistoryItem? {
-        guard generationRevisionByID[noteID] == revision,
-              let item = history.item(noteID),
-              Self.availabilitySource(for: item).fingerprint
-                == sourceFingerprint else {
-            return nil
+    ) -> MeetingSummaryCurrentItemValidation {
+        guard generationRevisionByID[noteID] == revision else {
+            return .stale
         }
-        return item
+        let item: PipelineHistoryItem
+        do {
+            guard let loadedItem = try history.item(noteID) else {
+                return .stale
+            }
+            item = loadedItem
+        } catch {
+            return .persistenceFailed
+        }
+        guard Self.availabilitySource(for: item).fingerprint
+                == sourceFingerprint else {
+            return .stale
+        }
+        return .current(item)
     }
 
     @MainActor
