@@ -8,6 +8,14 @@ struct MeetingSummaryWorkflowTests {
         try await testStateAndInvalidationCommands()
         try await testVerifiedSuccessPersistsBeforeEventAndPreservesCompletion()
         try await testUnverifiedSuccessPersistsWarningAndAttempt()
+        try await testExplicitLanguageOverridesSpokenLanguage()
+        try await testEngineDetectedLanguageRequiresNoPreliminaryWrite()
+        try await testTranscriptInferredLanguagePersistsBeforeGeneration()
+        try await testUnavailableLanguageReturnsExistingIssue()
+        try await testGenerationFailurePersistsAttemptWithoutReplacingSummary()
+        try await testInferredLanguagePersistenceFailureIsTyped()
+        try await testFailedAttemptPersistenceFailureIsTyped()
+        try await testSuccessfulSummaryPersistenceFailureIsTyped()
         print("MeetingSummaryWorkflowTests passed")
     }
 
@@ -146,6 +154,383 @@ struct MeetingSummaryWorkflowTests {
             "unverified success emits one persisted item"
         )
     }
+
+    @MainActor
+    private static func testExplicitLanguageOverridesSpokenLanguage() async throws {
+        let initial = makeWorkflowItem(
+            spokenLanguageCode: "ko",
+            spokenLanguageResolution: .engineDetected
+        )
+        let history = MeetingSummaryWorkflowHistoryRecorder(item: initial)
+        let sourceRecorder = MeetingSummaryWorkflowSourceRecorder()
+        let workflow = MeetingSummaryWorkflow(
+            dependencies: .init(
+                makeGenerator: { _ in
+                    MeetingSummaryWorkflowGeneratorStub { source in
+                        await sourceRecorder.record(source)
+                        return makeWorkflowGenerationResult()
+                    }
+                },
+                now: { Date(timeIntervalSince1970: 2_000) }
+            )
+        )
+
+        let outcome = await workflow.generate(
+            request: makeWorkflowRequest(
+                item: initial,
+                requestedOutputLanguage: "English"
+            ),
+            history: history.access
+        )
+        let source = await sourceRecorder.latest()
+
+        try expect(isVerifiedSuccess(outcome), "explicit language succeeds")
+        try expect(
+            source?.languageContext.appliedLanguageCode == "en",
+            "explicit output language overrides spoken language"
+        )
+        try expect(
+            source?.languageContext.resolutionSource == .configured,
+            "explicit output language records configured resolution"
+        )
+        try expect(
+            history.persistedItems.count == 1,
+            "explicit language requires only the Summary write"
+        )
+    }
+
+    @MainActor
+    private static func
+        testEngineDetectedLanguageRequiresNoPreliminaryWrite() async throws
+    {
+        let initial = makeWorkflowItem(
+            spokenLanguageCode: "ko",
+            spokenLanguageResolution: .engineDetected
+        )
+        let history = MeetingSummaryWorkflowHistoryRecorder(item: initial)
+        let sourceRecorder = MeetingSummaryWorkflowSourceRecorder()
+        let workflow = MeetingSummaryWorkflow(
+            dependencies: .init(
+                makeGenerator: { _ in
+                    MeetingSummaryWorkflowGeneratorStub { source in
+                        await sourceRecorder.record(source)
+                        return makeWorkflowGenerationResult()
+                    }
+                },
+                now: { Date(timeIntervalSince1970: 2_000) }
+            )
+        )
+
+        let outcome = await workflow.generate(
+            request: makeWorkflowRequest(
+                item: initial,
+                requestedOutputLanguage: ""
+            ),
+            history: history.access
+        )
+        let source = await sourceRecorder.latest()
+
+        try expect(isVerifiedSuccess(outcome), "detected language succeeds")
+        try expect(
+            source?.languageContext.appliedLanguageCode == "ko",
+            "engine-detected language is applied"
+        )
+        try expect(
+            source?.languageContext.resolutionSource == .engineDetected,
+            "engine-detected source is preserved"
+        )
+        try expect(
+            history.persistedItems.count == 1,
+            "engine-detected language requires no preliminary write"
+        )
+    }
+
+    @MainActor
+    private static func
+        testTranscriptInferredLanguagePersistsBeforeGeneration() async throws
+    {
+        let transcript = "회의에서 다음 주 화요일에 출시하기로 결정했습니다."
+        let initial = makeWorkflowItem(
+            transcript: transcript,
+            spokenLanguageCode: nil,
+            spokenLanguageResolution: nil
+        )
+        let history = MeetingSummaryWorkflowHistoryRecorder(item: initial)
+        let eventRecorder = MeetingSummaryWorkflowEventRecorder(history: history)
+        let sourceRecorder = MeetingSummaryWorkflowSourceRecorder()
+        let workflow = MeetingSummaryWorkflow(
+            dependencies: .init(
+                makeGenerator: { _ in
+                    MeetingSummaryWorkflowGeneratorStub { source in
+                        await sourceRecorder.record(source)
+                        return makeWorkflowGenerationResult()
+                    }
+                },
+                now: { Date(timeIntervalSince1970: 2_000) }
+            )
+        )
+        workflow.onEvent = { eventRecorder.record($0) }
+
+        let outcome = await workflow.generate(
+            request: makeWorkflowRequest(
+                item: initial,
+                requestedOutputLanguage: ""
+            ),
+            history: history.access
+        )
+        let source = await sourceRecorder.latest()
+
+        try expect(isVerifiedSuccess(outcome), "inferred language succeeds")
+        try expect(
+            history.persistedItems.first?.spokenLanguage
+                == SpokenLanguageResolution(
+                    languageCode: "ko",
+                    source: .transcriptInferred
+                ),
+            "inferred Korean is durably saved first"
+        )
+        try expect(
+            source?.languageContext.appliedLanguageCode == "ko",
+            "generator receives the inferred Korean language"
+        )
+        try expect(
+            source?.languageContext.resolutionSource == .transcriptInferred,
+            "generator receives transcript-inferred resolution"
+        )
+        try expect(
+            history.operations == ["persist-1", "persist-2"],
+            "language metadata is saved before the Summary"
+        )
+        try expect(
+            eventRecorder.persistedItems.count == 2,
+            "each durable write emits one item event"
+        )
+    }
+
+    @MainActor
+    private static func testUnavailableLanguageReturnsExistingIssue() async throws {
+        let initial = makeWorkflowItem(
+            transcript: "",
+            spokenLanguageCode: nil,
+            spokenLanguageResolution: nil
+        )
+        let history = MeetingSummaryWorkflowHistoryRecorder(item: initial)
+        let workflow = MeetingSummaryWorkflow(
+            dependencies: .init(
+                makeGenerator: { _ in
+                    MeetingSummaryWorkflowGeneratorStub { _ in
+                        makeWorkflowGenerationResult()
+                    }
+                },
+                now: { Date(timeIntervalSince1970: 2_000) }
+            )
+        )
+
+        let outcome = await workflow.generate(
+            request: makeWorkflowRequest(
+                item: initial,
+                requestedOutputLanguage: ""
+            ),
+            history: history.access
+        )
+
+        guard case .generationFailed(let error) = outcome,
+              let issue = error as? QuillUserIssueError else {
+            throw MeetingSummaryWorkflowTestFailure(
+                description: "language failure preserves its user issue"
+            )
+        }
+        try expect(
+            issue.record.code == .meetingSummaryLanguageUnavailable,
+            "unavailable language uses the existing issue code"
+        )
+    }
+
+    @MainActor
+    private static func
+        testGenerationFailurePersistsAttemptWithoutReplacingSummary() async throws
+    {
+        let actionID = UUID()
+        let existing = makeWorkflowEnvelope(actionID: actionID, completed: true)
+        let initial = makeWorkflowItem().withMeetingSummary(existing)
+        let history = MeetingSummaryWorkflowHistoryRecorder(item: initial)
+        let failure = MeetingSummaryError.outputRejected(
+            .languageMismatch,
+            modelID: "fallback/model"
+        )
+        let workflow = MeetingSummaryWorkflow(
+            dependencies: .init(
+                makeGenerator: { _ in
+                    MeetingSummaryWorkflowGeneratorStub { _ in
+                        throw failure
+                    }
+                },
+                now: { Date(timeIntervalSince1970: 2_000) }
+            )
+        )
+
+        let outcome = await workflow.generate(
+            request: makeWorkflowRequest(item: initial),
+            history: history.access
+        )
+
+        try expect(
+            isGenerationFailure(outcome, matching: failure),
+            "generation failure is typed"
+        )
+        try expect(
+            history.storedItem?.meetingSummary == existing,
+            "failure preserves the existing Summary"
+        )
+        try expect(
+            history.storedItem?.meetingSummary?
+                .content.actionItems.first?.isCompleted == true,
+            "failure preserves action completion"
+        )
+        try expect(
+            history.storedItem?.meetingSummaryAttempt?.outcome == .failed,
+            "failure persists a failed attempt"
+        )
+        try expect(
+            history.storedItem?.meetingSummaryAttempt?.modelID
+                == "fallback/model",
+            "failure records the effective model"
+        )
+        try expect(
+            history.storedItem?.meetingSummaryAttempt?.providerHost
+                == "api.example.com",
+            "failure records the captured provider host"
+        )
+    }
+
+    @MainActor
+    private static func testInferredLanguagePersistenceFailureIsTyped() async throws {
+        let initial = makeWorkflowItem(
+            transcript: "회의에서 다음 주 화요일에 출시하기로 결정했습니다.",
+            spokenLanguageCode: nil,
+            spokenLanguageResolution: nil
+        )
+        let history = MeetingSummaryWorkflowHistoryRecorder(item: initial)
+        history.failingPersistCalls = [1]
+        let eventRecorder = MeetingSummaryWorkflowEventRecorder(history: history)
+        let workflow = MeetingSummaryWorkflow(
+            dependencies: .init(
+                makeGenerator: { _ in
+                    MeetingSummaryWorkflowGeneratorStub { _ in
+                        makeWorkflowGenerationResult()
+                    }
+                },
+                now: { Date(timeIntervalSince1970: 2_000) }
+            )
+        )
+        workflow.onEvent = { eventRecorder.record($0) }
+
+        let outcome = await workflow.generate(
+            request: makeWorkflowRequest(
+                item: initial,
+                requestedOutputLanguage: ""
+            ),
+            history: history.access
+        )
+
+        try expect(
+            isPersistenceFailure(outcome),
+            "language persistence failure is typed"
+        )
+        try expect(
+            eventRecorder.persistedItems.isEmpty,
+            "failed language persistence emits no item event"
+        )
+        try expect(
+            !workflow.consumePendingReveal(noteID: initial.id),
+            "failed language persistence creates no pending reveal"
+        )
+    }
+
+    @MainActor
+    private static func testFailedAttemptPersistenceFailureIsTyped() async throws {
+        let initial = makeWorkflowItem()
+        let history = MeetingSummaryWorkflowHistoryRecorder(item: initial)
+        history.failingPersistCalls = [1]
+        let eventRecorder = MeetingSummaryWorkflowEventRecorder(history: history)
+        let workflow = MeetingSummaryWorkflow(
+            dependencies: .init(
+                makeGenerator: { _ in
+                    MeetingSummaryWorkflowGeneratorStub { _ in
+                        throw MeetingSummaryError.outputRejected(
+                            .languageMismatch,
+                            modelID: "fallback/model"
+                        )
+                    }
+                },
+                now: { Date(timeIntervalSince1970: 2_000) }
+            )
+        )
+        workflow.onEvent = { eventRecorder.record($0) }
+
+        let outcome = await workflow.generate(
+            request: makeWorkflowRequest(item: initial),
+            history: history.access
+        )
+
+        try expect(
+            isPersistenceFailure(outcome),
+            "failed-attempt persistence failure is typed"
+        )
+        try expect(
+            eventRecorder.persistedItems.isEmpty,
+            "failed-attempt write emits no item event"
+        )
+        try expect(
+            history.storedItem?.meetingSummaryAttempt == nil,
+            "failed-attempt write does not mutate durable state"
+        )
+        try expect(
+            !workflow.consumePendingReveal(noteID: initial.id),
+            "failed attempt creates no pending reveal"
+        )
+    }
+
+    @MainActor
+    private static func testSuccessfulSummaryPersistenceFailureIsTyped() async throws {
+        let initial = makeWorkflowItem()
+        let history = MeetingSummaryWorkflowHistoryRecorder(item: initial)
+        history.failingPersistCalls = [1]
+        let eventRecorder = MeetingSummaryWorkflowEventRecorder(history: history)
+        let workflow = MeetingSummaryWorkflow(
+            dependencies: .init(
+                makeGenerator: { _ in
+                    MeetingSummaryWorkflowGeneratorStub { _ in
+                        makeWorkflowGenerationResult()
+                    }
+                },
+                now: { Date(timeIntervalSince1970: 2_000) }
+            )
+        )
+        workflow.onEvent = { eventRecorder.record($0) }
+
+        let outcome = await workflow.generate(
+            request: makeWorkflowRequest(item: initial),
+            history: history.access
+        )
+
+        try expect(
+            isPersistenceFailure(outcome),
+            "successful Summary persistence failure is typed"
+        )
+        try expect(
+            eventRecorder.persistedItems.isEmpty,
+            "failed Summary write emits no item event"
+        )
+        try expect(
+            history.storedItem?.meetingSummary == nil,
+            "failed Summary write does not mutate durable state"
+        )
+        try expect(
+            !workflow.consumePendingReveal(noteID: initial.id),
+            "failed Summary write creates no pending reveal"
+        )
+    }
 }
 
 @MainActor
@@ -208,6 +593,18 @@ private final class MeetingSummaryWorkflowEventRecorder {
             itemEventsObservedAfterPersistence = false
         }
         persistedItems.append(item)
+    }
+}
+
+private actor MeetingSummaryWorkflowSourceRecorder {
+    private var sources: [MeetingSummarySource] = []
+
+    func record(_ source: MeetingSummarySource) {
+        sources.append(source)
+    }
+
+    func latest() -> MeetingSummarySource? {
+        sources.last
     }
 }
 
@@ -338,6 +735,24 @@ private func isVerifiedSuccess(_ outcome: MeetingSummaryWorkflowOutcome) -> Bool
 
 private func isUnverifiedSuccess(_ outcome: MeetingSummaryWorkflowOutcome) -> Bool {
     if case .unverifiedSuccess = outcome { return true }
+    return false
+}
+
+private func isGenerationFailure(
+    _ outcome: MeetingSummaryWorkflowOutcome,
+    matching expected: MeetingSummaryError
+) -> Bool {
+    guard case .generationFailed(let error) = outcome,
+          let summaryError = error as? MeetingSummaryError else {
+        return false
+    }
+    return summaryError == expected
+}
+
+private func isPersistenceFailure(
+    _ outcome: MeetingSummaryWorkflowOutcome
+) -> Bool {
+    if case .persistenceFailed = outcome { return true }
     return false
 }
 

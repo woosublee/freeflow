@@ -103,19 +103,14 @@ final class MeetingSummaryWorkflow {
                 requestedOutputLanguage: request.requestedOutputLanguage
             )
         } catch {
-            guard isCurrent(
-                noteID: request.noteID,
+            return persistFailure(
+                error,
+                request: request,
+                history: history,
                 revision: generationRevision,
-                sourceFingerprint: initialFingerprint,
-                history: history
-            ) else {
-                return .sourceChanged
-            }
-            finishGeneration(
-                noteID: request.noteID,
-                revision: generationRevision
+                languageContext: nil,
+                sourceFingerprint: initialFingerprint
             )
-            return .generationFailed(error)
         }
 
         var sourceItem = initialItem
@@ -153,23 +148,14 @@ final class MeetingSummaryWorkflow {
         do {
             result = try await generator.generate(source: source)
         } catch {
-            guard isCurrent(
-                noteID: request.noteID,
+            return persistFailure(
+                error,
+                request: request,
+                history: history,
                 revision: generationRevision,
-                sourceFingerprint: source.fingerprint,
-                history: history
-            ) else {
-                return .sourceChanged
-            }
-            finishGeneration(
-                noteID: request.noteID,
-                revision: generationRevision
+                languageContext: source.languageContext,
+                sourceFingerprint: source.fingerprint
             )
-            if let summaryError = error as? MeetingSummaryError,
-               summaryError == .sourceChanged {
-                return .sourceChanged
-            }
-            return .generationFailed(error)
         }
 
         guard let currentItem = currentItem(
@@ -361,6 +347,89 @@ final class MeetingSummaryWorkflow {
         configuredProviderHost: String?
     ) -> String? {
         backendKind == .cloud ? configuredProviderHost : nil
+    }
+
+    static func issue(
+        for error: Error,
+        providerHost: String?,
+        backendKind: MeetingSummaryBackendKind,
+        modelID: String
+    ) -> QuillUserIssueRecord {
+        if let issue = error as? QuillUserIssueError {
+            return issue.record
+        }
+        let localBackend = backendKind == .local ? "Local AI" : nil
+        if let summaryError = error as? MeetingSummaryError {
+            return summaryError.userIssue(
+                providerHost: providerHost,
+                modelID: modelID,
+                localBackend: localBackend
+            )
+        }
+        return QuillUserIssueRecord(
+            code: .meetingSummaryUnavailable,
+            context: QuillUserIssueContext(
+                providerHost: providerHost,
+                modelID: modelID,
+                localBackend: localBackend
+            )
+        )
+    }
+
+    private func persistFailure(
+        _ error: Error,
+        request: MeetingSummaryWorkflowRequest,
+        history: MeetingSummaryHistoryAccess,
+        revision: Int,
+        languageContext: MeetingSummaryLanguageContext?,
+        sourceFingerprint: String
+    ) -> MeetingSummaryWorkflowOutcome {
+        guard let currentItem = currentItem(
+            noteID: request.noteID,
+            revision: revision,
+            sourceFingerprint: sourceFingerprint,
+            history: history
+        ) else {
+            return .sourceChanged
+        }
+        if let summaryError = error as? MeetingSummaryError,
+           summaryError == .sourceChanged {
+            finishGeneration(noteID: request.noteID, revision: revision)
+            return .sourceChanged
+        }
+
+        let effectiveModelID = (error as? MeetingSummaryError)
+            .map { $0.effectiveModelID(fallback: request.configuredModelID) }
+            ?? request.configuredModelID
+        let providerHost = Self.providerHost(
+            backendKind: request.configuredBackendKind,
+            configuredProviderHost: request.providerHost
+        )
+        let attempt = MeetingSummaryAttempt(
+            occurredAt: dependencies.now(),
+            outcome: .failed,
+            backendKind: request.configuredBackendKind,
+            modelID: effectiveModelID,
+            providerHost: providerHost,
+            language: languageContext,
+            issue: Self.issue(
+                for: error,
+                providerHost: providerHost,
+                backendKind: request.configuredBackendKind,
+                modelID: effectiveModelID
+            ),
+            sourceFingerprint: sourceFingerprint
+        )
+        let updated = currentItem.withMeetingSummaryAttempt(attempt)
+        do {
+            try history.persist(updated, true)
+        } catch {
+            finishGeneration(noteID: request.noteID, revision: revision)
+            return .persistenceFailed
+        }
+        onEvent?(.itemPersisted(updated))
+        finishGeneration(noteID: request.noteID, revision: revision)
+        return .generationFailed(error)
     }
 
     private func currentItem(
