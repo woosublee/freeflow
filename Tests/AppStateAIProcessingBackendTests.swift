@@ -8,19 +8,17 @@ import Foundation
 struct AppStateAIProcessingBackendTests {
     static func main() async throws {
         let defaultsSnapshot = UserDefaultsSnapshot()
-        let originalSettingsDirectory = AppSettingsStorage.storageDirectoryOverride
-        let isolatedSettingsDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(
-                "quill-app-state-ai-processing-tests-\(ProcessInfo.processInfo.globallyUniqueString)",
-                isDirectory: true
-            )
-        AppSettingsStorage.storageDirectoryOverride = isolatedSettingsDirectory
+        try? FileManager.default.removeItem(
+            at: credentialStorageLayout.directory
+        )
         defer {
             defaultsSnapshot.restore()
-            AppSettingsStorage.storageDirectoryOverride = originalSettingsDirectory
-            try? FileManager.default.removeItem(at: isolatedSettingsDirectory)
+            try? FileManager.default.removeItem(
+                at: credentialStorageLayout.directory
+            )
         }
 
+        testDefaultModelDependenciesUseExplicitCredentialLayout()
         await testLegacyModelsMigrateToIndependentCloudChoices()
         await testCorruptedChoicesFallbackAndPersistNormalizedCloudChoices()
         await testWhitespaceCloudIDsFallbackToRememberedOrDefaultModels()
@@ -31,9 +29,9 @@ struct AppStateAIProcessingBackendTests {
         await testIncompatibleLegacyContextSelectionIsPreservedAndDisabled()
         await testProviderlessQwenVisionCloudChoiceSupportsContext()
         await testLegacyUninstalledContextDownloadDoesNotQueueOrActivateIt()
-        await testStartupPreservesUnavailableCompatibleLocalChoiceWithoutCloudFallback()
+        try await testStartupPreservesUnavailableCompatibleLocalChoiceWithoutCloudFallback()
         await testSettingsDismissalPreservesUnavailableLocalChoiceWithoutCloudFallback()
-        await testStartupPreservesRetiredLocalChoicesWithoutSubstitution()
+        try await testStartupPreservesRetiredLocalChoicesWithoutSubstitution()
         await testSelectingReadyQualityModelRecoversRetiredPostProcessingChoice()
         await testChangingCloudModelWhileLocalPreservesLocalChoice()
         await testDirectCloudChoiceSynchronizesRememberedModel()
@@ -85,6 +83,18 @@ struct AppStateAIProcessingBackendTests {
         await testWarningBannerDismissalIsScopedToNoteAndResetsOnRetryGeneration()
         try testDeletingNotesForgetsWarningBannerState()
         print("AppStateAIProcessingBackendTests passed")
+    }
+
+    private static let credentialStorageLayout = CredentialStorageLayout(
+        directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "quill-app-state-ai-processing-credentials-\(UUID().uuidString)",
+                isDirectory: true
+            )
+    )
+
+    private static var credentialStore: CredentialStore {
+        CredentialStore(layout: credentialStorageLayout)
     }
 
     private static let successfulReadinessProbe: LocalAIServerManager.ReadinessProbe = { request in
@@ -354,7 +364,7 @@ struct AppStateAIProcessingBackendTests {
         }
     }
 
-    private static func testStartupPreservesUnavailableCompatibleLocalChoiceWithoutCloudFallback() async {
+    private static func testStartupPreservesUnavailableCompatibleLocalChoiceWithoutCloudFallback() async throws {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         var dependencies = modelTestDependencies()
@@ -364,7 +374,10 @@ struct AppStateAIProcessingBackendTests {
             modelID: LocalAIModelCatalog.quality.id
         )
         storeChoice(localChoice, forKey: "post_processing_backend_choice")
-        AppSettingsStorage.save("configured-key", account: "groq_api_key")
+        try credentialStore.save(
+            "configured-key",
+            account: "groq_api_key"
+        )
 
         let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
@@ -404,7 +417,7 @@ struct AppStateAIProcessingBackendTests {
         }
     }
 
-    private static func testStartupPreservesRetiredLocalChoicesWithoutSubstitution() async {
+    private static func testStartupPreservesRetiredLocalChoicesWithoutSubstitution() async throws {
         resetAIProcessingDefaults()
         let retiredModelID = "qwen2.5-1.5b-instruct"
         let retiredChoice = AIProcessingBackendChoice.localAI(modelID: retiredModelID)
@@ -421,14 +434,17 @@ struct AppStateAIProcessingBackendTests {
             deletionHarness.record(modelID: model.id, managerWasStopped: true)
         }
         defer {
-            AppSettingsStorage.delete(account: "groq_api_key")
+            try? credentialStore.delete(account: "groq_api_key")
         }
 
         UserDefaults.standard.set("remembered/post", forKey: "post_processing_model")
         UserDefaults.standard.set("remembered/context", forKey: "context_model")
         storeChoice(retiredChoice, forKey: "post_processing_backend_choice")
         storeChoice(retiredChoice, forKey: "context_backend_choice")
-        AppSettingsStorage.save("configured-cloud-key", account: "groq_api_key")
+        try credentialStore.save(
+            "configured-cloud-key",
+            account: "groq_api_key"
+        )
 
         let appState = await makeRefreshedAppState(dependencies: dependencies)
         await MainActor.run {
@@ -2087,11 +2103,11 @@ struct AppStateAIProcessingBackendTests {
         let secondStatus = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let firstManager = LocalAIServerManager()
         let secondManager = LocalAIServerManager()
-        var firstDependencies = AppStateDependencies.live
+        var firstDependencies = modelTestDependencies()
         firstDependencies.localAI.installStatus = firstStatus.status
         firstDependencies.localAI.processingAvailability = supportedLocalAIAvailability
         firstDependencies.localAI.makeServerManager = { firstManager }
-        var secondDependencies = AppStateDependencies.live
+        var secondDependencies = modelTestDependencies()
         secondDependencies.localAI.installStatus = secondStatus.status
         secondDependencies.localAI.processingAvailability = unsupportedLocalAIAvailability
         secondDependencies.localAI.makeServerManager = { secondManager }
@@ -2123,7 +2139,7 @@ struct AppStateAIProcessingBackendTests {
 
     private static func testExecutorUsesOriginatingLocalAIAvailability() async {
         resetAIProcessingDefaults()
-        var dependencies = AppStateDependencies.live
+        var dependencies = modelTestDependencies()
         dependencies.localAI.installStatus = { _ in .ready }
         dependencies.localAI.processingAvailability = unsupportedLocalAIAvailability
         let appState = await MainActor.run {
@@ -2316,8 +2332,17 @@ struct AppStateAIProcessingBackendTests {
         precondition(deletionHarness.deletedModelIDs == [LocalAIModelCatalog.quality.id])
     }
 
+    private static func testDefaultModelDependenciesUseExplicitCredentialLayout() {
+        let dependencies = modelTestDependencies()
+        precondition(
+            dependencies.credentialStorageLayout.directory
+                == credentialStorageLayout.directory
+        )
+    }
+
     private static func modelTestDependencies() -> AppStateDependencies {
         var dependencies = AppStateDependencies.live
+        dependencies.credentialStorageLayout = credentialStorageLayout
         dependencies.localAI.installStatus = { _ in .notInstalled }
         dependencies.localAI.processingAvailability = supportedLocalAIAvailability
         dependencies.nativeWhisper.installStatus = { _ in .notInstalled }
@@ -2662,7 +2687,7 @@ struct AppStateAIProcessingBackendTests {
     }
 
     private static func resetAIProcessingDefaults() {
-        AppSettingsStorage.delete(account: "groq_api_key")
+        try? credentialStore.delete(account: "groq_api_key")
         for key in [
             "post_processing_model",
             "context_model",
