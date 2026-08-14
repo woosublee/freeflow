@@ -11,11 +11,6 @@ import os.log
 private let recordingLog = OSLog(subsystem: "com.woosublee.quill", category: "Recording")
 private let calendarLog = OSLog(subsystem: "com.woosublee.quill", category: "Calendar")
 
-enum HistoryArchivePostAction: Sendable {
-    case startFresh
-    case openRecovery
-}
-
 extension AIProcessingFeature {
     var modelFeature: AIModelFeature {
         switch self {
