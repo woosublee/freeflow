@@ -16,6 +16,23 @@ enum PipelineHistoryMachineStatus: Equatable {
     case completed
 }
 
+struct PipelineHistoryTranscriptionReplacement {
+    let rawTranscript: String
+    let postProcessedTranscript: String
+    let postProcessingPrompt: String?
+    let postProcessingStatus: String
+    let aiProcessingOutcome: String
+    let debugStatus: String
+    let customVocabulary: String
+    let customSystemPrompt: String
+    let usedLocalTranscription: Bool
+    let usedPostProcessing: Bool
+    let transcriptionLanguageCode: String
+    let spokenLanguage: SpokenLanguageResolution?
+    let localTranscriptionModelID: String
+    let transcriptFileName: String?
+}
+
 struct PipelineHistoryItem: Identifiable, Codable {
     static let transcriptionRecoveryPlaceholderStatus =
         RecoveredRecordingMode.complete.placeholderStatus
@@ -404,6 +421,50 @@ struct PipelineHistoryItem: Identifiable, Codable {
             meetingSummaryAttempt: meetingSummaryAttempt,
             localTranscriptionModelID: localTranscriptionModelID,
             transcriptFileName: transcriptFileName,
+            contextAppName: contextAppName,
+            contextBundleIdentifier: contextBundleIdentifier,
+            contextWindowTitle: contextWindowTitle,
+            customTitle: customTitle,
+            meetingSummaryJSON: meetingSummaryJSON
+        )
+    }
+
+    func replacingTranscription(
+        with replacement: PipelineHistoryTranscriptionReplacement
+    ) -> PipelineHistoryItem {
+        PipelineHistoryItem(
+            intent: intent,
+            selectedText: selectedText,
+            capturedSelection: capturedSelection,
+            id: id,
+            timestamp: timestamp,
+            recordingStartedAt: recordingStartedAt,
+            recordingEndedAt: recordingEndedAt,
+            calendarMatch: calendarMatch,
+            rawTranscript: replacement.rawTranscript,
+            postProcessedTranscript: replacement.postProcessedTranscript,
+            postProcessingPrompt: replacement.postProcessingPrompt,
+            systemPrompt: systemPrompt,
+            contextSummary: contextSummary,
+            contextSystemPrompt: contextSystemPrompt,
+            contextPrompt: contextPrompt,
+            contextScreenshotDataURL: contextScreenshotDataURL,
+            contextScreenshotStatus: contextScreenshotStatus,
+            postProcessingStatus: replacement.postProcessingStatus,
+            aiProcessingOutcome: replacement.aiProcessingOutcome,
+            debugStatus: replacement.debugStatus,
+            customVocabulary: replacement.customVocabulary,
+            customSystemPrompt: replacement.customSystemPrompt,
+            audioFileName: audioFileName,
+            usedLocalTranscription: replacement.usedLocalTranscription,
+            usedContextCapture: usedContextCapture,
+            usedPostProcessing: replacement.usedPostProcessing,
+            transcriptionLanguageCode: replacement.transcriptionLanguageCode,
+            spokenLanguageCode: replacement.spokenLanguage?.languageCode,
+            spokenLanguageResolution: replacement.spokenLanguage?.source,
+            meetingSummaryAttempt: meetingSummaryAttempt,
+            localTranscriptionModelID: replacement.localTranscriptionModelID,
+            transcriptFileName: replacement.transcriptFileName,
             contextAppName: contextAppName,
             contextBundleIdentifier: contextBundleIdentifier,
             contextWindowTitle: contextWindowTitle,
