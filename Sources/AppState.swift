@@ -5105,17 +5105,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         ) == .accepted
     }
 
-    @discardableResult
-    private static func preparedDirectory(_ directory: URL) -> URL {
-        if !FileManager.default.fileExists(atPath: directory.path) {
-            try? FileManager.default.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true
-            )
-        }
-        return directory
-    }
-
     private static func recoverRecordingJournalsBeforeHistoryLoad(
         recordingJournalStore: RecordingJournalStore,
         historyStore: PipelineHistoryStore,
@@ -6382,23 +6371,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
+    @MainActor
     private func synchronizeHistoryPersistenceState() {
-        let state = historyWorkflow.synchronize(
-            activeStore: pipelineHistoryStore
+        applyHistoryWorkflowState(
+            historyWorkflow.synchronize(activeStore: pipelineHistoryStore)
         )
-        historyArchiveSafety = state.archiveSafety
-        isHistoryUnavailable = state.isHistoryUnavailable
-        historyPersistenceWarning = state.showsPersistenceWarning
-            ? QuillUserIssueRecord(code: .historyPersistenceUnavailable)
-            : nil
     }
 
-    private func loadPipelineHistory() -> [PipelineHistoryItem] {
-        let history = pipelineHistoryStore.loadAllHistory()
-        synchronizeHistoryPersistenceState()
-        return history
-    }
-
+    @MainActor
     @discardableResult
     private func requireAvailableHistoryForMutation() -> Bool {
         synchronizeHistoryPersistenceState()

@@ -28,6 +28,7 @@ struct HistoryArchiveRecoveryWorkflowTests {
         try await testRecoveryImportFailureRestoresVerifiedStore()
         try await testRecoveryReopenFailureNeverInstallsRuntime()
         try testRecoveryImportRejectsInvalidAndReentrantRequests()
+        try await testSnapshotCancellationRefreshesCatalog()
         try await testSnapshotDeleteRefreshesCatalog()
         try await testSnapshotFailureNeverInstallsRuntime()
         try await testSnapshotOperationsWaitForInspection()
@@ -636,6 +637,32 @@ struct HistoryArchiveRecoveryWorkflowTests {
         )
     }
 
+    private static func testSnapshotCancellationRefreshesCatalog() async throws {
+        try await withRecoveryWorkflow(
+            snapshotStatus: .completed
+        ) { workflow, _, recorder, events in
+            let command = await MainActor.run {
+                workflow.requestCancelScheduledDeletion(
+                    snapshotID: recorder.snapshotID,
+                    activeHistory: [],
+                    shouldRescheduleInspection: false
+                )
+            }
+            try expect(
+                command == .accepted,
+                "completed snapshot cancellation is accepted"
+            )
+            try await waitUntil {
+                workflow.state.snapshots.first?.scheduledDeletionAt == nil
+                    && workflow.state.recoveryOperation == .idle
+            }
+            try expect(
+                !events.kinds.contains(.runtimeInstalled),
+                "retention cancellation never replaces active history"
+            )
+        }
+    }
+
     private static func testSnapshotDeleteRefreshesCatalog() async throws {
         try await withRecoveryWorkflow { workflow, _, recorder, events in
             let command = await MainActor.run {
@@ -714,6 +741,7 @@ struct HistoryArchiveRecoveryWorkflowTests {
         importShouldFail: Bool = false,
         deleteShouldFail: Bool = false,
         unavailableStoreCalls: Set<Int> = [],
+        snapshotStatus: HistoryRecoverySnapshotStatus = .available,
         _ operation: (
             HistoryArchiveRecoveryWorkflow,
             HistoryStartupResult,
@@ -726,7 +754,11 @@ struct HistoryArchiveRecoveryWorkflowTests {
             let recorder = RecoveryOperationRecorder(
                 snapshotID: snapshotID,
                 descriptors: [
-                    recoverySnapshotDescriptor(id: snapshotID, root: root),
+                    recoverySnapshotDescriptor(
+                        id: snapshotID,
+                        root: root,
+                        status: snapshotStatus
+                    ),
                 ],
                 importShouldFail: importShouldFail,
                 deleteShouldFail: deleteShouldFail

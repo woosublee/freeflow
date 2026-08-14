@@ -357,8 +357,8 @@ private enum HistorySnapshotOperation: Sendable {
 }
 
 final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
-    let storageLayout: AppStateStorageLayout
-    let dependencies: HistoryArchiveRecoveryWorkflowDependencies
+    private let storageLayout: AppStateStorageLayout
+    private let dependencies: HistoryArchiveRecoveryWorkflowDependencies
     private(set) var state = HistoryWorkflowState.initial
     var onEvent: (@MainActor (HistoryWorkflowEvent) -> Void)?
     private var inspectionQueue: [UUID] = []
@@ -537,6 +537,7 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
         )
         guard admission == .accepted else { return admission }
         state.importResult = nil
+        emitState()
         do {
             try currentStore.detachForArchiveVerification()
         } catch {
