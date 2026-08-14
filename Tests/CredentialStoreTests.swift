@@ -15,6 +15,7 @@ struct CredentialStoreTests {
         try testDeleteThrowsWhenDirectoryIsUnavailable()
         try testSettingsFileHasOwnerOnlyPermissions()
         try testErrorDescriptionSurfacesTheUnderlyingFailure()
+        try testLegacyCredentialBridgeIsRemoved()
         print("CredentialStoreTests passed")
     }
 
@@ -174,6 +175,29 @@ struct CredentialStoreTests {
                 "the settings file is restricted to owner-only read/write"
             )
         }
+    }
+
+    private static func testLegacyCredentialBridgeIsRemoved() throws {
+        let credentialSource = try String(
+            contentsOfFile: "Sources/CredentialStore.swift",
+            encoding: .utf8
+        )
+        let legacyTypeName = ["App", "Settings", "Storage"].joined()
+        try expect(
+            !credentialSource.contains(legacyTypeName),
+            "CredentialStorageLayout no longer consults a global override"
+        )
+        try expect(
+            !FileManager.default.fileExists(
+                atPath: "Sources/KeychainStorage.swift"
+            ),
+            "the legacy credential bridge source is removed"
+        )
+        try expect(
+            CredentialStorageLayout.live.directory
+                == AppName.applicationSupportDirectory,
+            "the live credential layout preserves the production path"
+        )
     }
 
     private static func withTemporaryStore(
