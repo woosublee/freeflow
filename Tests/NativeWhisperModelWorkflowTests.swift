@@ -11,7 +11,7 @@ struct NativeWhisperModelWorkflowTests {
         try await testStartInstallEmitsProgressAndSucceeds()
         try await testCancelInstallEmitsCancelledOutcome()
         try await testFailedInstallEmitsFailedOutcomeWithIssue()
-        try testDeleteModelSuccessClearsIssueAndRefreshesStatus()
+        try await testDeleteModelSuccessClearsIssueAndRefreshesStatus()
         try testDeleteModelFailureSetsIssue()
         try await testWaitUntilQuiescedResumesAfterCompletion()
         try testTerminationCleanupBlocksNewInstalls()
@@ -127,16 +127,19 @@ struct NativeWhisperModelWorkflowTests {
     }
 
     @MainActor
-    private static func testDeleteModelSuccessClearsIssueAndRefreshesStatus() throws {
+    private static func testDeleteModelSuccessClearsIssueAndRefreshesStatus() async throws {
+        // Capture the install completion to simulate a failed install
+        var completionCallback: ((Result<Void, NativeWhisperInstallerError>) -> Void)?
         final class DeleteTracker {
             var called = false
         }
         let tracker = DeleteTracker()
+
         let workflow = NativeWhisperModelWorkflow(
             dependencies: AppStateNativeWhisperDependencies(
                 installStatus: { _ in .notInstalled },
                 startInstall: { _, _, completion in
-                    completion(.failure(.alreadyInProgress))
+                    completionCallback = completion
                     return NativeWhisperInstallTask()
                 },
                 progressSchedule: { _, operation in operation() },
@@ -144,9 +147,25 @@ struct NativeWhisperModelWorkflowTests {
                 makeExecutionSnapshot: { .live(store: NativeWhisperModelStore()) }
             )
         )
+
+        // Drive a failed install to set installIssue
+        workflow.startInstall()
+        completionCallback?(.failure(.downloadFailed("offline")))
+        try await waitUntil { !workflow.state.isInstalling }
+
+        // Verify issue is set before delete
+        try expectEqual(
+            workflow.state.installIssue?.code,
+            .localModelMissing,
+            "failed install sets issue"
+        )
+
+        // Now delete the model
         workflow.deleteModel()
+
+        // Verify delete was called and issue is cleared
         try expect(tracker.called, "delete was invoked")
-        try expect(workflow.state.installIssue == nil, "issue cleared on success")
+        try expect(workflow.state.installIssue == nil, "issue cleared on successful delete")
     }
 
     @MainActor
