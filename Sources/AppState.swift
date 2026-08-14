@@ -6486,7 +6486,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     survivingHistory: []
                 )
             }
-            forgetAllMeetingSummaryGenerationState()
+            meetingSummaryWorkflow.forgetAll()
             forgetAllWarningBannerState()
         } catch {
             errorMessage = LocalizedUserMessage.providerFailure(prefix: localizedCatalogString("Unable to clear run history"), providerDetail: error.localizedDescription)
@@ -6515,7 +6515,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 cleanupDeletedPipelineHistoryAssets(deletedAssets)
             }
             pipelineHistory.remove(at: index)
-            forgetMeetingSummaryGenerationState(for: id)
+            meetingSummaryWorkflow.forget(noteID: id)
             forgetWarningBannerState(for: id)
         } catch {
             errorMessage = LocalizedUserMessage.providerFailure(prefix: localizedCatalogString("Unable to delete run history entry"), providerDetail: error.localizedDescription)
@@ -6613,21 +6613,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func invalidateMeetingSummaryGeneration(for id: UUID) {
-        meetingSummaryWorkflow.invalidate(noteID: id)
-    }
-
-    @MainActor
-    private func forgetMeetingSummaryGenerationState(for id: UUID) {
-        meetingSummaryWorkflow.forget(noteID: id)
-    }
-
-    @MainActor
-    private func forgetAllMeetingSummaryGenerationState() {
-        meetingSummaryWorkflow.forgetAll()
-    }
-
-    @MainActor
     func generateMeetingSummary(id: UUID) async throws {
         guard let startItem = pipelineHistory.first(where: { $0.id == id }) else {
             throw MeetingSummaryError.invalidInput
@@ -6711,7 +6696,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             throw QuillUserIssueError.historyPersistenceUnavailable()
         }
         pipelineHistory[noteIndex] = updated
-        invalidateMeetingSummaryGeneration(for: noteID)
+        meetingSummaryWorkflow.invalidate(noteID: noteID)
     }
 
     @MainActor
@@ -6776,7 +6761,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             if let index = pipelineHistory.firstIndex(where: { $0.id == id }) {
                 pipelineHistory[index] = updated
             }
-            invalidateMeetingSummaryGeneration(for: id)
+            meetingSummaryWorkflow.invalidate(noteID: id)
         } catch {
             errorMessage = LocalizedUserMessage.providerFailure(prefix: localizedCatalogString("Failed to save transcript edit"), providerDetail: error.localizedDescription)
         }
@@ -7216,7 +7201,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     self.incrementNoteRetryGeneration(for: snapshot.item.id)
                     self.pipelineHistory = self.pipelineHistoryStore.loadAllHistory()
                     if retrySucceeded {
-                        self.invalidateMeetingSummaryGeneration(for: snapshot.item.id)
+                        self.meetingSummaryWorkflow.invalidate(
+                            noteID: snapshot.item.id
+                        )
                         if snapshot.useLocalTranscription,
                            let cloudContext = snapshot.cloudExecutionContext {
                             self.completeCloudTranscriptionHistory(
