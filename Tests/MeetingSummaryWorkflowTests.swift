@@ -16,6 +16,9 @@ struct MeetingSummaryWorkflowTests {
         try await testInferredLanguagePersistenceFailureIsTyped()
         try await testFailedAttemptPersistenceFailureIsTyped()
         try await testSuccessfulSummaryPersistenceFailureIsTyped()
+        try await testStaleSuccessCompletionsAreRejected()
+        try await testStaleFailureCompletionsAreRejected()
+        try await testStaleGenerationCannotClearNewerGenerationState()
         print("MeetingSummaryWorkflowTests passed")
     }
 
@@ -531,6 +534,179 @@ struct MeetingSummaryWorkflowTests {
             "failed Summary write creates no pending reveal"
         )
     }
+
+    @MainActor
+    private static func testStaleSuccessCompletionsAreRejected() async throws {
+        for mutation in MeetingSummaryWorkflowStaleMutation.allCases {
+            let initial = makeWorkflowItem()
+            let history = MeetingSummaryWorkflowHistoryRecorder(item: initial)
+            let generator = MeetingSummaryWorkflowControlledGenerator()
+            let workflow = MeetingSummaryWorkflow(
+                dependencies: .init(
+                    makeGenerator: { _ in generator },
+                    now: { Date(timeIntervalSince1970: 2_000) }
+                )
+            )
+            let task = Task {
+                await workflow.generate(
+                    request: makeWorkflowRequest(item: initial),
+                    history: history.access
+                )
+            }
+            await generator.waitUntilStarted()
+
+            mutation.apply(
+                initialItem: initial,
+                history: history,
+                workflow: workflow
+            )
+            generator.complete(
+                with: .success(makeWorkflowGenerationResult())
+            )
+            let outcome = await task.value
+
+            try expect(
+                isSourceChanged(outcome),
+                "stale success is rejected after \(mutation.label)"
+            )
+            try expect(
+                history.persistedItems.isEmpty,
+                "stale success is not persisted after \(mutation.label)"
+            )
+            try expect(
+                !workflow.state.generatingNoteIDs.contains(initial.id),
+                "stale success finishes generation after \(mutation.label)"
+            )
+        }
+    }
+
+    @MainActor
+    private static func testStaleFailureCompletionsAreRejected() async throws {
+        for mutation in [
+            MeetingSummaryWorkflowStaleMutation.replaceTranscript,
+            .removeStoredNote
+        ] {
+            let previousAttempt = makeWorkflowAttempt(
+                outcome: .succeeded,
+                modelID: "previous/model"
+            )
+            let initial = makeWorkflowItem()
+                .withMeetingSummaryAttempt(previousAttempt)
+            let history = MeetingSummaryWorkflowHistoryRecorder(item: initial)
+            let generator = MeetingSummaryWorkflowControlledGenerator()
+            let workflow = MeetingSummaryWorkflow(
+                dependencies: .init(
+                    makeGenerator: { _ in generator },
+                    now: { Date(timeIntervalSince1970: 2_000) }
+                )
+            )
+            let task = Task {
+                await workflow.generate(
+                    request: makeWorkflowRequest(item: initial),
+                    history: history.access
+                )
+            }
+            await generator.waitUntilStarted()
+
+            mutation.apply(
+                initialItem: initial,
+                history: history,
+                workflow: workflow
+            )
+            generator.complete(
+                with: .failure(
+                    MeetingSummaryError.outputRejected(
+                        .languageMismatch,
+                        modelID: "failed/model"
+                    )
+                )
+            )
+            let outcome = await task.value
+
+            try expect(
+                isSourceChanged(outcome),
+                "stale failure is rejected after \(mutation.label)"
+            )
+            try expect(
+                history.persistedItems.isEmpty,
+                "stale failure writes no attempt after \(mutation.label)"
+            )
+            if mutation == .replaceTranscript {
+                try expect(
+                    history.storedItem?.meetingSummaryAttempt
+                        == previousAttempt,
+                    "stale failure preserves the previous attempt"
+                )
+            }
+            try expect(
+                !workflow.state.generatingNoteIDs.contains(initial.id),
+                "stale failure finishes generation after \(mutation.label)"
+            )
+        }
+    }
+
+    @MainActor
+    private static func
+        testStaleGenerationCannotClearNewerGenerationState() async throws
+    {
+        let initial = makeWorkflowItem()
+        let history = MeetingSummaryWorkflowHistoryRecorder(item: initial)
+        let firstGenerator = MeetingSummaryWorkflowControlledGenerator()
+        let secondGenerator = MeetingSummaryWorkflowControlledGenerator()
+        var generators: [any MeetingSummaryGenerating] = [
+            firstGenerator,
+            secondGenerator
+        ]
+        let workflow = MeetingSummaryWorkflow(
+            dependencies: .init(
+                makeGenerator: { _ in generators.removeFirst() },
+                now: { Date(timeIntervalSince1970: 2_000) }
+            )
+        )
+        let firstTask = Task {
+            await workflow.generate(
+                request: makeWorkflowRequest(item: initial),
+                history: history.access
+            )
+        }
+        await firstGenerator.waitUntilStarted()
+        workflow.invalidate(noteID: initial.id)
+        let secondTask = Task {
+            await workflow.generate(
+                request: makeWorkflowRequest(item: initial),
+                history: history.access
+            )
+        }
+        await secondGenerator.waitUntilStarted()
+
+        firstGenerator.complete(
+            with: .success(makeWorkflowGenerationResult())
+        )
+        let firstOutcome = await firstTask.value
+
+        try expect(
+            isSourceChanged(firstOutcome),
+            "invalidated generation is stale"
+        )
+        try expect(
+            workflow.state.generatingNoteIDs.contains(initial.id),
+            "stale completion does not clear newer generation state"
+        )
+
+        secondGenerator.complete(
+            with: .success(makeWorkflowGenerationResult())
+        )
+        let secondOutcome = await secondTask.value
+
+        try expect(
+            isVerifiedSuccess(secondOutcome),
+            "newer generation still completes"
+        )
+        try expect(
+            !workflow.state.generatingNoteIDs.contains(initial.id),
+            "newer generation clears its own state"
+        )
+    }
 }
 
 @MainActor
@@ -605,6 +781,57 @@ private actor MeetingSummaryWorkflowSourceRecorder {
 
     func latest() -> MeetingSummarySource? {
         sources.last
+    }
+}
+
+private enum MeetingSummaryWorkflowStaleMutation:
+    CaseIterable,
+    Equatable
+{
+    case replaceTranscript
+    case removeStoredNote
+    case invalidate
+    case forget
+    case forgetAll
+
+    var label: String {
+        switch self {
+        case .replaceTranscript:
+            "transcript replacement"
+        case .removeStoredNote:
+            "note removal"
+        case .invalidate:
+            "invalidation"
+        case .forget:
+            "note forgetting"
+        case .forgetAll:
+            "full forgetting"
+        }
+    }
+
+    @MainActor
+    func apply(
+        initialItem: PipelineHistoryItem,
+        history: MeetingSummaryWorkflowHistoryRecorder,
+        workflow: MeetingSummaryWorkflow
+    ) {
+        switch self {
+        case .replaceTranscript:
+            history.storedItem = makeWorkflowItem(
+                id: initialItem.id,
+                transcript: "Changed transcript."
+            )
+            .withMeetingSummary(initialItem.meetingSummary)
+            .withMeetingSummaryAttempt(initialItem.meetingSummaryAttempt)
+        case .removeStoredNote:
+            history.storedItem = nil
+        case .invalidate:
+            workflow.invalidate(noteID: initialItem.id)
+        case .forget:
+            workflow.forget(noteID: initialItem.id)
+        case .forgetAll:
+            workflow.forgetAll()
+        }
     }
 }
 
@@ -700,6 +927,26 @@ private func makeWorkflowGenerationResult(
     )
 }
 
+private func makeWorkflowAttempt(
+    outcome: MeetingSummaryAttemptOutcome,
+    modelID: String
+) -> MeetingSummaryAttempt {
+    MeetingSummaryAttempt(
+        occurredAt: Date(timeIntervalSince1970: 1_750),
+        outcome: outcome,
+        backendKind: .cloud,
+        modelID: modelID,
+        providerHost: "api.example.com",
+        language: MeetingSummaryLanguageContext(
+            requestedOutputLanguage: "English",
+            appliedLanguageCode: "en",
+            resolutionSource: .configured
+        ),
+        issue: nil,
+        sourceFingerprint: String(repeating: "d", count: 64)
+    )
+}
+
 private func makeWorkflowGeneratorConfiguration()
     -> MeetingSummaryGeneratorConfiguration
 {
@@ -756,6 +1003,13 @@ private func isPersistenceFailure(
     return false
 }
 
+private func isSourceChanged(
+    _ outcome: MeetingSummaryWorkflowOutcome
+) -> Bool {
+    if case .sourceChanged = outcome { return true }
+    return false
+}
+
 private final class MeetingSummaryWorkflowGeneratorStub:
     MeetingSummaryGenerating,
     @unchecked Sendable
@@ -774,6 +1028,65 @@ private final class MeetingSummaryWorkflowGeneratorStub:
         source: MeetingSummarySource
     ) async throws -> MeetingSummaryGenerationResult {
         try await operation(source)
+    }
+}
+
+private final class MeetingSummaryWorkflowControlledGenerator:
+    MeetingSummaryGenerating,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var continuation:
+        CheckedContinuation<MeetingSummaryGenerationResult, Error>?
+    private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var hasStarted = false
+
+    func generate(
+        source: MeetingSummarySource
+    ) async throws -> MeetingSummaryGenerationResult {
+        try await withCheckedThrowingContinuation { continuation in
+            let waiters = lock.withLock {
+                self.continuation = continuation
+                hasStarted = true
+                let values = startedWaiters
+                startedWaiters.removeAll()
+                return values
+            }
+            waiters.forEach { $0.resume() }
+        }
+    }
+
+    func waitUntilStarted() async {
+        if lock.withLock({ hasStarted }) { return }
+        await withCheckedContinuation { continuation in
+            let shouldResume = lock.withLock {
+                if hasStarted { return true }
+                startedWaiters.append(continuation)
+                return false
+            }
+            if shouldResume { continuation.resume() }
+        }
+    }
+
+    func complete(
+        with result: Result<MeetingSummaryGenerationResult, Error>
+    ) {
+        let continuation = lock.withLock {
+            let value = self.continuation
+            self.continuation = nil
+            return value
+        }
+        continuation?.resume(with: result)
+    }
+}
+
+private extension NSLock {
+    func withLock<Value>(
+        _ body: () throws -> Value
+    ) rethrows -> Value {
+        lock()
+        defer { unlock() }
+        return try body()
     }
 }
 

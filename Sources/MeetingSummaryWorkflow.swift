@@ -88,6 +88,7 @@ final class MeetingSummaryWorkflow {
             request.noteID,
             default: 0
         ]
+        generationRevisionByID[request.noteID] = generationRevision
         state.generatingNoteIDs.insert(request.noteID)
         emitState()
 
@@ -121,6 +122,10 @@ final class MeetingSummaryWorkflow {
                 sourceFingerprint: initialFingerprint,
                 history: history
             ) else {
+                finishGeneration(
+                    noteID: request.noteID,
+                    revision: generationRevision
+                )
                 return .sourceChanged
             }
             let updated = currentItem.withSpokenLanguage(spokenLanguage)
@@ -164,6 +169,10 @@ final class MeetingSummaryWorkflow {
             sourceFingerprint: source.fingerprint,
             history: history
         ) else {
+            finishGeneration(
+                noteID: request.noteID,
+                revision: generationRevision
+            )
             return .sourceChanged
         }
         let envelope = MeetingSummaryEnvelope(
@@ -390,6 +399,7 @@ final class MeetingSummaryWorkflow {
             sourceFingerprint: sourceFingerprint,
             history: history
         ) else {
+            finishGeneration(noteID: request.noteID, revision: revision)
             return .sourceChanged
         }
         if let summaryError = error as? MeetingSummaryError,
@@ -438,7 +448,7 @@ final class MeetingSummaryWorkflow {
         sourceFingerprint: String,
         history: MeetingSummaryHistoryAccess
     ) -> PipelineHistoryItem? {
-        guard generationRevisionByID[noteID, default: 0] == revision,
+        guard generationRevisionByID[noteID] == revision,
               let item = history.item(noteID),
               Self.availabilitySource(for: item).fingerprint
                 == sourceFingerprint else {
@@ -447,26 +457,12 @@ final class MeetingSummaryWorkflow {
         return item
     }
 
-    private func isCurrent(
-        noteID: UUID,
-        revision: Int,
-        sourceFingerprint: String,
-        history: MeetingSummaryHistoryAccess
-    ) -> Bool {
-        currentItem(
-            noteID: noteID,
-            revision: revision,
-            sourceFingerprint: sourceFingerprint,
-            history: history
-        ) != nil
-    }
-
     private func finishGeneration(
         noteID: UUID,
         revision: Int,
         pendingReveal: Bool = false
     ) {
-        guard generationRevisionByID[noteID, default: 0] == revision else {
+        guard generationRevisionByID[noteID] == revision else {
             return
         }
         if pendingReveal {
