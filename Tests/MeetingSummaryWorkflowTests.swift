@@ -19,6 +19,7 @@ struct MeetingSummaryWorkflowTests {
         try await testStaleSuccessCompletionsAreRejected()
         try await testStaleFailureCompletionsAreRejected()
         try await testStaleGenerationCannotClearNewerGenerationState()
+        try await testMissingDurableStartRejectsCompletionAfterGeneratorRuns()
         print("MeetingSummaryWorkflowTests passed")
     }
 
@@ -705,6 +706,45 @@ struct MeetingSummaryWorkflowTests {
         try expect(
             !workflow.state.generatingNoteIDs.contains(initial.id),
             "newer generation clears its own state"
+        )
+    }
+
+    @MainActor
+    private static func
+        testMissingDurableStartRejectsCompletionAfterGeneratorRuns() async throws
+    {
+        let initial = makeWorkflowItem()
+        let history = MeetingSummaryWorkflowHistoryRecorder(item: nil)
+        let sourceRecorder = MeetingSummaryWorkflowSourceRecorder()
+        let workflow = MeetingSummaryWorkflow(
+            dependencies: .init(
+                makeGenerator: { _ in
+                    MeetingSummaryWorkflowGeneratorStub { source in
+                        await sourceRecorder.record(source)
+                        return makeWorkflowGenerationResult()
+                    }
+                },
+                now: { Date(timeIntervalSince1970: 2_000) }
+            )
+        )
+
+        let outcome = await workflow.generate(
+            request: makeWorkflowRequest(item: initial),
+            history: history.access
+        )
+        let source = await sourceRecorder.latest()
+
+        try expect(
+            source != nil,
+            "the captured start item reaches the generator"
+        )
+        try expect(
+            isSourceChanged(outcome),
+            "a missing durable completion target is source changed"
+        )
+        try expect(
+            history.persistedItems.isEmpty,
+            "a missing durable target receives no write"
         )
     }
 }

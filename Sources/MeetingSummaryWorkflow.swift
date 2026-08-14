@@ -55,17 +55,18 @@ enum MeetingSummaryWorkflowOutcome {
     case persistenceFailed
 }
 
-@MainActor
-final class MeetingSummaryWorkflow {
+final class MeetingSummaryWorkflow: @unchecked Sendable {
     private let dependencies: MeetingSummaryWorkflowDependencies
-    private var generationRevisionByID: [UUID: Int] = [:]
-    private(set) var state = MeetingSummaryWorkflowState.initial
-    var onEvent: ((MeetingSummaryWorkflowEvent) -> Void)?
+    @MainActor private var generationRevisionByID: [UUID: Int] = [:]
+    @MainActor private(set) var state = MeetingSummaryWorkflowState.initial
+    nonisolated(unsafe) var onEvent:
+        (@MainActor (MeetingSummaryWorkflowEvent) -> Void)?
 
     init(dependencies: MeetingSummaryWorkflowDependencies) {
         self.dependencies = dependencies
     }
 
+    @MainActor
     func generate(
         request: MeetingSummaryWorkflowRequest,
         history: MeetingSummaryHistoryAccess
@@ -73,16 +74,10 @@ final class MeetingSummaryWorkflow {
         guard history.durability() == .durable else {
             return .persistenceFailed
         }
-        guard let initialItem = history.item(request.noteID) else {
-            return .invalidInput
-        }
+        let initialItem = request.initialItem
         let initialFingerprint = Self.availabilitySource(
-            for: request.initialItem
+            for: initialItem
         ).fingerprint
-        guard Self.availabilitySource(for: initialItem).fingerprint
-                == initialFingerprint else {
-            return .sourceChanged
-        }
 
         let generationRevision = generationRevisionByID[
             request.noteID,
@@ -224,6 +219,7 @@ final class MeetingSummaryWorkflow {
             : .verifiedSuccess
     }
 
+    @MainActor
     func invalidate(noteID: UUID) {
         generationRevisionByID[noteID, default: 0] += 1
         state.generatingNoteIDs.remove(noteID)
@@ -231,6 +227,7 @@ final class MeetingSummaryWorkflow {
         emitState()
     }
 
+    @MainActor
     func forget(noteID: UUID) {
         generationRevisionByID.removeValue(forKey: noteID)
         state.generatingNoteIDs.remove(noteID)
@@ -238,12 +235,14 @@ final class MeetingSummaryWorkflow {
         emitState()
     }
 
+    @MainActor
     func forgetAll() {
         generationRevisionByID.removeAll()
         state = .initial
         emitState()
     }
 
+    @MainActor
     func consumePendingReveal(noteID: UUID) -> Bool {
         let consumed = state.pendingRevealNoteIDs.remove(noteID) != nil
         if consumed { emitState() }
@@ -385,6 +384,7 @@ final class MeetingSummaryWorkflow {
         )
     }
 
+    @MainActor
     private func persistFailure(
         _ error: Error,
         request: MeetingSummaryWorkflowRequest,
@@ -442,6 +442,7 @@ final class MeetingSummaryWorkflow {
         return .generationFailed(error)
     }
 
+    @MainActor
     private func currentItem(
         noteID: UUID,
         revision: Int,
@@ -457,6 +458,7 @@ final class MeetingSummaryWorkflow {
         return item
     }
 
+    @MainActor
     private func finishGeneration(
         noteID: UUID,
         revision: Int,
@@ -472,6 +474,7 @@ final class MeetingSummaryWorkflow {
         emitState()
     }
 
+    @MainActor
     private func emitState() {
         onEvent?(.stateChanged(state))
     }
