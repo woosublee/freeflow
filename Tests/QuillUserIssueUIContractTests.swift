@@ -9,6 +9,9 @@ struct QuillUserIssueUIContractTests {
         let settings = try source("Sources/SettingsView.swift")
         let menuBar = try source("Sources/MenuBarView.swift")
         let appState = try source("Sources/AppState.swift")
+        let historyWorkflow = try source(
+            "Sources/HistoryArchiveRecoveryWorkflow.swift"
+        )
         let historyRecovery = try source("Sources/HistoryRecoveryView.swift")
 
         try testSharedRenderer(issueView)
@@ -28,7 +31,11 @@ struct QuillUserIssueUIContractTests {
             menuBar,
             appState
         )
-        try testRecoveryImportOutcomePersistsOutsideProgressOverlay(appState, historyRecovery)
+        try testRecoveryImportOutcomePersistsOutsideProgressOverlay(
+            appState,
+            historyWorkflow,
+            historyRecovery
+        )
         try testRecoveryCountGrammarUsesSingularCatalogKeys(historyRecovery)
         print("QuillUserIssueUIContractTests passed")
     }
@@ -301,12 +308,20 @@ struct QuillUserIssueUIContractTests {
 
     private static func testRecoveryImportOutcomePersistsOutsideProgressOverlay(
         _ appState: String,
+        _ historyWorkflow: String,
         _ historyRecovery: String
     ) throws {
         try expect(
-            appState.contains("@Published private(set) var historyRecoveryImportResult")
-                && appState.contains("historyRecoveryImportResult = result"),
-            "AppState publishes partial recovery import outcomes after the operation ends"
+            appState.contains(
+                "@Published private(set) var historyRecoveryImportResult"
+            )
+                && appState.contains(
+                    "historyRecoveryImportResult = state.importResult"
+                )
+                && historyWorkflow.contains(
+                    "state.importResult = result.failedRecordCount > 0"
+                ),
+            "workflow partial recovery outcomes reach AppState after the operation ends"
         )
         try expect(
             historyRecovery.contains("appState.historyRecoveryImportResult")
