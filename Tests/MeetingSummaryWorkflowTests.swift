@@ -16,6 +16,7 @@ struct MeetingSummaryWorkflowTests {
         try await testInferredLanguagePersistenceFailureIsTyped()
         try await testFailedAttemptPersistenceFailureIsTyped()
         try await testSuccessfulSummaryPersistenceFailureIsTyped()
+        try await testNonDurableHistoryRejectsBeforeGeneration()
         try await testStaleSuccessCompletionsAreRejected()
         try await testStaleFailureCompletionsAreRejected()
         try await testStaleGenerationCannotClearNewerGenerationState()
@@ -533,6 +534,48 @@ struct MeetingSummaryWorkflowTests {
         try expect(
             !workflow.consumePendingReveal(noteID: initial.id),
             "failed Summary write creates no pending reveal"
+        )
+    }
+
+    @MainActor
+    private static func testNonDurableHistoryRejectsBeforeGeneration() async throws {
+        let initial = makeWorkflowItem()
+        let history = MeetingSummaryWorkflowHistoryRecorder(item: initial)
+        history.durabilityValue = .inMemory
+        let sourceRecorder = MeetingSummaryWorkflowSourceRecorder()
+        let workflow = MeetingSummaryWorkflow(
+            dependencies: .init(
+                makeGenerator: { _ in
+                    MeetingSummaryWorkflowGeneratorStub { source in
+                        await sourceRecorder.record(source)
+                        return makeWorkflowGenerationResult()
+                    }
+                },
+                now: { Date(timeIntervalSince1970: 2_000) }
+            )
+        )
+
+        let outcome = await workflow.generate(
+            request: makeWorkflowRequest(item: initial),
+            history: history.access
+        )
+        let source = await sourceRecorder.latest()
+
+        try expect(
+            isPersistenceFailure(outcome),
+            "non-durable history is rejected as persistence failure"
+        )
+        try expect(
+            source == nil,
+            "non-durable history is rejected before generator creation"
+        )
+        try expect(
+            history.persistedItems.isEmpty,
+            "non-durable history receives no writes"
+        )
+        try expect(
+            workflow.state == .initial,
+            "non-durable rejection does not mutate workflow state"
         )
     }
 

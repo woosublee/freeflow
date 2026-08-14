@@ -8,24 +8,16 @@ struct MeetingSummaryAppStateTests {
         try await testAppStateInstancesUseIndependentSummaryGenerators()
         try await testCreatedAppStateKeepsItsSummaryDependencySnapshot()
         try await testGenerationPersistsOnlyAfterSuccess()
-        try await testUnverifiedGenerationPersistsSummaryWarningState()
         try await testNonDurableHistoryWarningPreventsSummaryPersistence()
-        try await testFailurePreservesExistingSummary()
-        try await testGroundingFailurePreservesExistingSummaryAndCompletion()
         try await testLanguageMismatchPreservesSummaryAndRecordsAttempt()
-        try await testLegacyAutoNotePersistsInferredKoreanOnGeneration()
         try await testSuccessfulAttemptSurvivesDurableReload()
         try await testFailedAttemptSurvivesDurableReload()
-        try await testFailedAttemptPersistenceFailureRemainsTransient()
-        try await testSourceChangePreservesExistingFailedAttempt()
         try await testTranscriptChangeDiscardsInflightResult()
-        try await testTranscriptChangeFailureDoesNotPersistAttempt()
         try await testSuccessfulRetryInvalidatesInflightSummaryGeneration()
         try await testRetryWithMissingHistoryEntryKeepsSummaryGenerationActive()
         try await testDeleteWithMissingHistoryEntryKeepsSummaryGenerationActive()
         try await testClearWithSaveFailureKeepsSummaryGenerationActive()
         try await testDeleteDuringGenerationDoesNotRestoreSummary()
-        try await testDeleteDuringGenerationFailureDoesNotPersistAttempt()
         try await testTranscriptReplacementReinfersDerivedSpokenLanguage()
         try await testTranscriptReplacementPreservesEngineDetectedLanguage()
         try await testTranscriptEditingPreservesSummaryMetadata()
@@ -37,9 +29,7 @@ struct MeetingSummaryAppStateTests {
         try await testDeleteFailedSummaryStatePersistsAndInvalidatesInflightGeneration()
         try await testFailedSummaryDeletePreservesStateWhenDurableWriteFails()
         try await testDeleteMeetingSummaryWithoutExistingSummaryThrows()
-        try await testFailureAttemptUsesEffectiveFallbackModel()
         try await testSuccessfulGenerationMarksPendingRevealConsumableOnce()
-        try await testFailedGenerationDoesNotMarkPendingReveal()
         print("MeetingSummaryAppStateTests passed")
     }
 
@@ -186,31 +176,6 @@ struct MeetingSummaryAppStateTests {
             precondition(
                 !appState.consumeMeetingSummaryPendingReveal(id: item.id),
                 "pending reveal is consumed only once"
-            )
-        }
-    }
-
-    private static func testFailedGenerationDoesNotMarkPendingReveal() async throws {
-        let item = makeItem()
-        let fixture = try configuredAppStateFixture()
-        defer { fixture.cleanup() }
-        let appState = try await configuredAppState(
-            item: item,
-            store: fixture.store,
-            generator: MeetingSummaryGeneratorStub { _ in
-                throw MeetingSummaryError.invalidResponse(.responseEnvelope)
-            },
-            storageLayout: fixture.storageLayout
-        )
-
-        do {
-            try await appState.generateMeetingSummary(id: item.id)
-        } catch {}
-
-        await MainActor.run {
-            precondition(
-                !appState.consumeMeetingSummaryPendingReveal(id: item.id),
-                "failed generation does not mark pending reveal"
             )
         }
     }
@@ -489,42 +454,6 @@ struct MeetingSummaryAppStateTests {
         }
     }
 
-    private static func testFailureAttemptUsesEffectiveFallbackModel() async throws {
-        let item = makeItem()
-        let fixture = try configuredAppStateFixture()
-        defer { fixture.cleanup() }
-        let appState = try await configuredAppState(
-            item: item,
-            store: fixture.store,
-            generator: MeetingSummaryGeneratorStub { _ in
-                throw MeetingSummaryError.rateLimited(
-                    model: "fallback/model",
-                    retryAfter: 1
-                )
-            },
-            storageLayout: fixture.storageLayout
-        )
-
-        do {
-            try await appState.generateMeetingSummary(id: item.id)
-            throw MeetingSummaryAppStateTestFailure("Expected fallback failure")
-        } catch let failure as MeetingSummaryAppStateTestFailure {
-            throw failure
-        } catch {}
-
-        await MainActor.run {
-            let attempt = appState.pipelineHistory[0].meetingSummaryAttempt
-            precondition(
-                attempt?.modelID == "fallback/model",
-                "failed attempt records the model that returned the terminal failure"
-            )
-            precondition(
-                attempt?.issue?.context.modelID == "fallback/model",
-                "failure Details identify the model that returned the terminal failure"
-            )
-        }
-    }
-
     private static func testGenerationPersistsOnlyAfterSuccess() async throws {
         let generator = MeetingSummaryControlledGenerator()
         let fixture = try configuredAppStateFixture()
@@ -557,39 +486,6 @@ struct MeetingSummaryAppStateTests {
         await MainActor.run {
             precondition(appState.pipelineHistory[0].meetingSummary != nil)
             precondition(appState.meetingSummaryGeneratingNoteIDs.isEmpty)
-        }
-    }
-
-    private static func testUnverifiedGenerationPersistsSummaryWarningState() async throws {
-        let item = makeItem()
-        let fixture = try configuredAppStateFixture()
-        defer { fixture.cleanup() }
-        let unverifiedResult = MeetingSummaryGenerationResult(
-            draft: generationResult.draft,
-            promptVersion: generationResult.promptVersion,
-            modelID: generationResult.modelID,
-            backendKind: generationResult.backendKind,
-            evidenceVerification: .unverified
-        )
-        let appState = try await configuredAppState(
-            item: item,
-            store: fixture.store,
-            generator: MeetingSummaryGeneratorStub { _ in unverifiedResult },
-            storageLayout: fixture.storageLayout
-        )
-
-        try await appState.generateMeetingSummary(id: item.id)
-
-        await MainActor.run {
-            precondition(
-                appState.pipelineHistory[0].meetingSummary?.effectiveEvidenceVerification
-                    == .unverified,
-                "unresolved citations persist an unverified saved summary"
-            )
-            precondition(
-                appState.pipelineHistory[0].meetingSummaryAttempt?.outcome == .succeeded,
-                "unverified evidence remains a successful summary result"
-            )
         }
     }
 
@@ -644,60 +540,6 @@ struct MeetingSummaryAppStateTests {
         }
     }
 
-    private static func testFailurePreservesExistingSummary() async throws {
-        let existing = envelope(completed: true)
-        let item = makeItem().withMeetingSummary(existing)
-        let fixture = try configuredAppStateFixture()
-        defer { fixture.cleanup() }
-        let appState = try await configuredAppState(
-            item: item,
-            store: fixture.store,
-            generator: MeetingSummaryGeneratorStub { _ in
-                throw MeetingSummaryError.invalidResponse(.responseEnvelope)
-            },
-            storageLayout: fixture.storageLayout
-        )
-
-        do {
-            try await appState.generateMeetingSummary(id: item.id)
-            throw MeetingSummaryAppStateTestFailure("Expected generation failure")
-        } catch let failure as MeetingSummaryAppStateTestFailure {
-            throw failure
-        } catch {}
-
-        await MainActor.run {
-            precondition(appState.pipelineHistory[0].meetingSummary == existing)
-        }
-    }
-
-    private static func testGroundingFailurePreservesExistingSummaryAndCompletion() async throws {
-        let existing = envelope(completed: true)
-        let item = makeItem().withMeetingSummary(existing)
-        let fixture = try configuredAppStateFixture()
-        defer { fixture.cleanup() }
-        let appState = try await configuredAppState(
-            item: item,
-            store: fixture.store,
-            generator: MeetingSummaryGeneratorStub { _ in
-                throw MeetingSummaryError.outputRejected(.sourceQuoteNotFound)
-            },
-            storageLayout: fixture.storageLayout
-        )
-
-        do {
-            try await appState.generateMeetingSummary(id: item.id)
-            throw MeetingSummaryAppStateTestFailure("Expected grounding failure")
-        } catch let failure as MeetingSummaryAppStateTestFailure {
-            throw failure
-        } catch {}
-
-        await MainActor.run {
-            let saved = appState.pipelineHistory[0].meetingSummary
-            precondition(saved == existing)
-            precondition(saved?.content.actionItems[0].isCompleted == true)
-        }
-    }
-
     private static func testLanguageMismatchPreservesSummaryAndRecordsAttempt() async throws {
         let existing = envelope(completed: true)
         let item = makeItem(
@@ -728,34 +570,6 @@ struct MeetingSummaryAppStateTests {
             precondition(saved.meetingSummary?.content.actionItems[0].isCompleted == true)
             precondition(saved.meetingSummaryAttempt?.outcome == .failed)
             precondition(saved.meetingSummaryAttempt?.language?.appliedLanguageCode == "ko")
-        }
-    }
-
-    private static func testLegacyAutoNotePersistsInferredKoreanOnGeneration() async throws {
-        let item = makeItem(
-            transcriptionLanguageCode: "auto",
-            rawTranscript: "회의에서 다음 주 화요일에 출시하기로 결정했습니다.",
-            postProcessedTranscript: "회의에서 다음 주 화요일에 출시하기로 결정했습니다."
-        )
-        let fixture = try configuredAppStateFixture()
-        defer { fixture.cleanup() }
-        let appState = try await configuredAppState(
-            item: item,
-            store: fixture.store,
-            generator: MeetingSummaryGeneratorStub { _ in generationResult },
-            storageLayout: fixture.storageLayout
-        )
-
-        try await appState.generateMeetingSummary(id: item.id)
-
-        await MainActor.run {
-            let saved = appState.pipelineHistory[0]
-            precondition(saved.spokenLanguage == SpokenLanguageResolution(
-                languageCode: "ko",
-                source: .transcriptInferred
-            ))
-            precondition(saved.meetingSummary?.languageContext?.appliedLanguageCode == "ko")
-            precondition(saved.meetingSummary?.languageContext?.resolutionSource == .transcriptInferred)
         }
     }
 
@@ -828,59 +642,6 @@ struct MeetingSummaryAppStateTests {
         precondition(persisted.meetingSummaryAttempt?.language?.appliedLanguageCode == "en")
     }
 
-    private static func testFailedAttemptPersistenceFailureRemainsTransient() async throws {
-        let directoryURL = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directoryURL) }
-        let storeURL = directoryURL.appendingPathComponent("PipelineHistory.sqlite")
-        var shouldFailUpdate = false
-        let store = PipelineHistoryStore(
-            storeURL: storeURL,
-            persistentStoreLoader: PipelineHistoryStore.loadPersistentStoresSynchronously,
-            contextSaver: { context in
-                if shouldFailUpdate {
-                    throw MeetingSummaryAppStateTestFailure("Injected update failure")
-                }
-                try context.save()
-            }
-        )
-        let existing = envelope(completed: true)
-        let item = makeItem(
-            spokenLanguageCode: "en",
-            spokenLanguageResolution: .engineDetected
-        ).withMeetingSummary(existing)
-        _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
-
-        let layout = AppStateStorageLayout(rootDirectory: directoryURL)
-        let appState = await configuredPersistedAppState(
-            store: store,
-            generator: MeetingSummaryGeneratorStub { _ in
-                throw MeetingSummaryError.outputRejected(.languageMismatch)
-            },
-            storageLayout: layout
-        )
-        shouldFailUpdate = true
-
-        do {
-            try await appState.generateMeetingSummary(id: item.id)
-            throw MeetingSummaryAppStateTestFailure("Expected persistence failure")
-        } catch let issue as QuillUserIssueError {
-            precondition(issue.record.code == .historyPersistenceUnavailable)
-        }
-
-        await MainActor.run {
-            let visible = appState.pipelineHistory[0]
-            precondition(visible.meetingSummary == existing)
-            precondition(visible.meetingSummaryAttempt == nil)
-            precondition(!appState.consumeMeetingSummaryPendingReveal(id: item.id))
-        }
-        let reloaded = PipelineHistoryStore(storeURL: storeURL)
-        guard let persisted = reloaded.loadAllHistory().first else {
-            throw MeetingSummaryAppStateTestFailure("Missing reloaded transient item")
-        }
-        precondition(persisted.meetingSummary == existing)
-        precondition(persisted.meetingSummaryAttempt == nil)
-    }
-
     private static func testTranscriptEditingPreservesSummaryMetadata() async throws {
         let attempt = MeetingSummaryAttempt(
             occurredAt: Date(timeIntervalSince1970: 2_100),
@@ -929,50 +690,6 @@ struct MeetingSummaryAppStateTests {
         precondition(persisted.meetingSummaryAttempt == attempt)
     }
 
-    private static func testSourceChangePreservesExistingFailedAttempt() async throws {
-        let generator = MeetingSummaryControlledGenerator()
-        let previousAttempt = MeetingSummaryAttempt(
-            occurredAt: Date(timeIntervalSince1970: 2_100),
-            outcome: .failed,
-            backendKind: .cloud,
-            modelID: "summary/model",
-            providerHost: "api.example.com",
-            language: nil,
-            issue: QuillUserIssueRecord(code: .meetingSummaryUnavailable)
-        )
-        let item = makeItem().withMeetingSummaryAttempt(previousAttempt)
-        let fixture = try configuredAppStateFixture()
-        defer { fixture.cleanup() }
-        let appState = try await configuredAppState(
-            item: item,
-            store: fixture.store,
-            generator: generator,
-            storageLayout: fixture.storageLayout
-        )
-
-        let task = Task { @MainActor in
-            try await appState.generateMeetingSummary(id: item.id)
-        }
-        await generator.waitUntilStarted()
-        await MainActor.run {
-            appState.updateTranscript(id: item.id, text: "Transcript B changed.")
-        }
-        generator.complete(with: .success(generationResult))
-
-        do {
-            try await task.value
-            throw MeetingSummaryAppStateTestFailure("Expected source change")
-        } catch let error as MeetingSummaryError {
-            precondition(error == .sourceChanged)
-        }
-        await MainActor.run {
-            precondition(
-                appState.pipelineHistory[0].meetingSummaryAttempt == previousAttempt,
-                "source invalidation leaves prior attempt historical instead of replacing it"
-            )
-        }
-    }
-
     private static func testTranscriptChangeDiscardsInflightResult() async throws {
         let generator = MeetingSummaryControlledGenerator()
         let item = makeItem()
@@ -1010,39 +727,6 @@ struct MeetingSummaryAppStateTests {
                 appState.pipelineHistory[0].meetingSummaryAttempt == nil,
                 "source invalidation is not persisted as a provider failure"
             )
-        }
-    }
-
-    private static func testTranscriptChangeFailureDoesNotPersistAttempt() async throws {
-        let generator = MeetingSummaryControlledGenerator()
-        let item = makeItem()
-        let fixture = try configuredAppStateFixture()
-        defer { fixture.cleanup() }
-        let appState = try await configuredAppState(
-            item: item,
-            store: fixture.store,
-            generator: generator,
-            storageLayout: fixture.storageLayout
-        )
-
-        let task = Task { @MainActor in
-            try await appState.generateMeetingSummary(id: item.id)
-        }
-        await generator.waitUntilStarted()
-        await MainActor.run {
-            appState.updateTranscript(id: item.id, text: "Transcript B changed.")
-        }
-        generator.complete(with: .failure(URLError(.timedOut)))
-
-        do {
-            try await task.value
-            throw MeetingSummaryAppStateTestFailure("Expected source change")
-        } catch let error as MeetingSummaryError {
-            precondition(error == .sourceChanged)
-        }
-        await MainActor.run {
-            precondition(appState.pipelineHistory[0].meetingSummaryAttempt == nil)
-            precondition(!appState.consumeMeetingSummaryPendingReveal(id: item.id))
         }
     }
 
@@ -1283,45 +967,6 @@ struct MeetingSummaryAppStateTests {
             )
         }
         generator.complete(with: .success(generationResult))
-
-        do {
-            try await task.value
-            throw MeetingSummaryAppStateTestFailure("Expected deletion invalidation")
-        } catch let error as MeetingSummaryError {
-            precondition(error == .sourceChanged)
-        }
-        await MainActor.run {
-            let saved = appState.pipelineHistory[0]
-            precondition(saved.meetingSummary == nil)
-            precondition(saved.meetingSummaryAttempt == nil)
-            precondition(!appState.consumeMeetingSummaryPendingReveal(id: item.id))
-        }
-    }
-
-    private static func testDeleteDuringGenerationFailureDoesNotPersistAttempt() async throws {
-        let generator = MeetingSummaryControlledGenerator()
-        let item = makeItem().withMeetingSummary(envelope(completed: false))
-        let fixture = try configuredAppStateFixture()
-        defer { fixture.cleanup() }
-        let appState = try await configuredAppState(
-            item: item,
-            store: fixture.store,
-            generator: generator,
-            storageLayout: fixture.storageLayout
-        )
-
-        let task = Task { @MainActor in
-            try await appState.generateMeetingSummary(id: item.id)
-        }
-        await generator.waitUntilStarted()
-        try await MainActor.run {
-            try appState.deleteMeetingSummary(noteID: item.id)
-            precondition(
-                !appState.meetingSummaryGeneratingNoteIDs.contains(item.id),
-                "deletion clears generation state before a provider failure returns"
-            )
-        }
-        generator.complete(with: .failure(MeetingSummaryError.invalidResponse(.responseEnvelope)))
 
         do {
             try await task.value
