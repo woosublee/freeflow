@@ -175,14 +175,325 @@ struct TranscriptionRetryWorkflowDependencies {
     )
 }
 
+private struct TranscriptionRetryActiveAttempt {
+    let token: UUID
+    var task: Task<Void, Never>?
+    let jobStore: CloudTranscriptionJobStore
+    let session: CloudTranscriptionJobSession
+}
+
 final class TranscriptionRetryWorkflow: @unchecked Sendable {
     private let dependencies: TranscriptionRetryWorkflowDependencies
+    @MainActor private var activeAttempts: [UUID: TranscriptionRetryActiveAttempt] = [:]
     @MainActor private(set) var state = TranscriptionRetryWorkflowState.initial
     nonisolated(unsafe) var onEvent:
         (@MainActor (TranscriptionRetryWorkflowEvent) -> Void)?
 
     init(dependencies: TranscriptionRetryWorkflowDependencies = .live) {
         self.dependencies = dependencies
+    }
+
+    @MainActor
+    @discardableResult
+    func startManual(
+        request: TranscriptionRetryWorkflowRequest,
+        runtime: TranscriptionRetryWorkflowRuntime
+    ) -> Bool {
+        let noteID = request.sourceIdentity.noteID
+        guard runtime.history.durability() == .durable else {
+            onEvent?(
+                .completed(
+                    noteID,
+                    .persistenceFailed(
+                        QuillUserIssueRecord(
+                            code: .historyPersistenceUnavailable
+                        )
+                    )
+                )
+            )
+            return false
+        }
+
+        cancelCurrentAttempt(noteID: noteID)
+        runtime.cloud.cancelExistingExecution(noteID)
+
+        let token = dependencies.makeAttemptToken()
+        let session = runtime.cloud.jobStore.beginSession(historyID: noteID)
+        let cloudContext = makeCloudContext(
+            request: request,
+            store: runtime.cloud.jobStore,
+            session: session,
+            token: token
+        )
+        activeAttempts[noteID] = TranscriptionRetryActiveAttempt(
+            token: token,
+            task: nil,
+            jobStore: runtime.cloud.jobStore,
+            session: session
+        )
+        state.retryingNoteIDs.insert(noteID)
+        state.progressByNoteID.removeValue(forKey: noteID)
+        emitState()
+
+        let dependencies = dependencies
+        let task = Task { [weak self] in
+            do {
+                let transcription = try await dependencies.transcribe(
+                    request.execution,
+                    request.audioURL,
+                    request.cloudDependencies,
+                    cloudContext
+                )
+                try Task.checkCancellation()
+                let processing = await request.processing.process(transcription)
+                self?.finishProcessedAttempt(
+                    request: request,
+                    runtime: runtime,
+                    token: token,
+                    processing: processing
+                )
+            } catch is CancellationError {
+                self?.finishAttempt(
+                    noteID: noteID,
+                    token: token,
+                    outcome: .cancelled
+                )
+            } catch {
+                self?.finishAttempt(
+                    noteID: noteID,
+                    token: token,
+                    outcome: .failed(
+                        TranscriptionRetryFailure(
+                            issue: QuillUserIssueRecord(
+                                code: request.failureContext.fallbackCode
+                            ),
+                            historyPersisted: false
+                        )
+                    )
+                )
+            }
+        }
+        guard activeAttempts[noteID]?.token == token else {
+            task.cancel()
+            return false
+        }
+        activeAttempts[noteID]?.task = task
+        return true
+    }
+
+    @MainActor
+    private func makeCloudContext(
+        request: TranscriptionRetryWorkflowRequest,
+        store: CloudTranscriptionJobStore,
+        session: CloudTranscriptionJobSession,
+        token: UUID
+    ) -> CloudTranscriptionExecutionContext? {
+        guard case .cloud(_, let completion) = request.execution else {
+            return nil
+        }
+        let noteID = request.sourceIdentity.noteID
+        return CloudTranscriptionExecutionContext(
+            historyID: noteID,
+            session: session,
+            checkpointStore: store.checkpointStore(
+                session: session,
+                completionPolicy: completion.cloudJobPolicy
+            ),
+            progress: { [weak self] progress in
+                Task { @MainActor [weak self] in
+                    self?.recordProgress(
+                        progress,
+                        noteID: noteID,
+                        token: token
+                    )
+                }
+            }
+        )
+    }
+
+    @MainActor
+    private func recordProgress(
+        _ progress: CloudTranscriptionProgress,
+        noteID: UUID,
+        token: UUID
+    ) {
+        guard activeAttempts[noteID]?.token == token else { return }
+        state.progressByNoteID[noteID] = Self.displayProgress(progress)
+        emitState()
+    }
+
+    private static func displayProgress(
+        _ progress: CloudTranscriptionProgress
+    ) -> CloudTranscriptionDisplayProgress {
+        switch progress {
+        case .planned(let completed, let total):
+            return CloudTranscriptionDisplayProgress(
+                completedChunkCount: completed,
+                totalChunkCount: total,
+                activeAttempt: nil
+            )
+        case .uploading(let index, let total, let attempt):
+            return CloudTranscriptionDisplayProgress(
+                completedChunkCount: index,
+                totalChunkCount: total,
+                activeAttempt: attempt
+            )
+        case .completed(let total):
+            return CloudTranscriptionDisplayProgress(
+                completedChunkCount: total,
+                totalChunkCount: total,
+                activeAttempt: nil
+            )
+        }
+    }
+
+    @MainActor
+    private func finishProcessedAttempt(
+        request: TranscriptionRetryWorkflowRequest,
+        runtime: TranscriptionRetryWorkflowRuntime,
+        token: UUID,
+        processing: TranscriptionRetryProcessingResult
+    ) {
+        let noteID = request.sourceIdentity.noteID
+        guard activeAttempts[noteID]?.token == token else { return }
+
+        let currentItem: PipelineHistoryItem
+        do {
+            guard let item = try runtime.history.item(noteID) else {
+                finishAttempt(noteID: noteID, token: token, outcome: .stale)
+                return
+            }
+            currentItem = item
+        } catch {
+            finishAttempt(
+                noteID: noteID,
+                token: token,
+                outcome: .persistenceFailed(
+                    QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+                )
+            )
+            return
+        }
+        guard currentItem.timestamp == request.sourceIdentity.noteTimestamp,
+              currentItem.audioFileName == request.sourceIdentity.audioFileName else {
+            finishAttempt(noteID: noteID, token: token, outcome: .stale)
+            return
+        }
+
+        let transcriptFileName: String?
+        let createdTranscriptFileName: String?
+        if let existingFileName = currentItem.transcriptFileName {
+            transcriptFileName = existingFileName
+            createdTranscriptFileName = nil
+        } else {
+            let created = try? runtime.assets.saveTranscript(
+                processing.rawTranscript,
+                processing.finalTranscript
+            )
+            transcriptFileName = created
+            createdTranscriptFileName = created
+        }
+
+        guard activeAttempts[noteID]?.token == token else {
+            if let createdTranscriptFileName {
+                try? runtime.assets.deleteTranscript(createdTranscriptFileName)
+            }
+            return
+        }
+
+        let replacement = PipelineHistoryTranscriptionReplacement(
+            rawTranscript: processing.rawTranscript,
+            postProcessedTranscript: processing.finalTranscript,
+            postProcessingPrompt: processing.prompt,
+            postProcessingStatus: processing.postProcessingStatus,
+            aiProcessingOutcome: processing.aiProcessingOutcome.pipelineHistoryStatus,
+            debugStatus: request.historyMetadata.successDebugStatus,
+            customVocabulary: request.historyMetadata.customVocabulary,
+            customSystemPrompt: request.historyMetadata.customSystemPrompt,
+            usedLocalTranscription: request.historyMetadata.usedLocalTranscription,
+            usedPostProcessing: request.historyMetadata.usedPostProcessing,
+            transcriptionLanguageCode:
+                request.historyMetadata.transcriptionLanguageCode,
+            spokenLanguage: processing.spokenLanguage,
+            localTranscriptionModelID:
+                request.historyMetadata.localTranscriptionModelID,
+            transcriptFileName: transcriptFileName
+        )
+        let updatedItem = currentItem.replacingTranscription(
+            with: replacement
+        )
+
+        do {
+            try runtime.history.persist(updatedItem, true)
+        } catch {
+            if let createdTranscriptFileName {
+                try? runtime.assets.deleteTranscript(createdTranscriptFileName)
+            }
+            finishAttempt(
+                noteID: noteID,
+                token: token,
+                outcome: .persistenceFailed(
+                    QuillUserIssueRecord(code: .historyPersistenceUnavailable)
+                )
+            )
+            return
+        }
+
+        guard activeAttempts[noteID]?.token == token else { return }
+        onEvent?(
+            .itemPersisted(
+                updatedItem,
+                TranscriptionRetryPersistedEffects(
+                    advancesWarningGeneration: true,
+                    invalidatesMeetingSummary: request.origin == .manual
+                )
+            )
+        )
+
+        let completion = TranscriptionRetryCompletion(
+            interactiveTranscript: request.deliveryPolicy == .interactive
+                ? processing.finalTranscript
+                : nil,
+            transcriptAssetPersisted: transcriptFileName != nil,
+            cleanupFailureDescription: nil
+        )
+        let outcome: TranscriptionRetryWorkflowOutcome
+        switch processing.disposition {
+        case .succeeded:
+            outcome = .succeeded(completion)
+        case .fallback:
+            outcome = .fallback(completion)
+        }
+        finishAttempt(noteID: noteID, token: token, outcome: outcome)
+    }
+
+    @MainActor
+    private func cancelCurrentAttempt(noteID: UUID) {
+        guard let attempt = activeAttempts.removeValue(forKey: noteID) else {
+            return
+        }
+        attempt.task?.cancel()
+        attempt.jobStore.invalidateSession(historyID: noteID)
+        state.retryingNoteIDs.remove(noteID)
+        state.progressByNoteID.removeValue(forKey: noteID)
+    }
+
+    @MainActor
+    private func finishAttempt(
+        noteID: UUID,
+        token: UUID,
+        outcome: TranscriptionRetryWorkflowOutcome
+    ) {
+        guard let attempt = activeAttempts[noteID],
+              attempt.token == token else {
+            return
+        }
+        activeAttempts.removeValue(forKey: noteID)
+        attempt.jobStore.invalidateSession(historyID: noteID)
+        state.retryingNoteIDs.remove(noteID)
+        state.progressByNoteID.removeValue(forKey: noteID)
+        emitState()
+        onEvent?(.completed(noteID, outcome))
     }
 
     @MainActor
