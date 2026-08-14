@@ -36,6 +36,15 @@ struct TranscriptionRetryWorkflowTests {
         try await testLocalSuccessDeletesSidecarAfterHistoryPersistence()
         try await testHistoryFailurePreservesAssembledSidecar()
         try await testSidecarDeletionFailurePreservesDurableSuccess()
+        try await testInvalidateRejectsLateSuccess()
+        try await testCancelRejectsLateFailureAndClearsState()
+        try await testForgetRemovesNoteState()
+        try await testForgetAllRejectsEveryLateCompletion()
+        try await testNewerAttemptRejectsOlderSuccessAndProgress()
+        try await testNewerAttemptRejectsOlderFailure()
+        try await testChangedAudioIdentityRejectsCompletion()
+        try await testChangedTimestampRejectsCompletion()
+        try await testStaleAttemptDeletesOnlyItsCreatedTranscript()
         print("TranscriptionRetryWorkflowTests passed")
     }
 
@@ -1391,6 +1400,386 @@ struct TranscriptionRetryWorkflowTests {
         )
     }
 
+    @MainActor
+    private static func testInvalidateRejectsLateSuccess() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let gate = TranscriptionRetryControlledTranscriber()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: TranscriptionRetryWorkflowDependencies(
+                transcribe: { _, _, _, context in
+                    try await gate.run(context: context)
+                },
+                makeAttemptToken: { UUID() }
+            )
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: item, fixture: fixture),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+        await gate.waitUntilStarted()
+        workflow.invalidate(noteID: item.id)
+
+        try expectEqual(workflow.state, .initial, "invalidate clears state")
+        try expect(events.outcomes.contains(.cancelled), "invalidate cancellation outcome")
+        await gate.succeed(transcriptionResult(text: "late success"))
+        await drainTasks()
+        try expect(history.persistedItems.isEmpty, "late success not persisted")
+        try expect(events.persistedEvents.isEmpty, "late success has no item event")
+    }
+
+    @MainActor
+    private static func testCancelRejectsLateFailureAndClearsState()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let gate = TranscriptionRetryControlledTranscriber()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: TranscriptionRetryWorkflowDependencies(
+                transcribe: { _, _, _, context in
+                    try await gate.run(context: context)
+                },
+                makeAttemptToken: { UUID() }
+            )
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: item, fixture: fixture),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+        await gate.waitUntilStarted()
+        workflow.cancel(noteID: item.id)
+
+        try expectEqual(workflow.state, .initial, "cancel clears state")
+        await gate.fail(TranscriptionRetryInjectedError.provider)
+        await drainTasks()
+        try expect(history.persistedItems.isEmpty, "late failure not persisted")
+        try expect(events.persistedEvents.isEmpty, "late failure has no item event")
+        try expect(events.outcomes.contains(.cancelled), "cancel outcome")
+    }
+
+    @MainActor
+    private static func testForgetRemovesNoteState() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let gate = TranscriptionRetryControlledTranscriber()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: TranscriptionRetryWorkflowDependencies(
+                transcribe: { _, _, _, context in
+                    try await gate.run(context: context)
+                },
+                makeAttemptToken: { UUID() }
+            )
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: item, fixture: fixture),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+        await gate.waitUntilStarted()
+        workflow.forget(noteID: item.id)
+        await gate.succeed(transcriptionResult(text: "forgotten success"))
+        await drainTasks()
+
+        try expectEqual(workflow.state, .initial, "forget clears note state")
+        try expect(history.persistedItems.isEmpty, "forgotten completion rejected")
+    }
+
+    @MainActor
+    private static func testForgetAllRejectsEveryLateCompletion() async throws {
+        let firstFixture = try makeFixture()
+        let secondFixture = try makeFixture()
+        defer {
+            firstFixture.cleanup()
+            secondFixture.cleanup()
+        }
+        let firstItem = makeHistoryItem()
+        let secondItem = makeHistoryItem()
+        let firstHistory = TranscriptionRetryHistoryRecorder(item: firstItem)
+        let secondHistory = TranscriptionRetryHistoryRecorder(item: secondItem)
+        let events = TranscriptionRetryEventRecorder()
+        let controlled = TranscriptionRetryMultiControlledTranscriber()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: TranscriptionRetryWorkflowDependencies(
+                transcribe: { _, _, _, context in
+                    try await controlled.run(context: context)
+                },
+                makeAttemptToken: { UUID() }
+            )
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: firstItem, fixture: firstFixture),
+            runtime: firstFixture.runtime(
+                history: firstHistory.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+        _ = workflow.startManual(
+            request: try makeRequest(item: secondItem, fixture: secondFixture),
+            runtime: secondFixture.runtime(
+                history: secondHistory.access(),
+                assets: TranscriptionRetryAssetRecorder().access()
+            )
+        )
+        await controlled.waitUntilCallCount(2)
+        workflow.forgetAll()
+        await controlled.succeed(call: 0, result: transcriptionResult(text: "first late"))
+        await controlled.succeed(call: 1, result: transcriptionResult(text: "second late"))
+        await drainTasks()
+
+        try expectEqual(workflow.state, .initial, "forget all clears state")
+        try expect(firstHistory.persistedItems.isEmpty, "first late completion rejected")
+        try expect(secondHistory.persistedItems.isEmpty, "second late completion rejected")
+    }
+
+    @MainActor
+    private static func testNewerAttemptRejectsOlderSuccessAndProgress()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let controlled = TranscriptionRetryMultiControlledTranscriber()
+        let tokens = TranscriptionRetryTokenSource()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: TranscriptionRetryWorkflowDependencies(
+                transcribe: { _, _, _, context in
+                    try await controlled.run(context: context)
+                },
+                makeAttemptToken: { tokens.next() }
+            )
+        )
+        workflow.onEvent = events.record
+        let request = try makeRequest(
+            item: item,
+            fixture: fixture,
+            processing: processingBehaviorFromTranscription()
+        )
+        let runtime = fixture.runtime(
+            history: history.access(),
+            assets: TranscriptionRetryAssetRecorder().access()
+        )
+
+        _ = workflow.startManual(request: request, runtime: runtime)
+        await controlled.waitUntilCallCount(1)
+        _ = workflow.startManual(request: request, runtime: runtime)
+        await controlled.waitUntilCallCount(2)
+        await controlled.emitProgress(
+            call: 1,
+            progress: .uploading(index: 2, total: 4, attempt: 1)
+        )
+        try await waitUntil {
+            workflow.state.progressByNoteID[item.id]?.completedChunkCount == 2
+        }
+        await controlled.emitProgress(
+            call: 0,
+            progress: .uploading(index: 3, total: 4, attempt: 9)
+        )
+        await drainTasks()
+        try expectEqual(
+            workflow.state.progressByNoteID[item.id],
+            CloudTranscriptionDisplayProgress(
+                completedChunkCount: 2,
+                totalChunkCount: 4,
+                activeAttempt: 1
+            ),
+            "older progress rejected"
+        )
+        await controlled.succeed(
+            call: 0,
+            result: transcriptionResult(text: "older success")
+        )
+        await drainTasks()
+        try expect(history.persistedItems.isEmpty, "older success rejected")
+        try expect(workflow.state.retryingNoteIDs.contains(item.id), "newer state retained")
+
+        await controlled.succeed(
+            call: 1,
+            result: transcriptionResult(text: "newer success")
+        )
+        try await waitUntil { history.persistedItems.count == 1 }
+        try expectEqual(
+            history.persistedItems.last?.rawTranscript,
+            "newer success",
+            "newer success persisted"
+        )
+        try expectEqual(workflow.state, .initial, "newer attempt finished")
+    }
+
+    @MainActor
+    private static func testNewerAttemptRejectsOlderFailure() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let controlled = TranscriptionRetryMultiControlledTranscriber()
+        let tokens = TranscriptionRetryTokenSource()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: TranscriptionRetryWorkflowDependencies(
+                transcribe: { _, _, _, context in
+                    try await controlled.run(context: context)
+                },
+                makeAttemptToken: { tokens.next() }
+            )
+        )
+        workflow.onEvent = events.record
+        let request = try makeRequest(
+            item: item,
+            fixture: fixture,
+            processing: processingBehaviorFromTranscription()
+        )
+        let runtime = fixture.runtime(
+            history: history.access(),
+            assets: TranscriptionRetryAssetRecorder().access()
+        )
+
+        _ = workflow.startManual(request: request, runtime: runtime)
+        await controlled.waitUntilCallCount(1)
+        _ = workflow.startManual(request: request, runtime: runtime)
+        await controlled.waitUntilCallCount(2)
+        await controlled.fail(
+            call: 0,
+            error: TranscriptionRetryInjectedError.provider
+        )
+        await drainTasks()
+        try expect(history.persistedItems.isEmpty, "older failure rejected")
+        try expect(events.persistedEvents.isEmpty, "older failure has no item event")
+        try expect(workflow.state.retryingNoteIDs.contains(item.id), "newer attempt active")
+
+        await controlled.succeed(
+            call: 1,
+            result: transcriptionResult(text: "newer success")
+        )
+        try await waitUntil { history.persistedItems.count == 1 }
+        try expectEqual(
+            history.persistedItems.last?.rawTranscript,
+            "newer success",
+            "newer result after old failure"
+        )
+    }
+
+    @MainActor
+    private static func testChangedAudioIdentityRejectsCompletion() async throws {
+        try await assertChangedSourceRejectsCompletion(change: .audioFileName)
+    }
+
+    @MainActor
+    private static func testChangedTimestampRejectsCompletion() async throws {
+        try await assertChangedSourceRejectsCompletion(change: .timestamp)
+    }
+
+    @MainActor
+    private static func assertChangedSourceRejectsCompletion(
+        change: TranscriptionRetrySourceChange
+    ) async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let history = TranscriptionRetryHistoryRecorder(item: item)
+        let events = TranscriptionRetryEventRecorder()
+        let gate = TranscriptionRetryControlledTranscriber()
+        let assets = TranscriptionRetryAssetRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: TranscriptionRetryWorkflowDependencies(
+                transcribe: { _, _, _, context in
+                    try await gate.run(context: context)
+                },
+                makeAttemptToken: { UUID() }
+            )
+        )
+        workflow.onEvent = events.record
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: item, fixture: fixture),
+            runtime: fixture.runtime(
+                history: history.access(),
+                assets: assets.access()
+            )
+        )
+        await gate.waitUntilStarted()
+        history.currentItem = change.changedItem(from: item)
+        await gate.succeed(transcriptionResult(text: "stale source"))
+        try await waitUntil { events.outcomes.contains(.stale) }
+
+        try expect(history.persistedItems.isEmpty, "changed source not persisted")
+        try expect(events.persistedEvents.isEmpty, "changed source has no item event")
+        try expect(assets.saved().isEmpty, "changed source creates no transcript")
+    }
+
+    @MainActor
+    private static func testStaleAttemptDeletesOnlyItsCreatedTranscript()
+        async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let item = makeHistoryItem()
+        let assets = TranscriptionRetryAssetRecorder()
+        let events = TranscriptionRetryEventRecorder()
+        let workflow = TranscriptionRetryWorkflow(
+            dependencies: immediateDependencies(text: "provider raw")
+        )
+        workflow.onEvent = events.record
+        let history = TranscriptionRetryHistoryAccess(
+            durability: { .durable },
+            item: { id in
+                guard id == item.id else { return nil }
+                workflow.invalidate(noteID: id)
+                return item
+            },
+            persist: { _, _ in
+                throw TranscriptionRetryWorkflowTestFailure(
+                    "stale attempt must not persist"
+                )
+            }
+        )
+
+        _ = workflow.startManual(
+            request: try makeRequest(item: item, fixture: fixture),
+            runtime: fixture.runtime(
+                history: history,
+                assets: assets.access()
+            )
+        )
+
+        try await waitUntil { assets.deleted() == ["created.txt"] }
+        try expectEqual(assets.saved(), ["created.txt"], "stale created transcript")
+        try expectEqual(assets.deleted(), ["created.txt"], "stale cleanup transcript")
+        try expect(events.persistedEvents.isEmpty, "stale asset has no item event")
+    }
+
+    @MainActor
+    private static func drainTasks() async {
+        for _ in 0..<5 {
+            await Task.yield()
+        }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+
     private static func defaultCloudConfiguration(
         fixture: TranscriptionRetryFixture
     ) -> TranscriptionRetryCloudTestConfiguration {
@@ -2215,6 +2604,137 @@ private actor TranscriptionRetryControlledTranscriber {
     func succeed(_ result: TranscriptionResult) {
         continuation?.resume(returning: result)
         continuation = nil
+    }
+
+    func fail(_ error: any Error & Sendable) {
+        continuation?.resume(throwing: error)
+        continuation = nil
+    }
+}
+
+private actor TranscriptionRetryMultiControlledTranscriber {
+    private struct Call {
+        let context: CloudTranscriptionExecutionContext?
+        let continuation: CheckedContinuation<TranscriptionResult, Error>
+    }
+
+    private var calls: [Int: Call] = [:]
+    private var nextCallIndex = 0
+    private var callCountWaiters: [(
+        count: Int,
+        continuation: CheckedContinuation<Void, Never>
+    )] = []
+
+    func run(
+        context: CloudTranscriptionExecutionContext?
+    ) async throws -> TranscriptionResult {
+        let callIndex = nextCallIndex
+        nextCallIndex += 1
+        return try await withCheckedThrowingContinuation { continuation in
+            calls[callIndex] = Call(
+                context: context,
+                continuation: continuation
+            )
+            resumeSatisfiedWaiters()
+        }
+    }
+
+    func waitUntilCallCount(_ count: Int) async {
+        if calls.count >= count { return }
+        await withCheckedContinuation { continuation in
+            callCountWaiters.append((count, continuation))
+        }
+    }
+
+    func emitProgress(call: Int, progress: CloudTranscriptionProgress) {
+        calls[call]?.context?.progress(progress)
+    }
+
+    func succeed(call: Int, result: TranscriptionResult) {
+        calls.removeValue(forKey: call)?.continuation.resume(returning: result)
+    }
+
+    func fail(call: Int, error: any Error & Sendable) {
+        calls.removeValue(forKey: call)?.continuation.resume(throwing: error)
+    }
+
+    private func resumeSatisfiedWaiters() {
+        var remaining: [(
+            count: Int,
+            continuation: CheckedContinuation<Void, Never>
+        )] = []
+        for waiter in callCountWaiters {
+            if calls.count >= waiter.count {
+                waiter.continuation.resume()
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        callCountWaiters = remaining
+    }
+}
+
+private final class TranscriptionRetryTokenSource: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counter: UInt64 = 0
+
+    func next() -> UUID {
+        lock.lock()
+        defer { lock.unlock() }
+        counter &+= 1
+        let suffix = String(format: "%012llx", counter)
+        return UUID(uuidString: "00000000-0000-0000-0000-\(suffix)")!
+    }
+}
+
+private enum TranscriptionRetrySourceChange: Equatable, Sendable {
+    case audioFileName
+    case timestamp
+
+    func changedItem(from item: PipelineHistoryItem) -> PipelineHistoryItem {
+        PipelineHistoryItem(
+            intent: item.intent,
+            selectedText: item.selectedText,
+            capturedSelection: item.capturedSelection,
+            id: item.id,
+            timestamp: self == .timestamp
+                ? item.timestamp.addingTimeInterval(1)
+                : item.timestamp,
+            recordingStartedAt: item.recordingStartedAt,
+            recordingEndedAt: item.recordingEndedAt,
+            calendarMatch: item.calendarMatch,
+            rawTranscript: item.rawTranscript,
+            postProcessedTranscript: item.postProcessedTranscript,
+            postProcessingPrompt: item.postProcessingPrompt,
+            systemPrompt: item.systemPrompt,
+            contextSummary: item.contextSummary,
+            contextSystemPrompt: item.contextSystemPrompt,
+            contextPrompt: item.contextPrompt,
+            contextScreenshotDataURL: item.contextScreenshotDataURL,
+            contextScreenshotStatus: item.contextScreenshotStatus,
+            postProcessingStatus: item.postProcessingStatus,
+            aiProcessingOutcome: item.aiProcessingOutcome,
+            debugStatus: item.debugStatus,
+            customVocabulary: item.customVocabulary,
+            customSystemPrompt: item.customSystemPrompt,
+            audioFileName: self == .audioFileName
+                ? "replacement.wav"
+                : item.audioFileName,
+            usedLocalTranscription: item.usedLocalTranscription,
+            usedContextCapture: item.usedContextCapture,
+            usedPostProcessing: item.usedPostProcessing,
+            transcriptionLanguageCode: item.transcriptionLanguageCode,
+            spokenLanguageCode: item.spokenLanguageCode,
+            spokenLanguageResolution: item.spokenLanguageResolution,
+            meetingSummaryAttempt: item.meetingSummaryAttempt,
+            localTranscriptionModelID: item.localTranscriptionModelID,
+            transcriptFileName: item.transcriptFileName,
+            contextAppName: item.contextAppName,
+            contextBundleIdentifier: item.contextBundleIdentifier,
+            contextWindowTitle: item.contextWindowTitle,
+            customTitle: item.customTitle,
+            meetingSummaryJSON: item.meetingSummaryJSON
+        )
     }
 }
 

@@ -177,6 +177,7 @@ struct TranscriptionRetryWorkflowDependencies {
 
 private struct TranscriptionRetryActiveAttempt {
     let token: UUID
+    let revision: UInt64
     var task: Task<Void, Never>?
     let jobStore: CloudTranscriptionJobStore
     let session: CloudTranscriptionJobSession
@@ -185,6 +186,7 @@ private struct TranscriptionRetryActiveAttempt {
 final class TranscriptionRetryWorkflow: @unchecked Sendable {
     private let dependencies: TranscriptionRetryWorkflowDependencies
     @MainActor private var activeAttempts: [UUID: TranscriptionRetryActiveAttempt] = [:]
+    @MainActor private var attemptRevisionByNoteID: [UUID: UInt64] = [:]
     @MainActor private(set) var state = TranscriptionRetryWorkflowState.initial
     nonisolated(unsafe) var onEvent:
         (@MainActor (TranscriptionRetryWorkflowEvent) -> Void)?
@@ -218,6 +220,7 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         runtime.cloud.cancelExistingExecution(noteID)
 
         let token = dependencies.makeAttemptToken()
+        let revision = nextRevision(noteID: noteID)
         let existingRecord = try? runtime.cloud.jobStore.load(
             historyID: noteID
         )
@@ -232,10 +235,12 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             request: request,
             store: runtime.cloud.jobStore,
             session: session,
-            token: token
+            token: token,
+            revision: revision
         )
         activeAttempts[noteID] = TranscriptionRetryActiveAttempt(
             token: token,
+            revision: revision,
             task: nil,
             jobStore: runtime.cloud.jobStore,
             session: session
@@ -259,12 +264,14 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
                     request: request,
                     runtime: runtime,
                     token: token,
+                    revision: revision,
                     processing: processing
                 )
             } catch is CancellationError {
                 self?.finishAttempt(
                     noteID: noteID,
                     token: token,
+                    revision: revision,
                     outcome: .cancelled
                 )
             } catch {
@@ -272,11 +279,16 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
                     error,
                     request: request,
                     runtime: runtime,
-                    token: token
+                    token: token,
+                    revision: revision
                 )
             }
         }
-        guard activeAttempts[noteID]?.token == token else {
+        guard isCurrentAttempt(
+            noteID: noteID,
+            token: token,
+            revision: revision
+        ) else {
             task.cancel()
             return false
         }
@@ -377,7 +389,8 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         request: TranscriptionRetryWorkflowRequest,
         store: CloudTranscriptionJobStore,
         session: CloudTranscriptionJobSession,
-        token: UUID
+        token: UUID,
+        revision: UInt64
     ) -> CloudTranscriptionExecutionContext? {
         guard case .cloud(_, let completion) = request.execution else {
             return nil
@@ -395,7 +408,8 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
                     self?.recordProgress(
                         progress,
                         noteID: noteID,
-                        token: token
+                        token: token,
+                        revision: revision
                     )
                 }
             }
@@ -406,9 +420,14 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
     private func recordProgress(
         _ progress: CloudTranscriptionProgress,
         noteID: UUID,
-        token: UUID
+        token: UUID,
+        revision: UInt64
     ) {
-        guard activeAttempts[noteID]?.token == token else { return }
+        guard isCurrentAttempt(
+            noteID: noteID,
+            token: token,
+            revision: revision
+        ) else { return }
         state.progressByNoteID[noteID] = Self.displayProgress(progress)
         emitState()
     }
@@ -443,15 +462,28 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         request: TranscriptionRetryWorkflowRequest,
         runtime: TranscriptionRetryWorkflowRuntime,
         token: UUID,
+        revision: UInt64,
         processing: TranscriptionRetryProcessingResult
     ) {
         let noteID = request.sourceIdentity.noteID
-        guard activeAttempts[noteID]?.token == token else { return }
+        guard isCurrentAttempt(
+            noteID: noteID,
+            token: token,
+            revision: revision
+        ) else {
+            onEvent?(.completed(noteID, .stale))
+            return
+        }
 
         let currentItem: PipelineHistoryItem
         do {
             guard let item = try runtime.history.item(noteID) else {
-                finishAttempt(noteID: noteID, token: token, outcome: .stale)
+                finishAttempt(
+                noteID: noteID,
+                token: token,
+                revision: revision,
+                outcome: .stale
+            )
                 return
             }
             currentItem = item
@@ -459,6 +491,7 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             finishAttempt(
                 noteID: noteID,
                 token: token,
+                revision: revision,
                 outcome: .persistenceFailed(
                     QuillUserIssueRecord(code: .historyPersistenceUnavailable)
                 )
@@ -467,7 +500,12 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         }
         guard currentItem.timestamp == request.sourceIdentity.noteTimestamp,
               currentItem.audioFileName == request.sourceIdentity.audioFileName else {
-            finishAttempt(noteID: noteID, token: token, outcome: .stale)
+            finishAttempt(
+                noteID: noteID,
+                token: token,
+                revision: revision,
+                outcome: .stale
+            )
             return
         }
 
@@ -485,10 +523,15 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             createdTranscriptFileName = created
         }
 
-        guard activeAttempts[noteID]?.token == token else {
+        guard isCurrentAttempt(
+            noteID: noteID,
+            token: token,
+            revision: revision
+        ) else {
             if let createdTranscriptFileName {
                 try? runtime.assets.deleteTranscript(createdTranscriptFileName)
             }
+            onEvent?(.completed(noteID, .stale))
             return
         }
 
@@ -523,6 +566,7 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             finishAttempt(
                 noteID: noteID,
                 token: token,
+                revision: revision,
                 outcome: .persistenceFailed(
                     QuillUserIssueRecord(code: .historyPersistenceUnavailable)
                 )
@@ -530,7 +574,14 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             return
         }
 
-        guard activeAttempts[noteID]?.token == token else { return }
+        guard isCurrentAttempt(
+            noteID: noteID,
+            token: token,
+            revision: revision
+        ) else {
+            onEvent?(.completed(noteID, .stale))
+            return
+        }
         onEvent?(
             .itemPersisted(
                 updatedItem,
@@ -543,7 +594,8 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
 
         let cleanupFailureDescription = deleteCompletedSidecarIfPresent(
             noteID: noteID,
-            token: token
+            token: token,
+            revision: revision
         )
         let completion = TranscriptionRetryCompletion(
             interactiveTranscript: request.deliveryPolicy == .interactive
@@ -559,16 +611,25 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         case .fallback:
             outcome = .fallback(completion)
         }
-        finishAttempt(noteID: noteID, token: token, outcome: outcome)
+        finishAttempt(
+            noteID: noteID,
+            token: token,
+            revision: revision,
+            outcome: outcome
+        )
     }
 
     @MainActor
     private func deleteCompletedSidecarIfPresent(
         noteID: UUID,
-        token: UUID
+        token: UUID,
+        revision: UInt64
     ) -> String? {
-        guard let attempt = activeAttempts[noteID],
-              attempt.token == token else {
+        guard isCurrentAttempt(
+            noteID: noteID,
+            token: token,
+            revision: revision
+        ), let attempt = activeAttempts[noteID] else {
             return nil
         }
         do {
@@ -590,10 +651,17 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         _ error: Error,
         request: TranscriptionRetryWorkflowRequest,
         runtime: TranscriptionRetryWorkflowRuntime,
-        token: UUID
+        token: UUID,
+        revision: UInt64
     ) {
         let noteID = request.sourceIdentity.noteID
-        guard activeAttempts[noteID]?.token == token else { return }
+        guard isCurrentAttempt(
+            noteID: noteID,
+            token: token,
+            revision: revision
+        ) else {
+            return
+        }
         let issue = Self.classifyFailure(
             error,
             context: request.failureContext
@@ -602,7 +670,12 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         let currentItem: PipelineHistoryItem
         do {
             guard let item = try runtime.history.item(noteID) else {
-                finishAttempt(noteID: noteID, token: token, outcome: .stale)
+                finishAttempt(
+                noteID: noteID,
+                token: token,
+                revision: revision,
+                outcome: .stale
+            )
                 return
             }
             currentItem = item
@@ -610,6 +683,7 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             finishAttempt(
                 noteID: noteID,
                 token: token,
+                revision: revision,
                 outcome: .persistenceFailed(
                     QuillUserIssueRecord(code: .historyPersistenceUnavailable)
                 )
@@ -618,7 +692,12 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         }
         guard currentItem.timestamp == request.sourceIdentity.noteTimestamp,
               currentItem.audioFileName == request.sourceIdentity.audioFileName else {
-            finishAttempt(noteID: noteID, token: token, outcome: .stale)
+            finishAttempt(
+                noteID: noteID,
+                token: token,
+                revision: revision,
+                outcome: .stale
+            )
             return
         }
 
@@ -626,6 +705,7 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             finishAttempt(
                 noteID: noteID,
                 token: token,
+                revision: revision,
                 outcome: .failed(
                     TranscriptionRetryFailure(
                         issue: issue.record,
@@ -663,6 +743,7 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             finishAttempt(
                 noteID: noteID,
                 token: token,
+                revision: revision,
                 outcome: .persistenceFailed(
                     QuillUserIssueRecord(code: .historyPersistenceUnavailable)
                 )
@@ -670,7 +751,14 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
             return
         }
 
-        guard activeAttempts[noteID]?.token == token else { return }
+        guard isCurrentAttempt(
+            noteID: noteID,
+            token: token,
+            revision: revision
+        ) else {
+            onEvent?(.completed(noteID, .stale))
+            return
+        }
         onEvent?(
             .itemPersisted(
                 updatedItem,
@@ -683,6 +771,7 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
         finishAttempt(
             noteID: noteID,
             token: token,
+            revision: revision,
             outcome: .failed(
                 TranscriptionRetryFailure(
                     issue: issue.record,
@@ -693,24 +782,112 @@ final class TranscriptionRetryWorkflow: @unchecked Sendable {
     }
 
     @MainActor
-    private func cancelCurrentAttempt(noteID: UUID) {
-        guard let attempt = activeAttempts.removeValue(forKey: noteID) else {
-            return
+    func invalidate(noteID: UUID) {
+        cancelActiveAttempt(
+            noteID: noteID,
+            incrementRevision: true,
+            emitCancellation: true
+        )
+    }
+
+    @MainActor
+    func cancel(noteID: UUID) {
+        cancelActiveAttempt(
+            noteID: noteID,
+            incrementRevision: true,
+            emitCancellation: true
+        )
+    }
+
+    @MainActor
+    func forget(noteID: UUID) {
+        cancelActiveAttempt(
+            noteID: noteID,
+            incrementRevision: true,
+            emitCancellation: true
+        )
+        attemptRevisionByNoteID.removeValue(forKey: noteID)
+    }
+
+    @MainActor
+    func forgetAll() {
+        for noteID in Array(activeAttempts.keys) {
+            cancelActiveAttempt(
+                noteID: noteID,
+                incrementRevision: true,
+                emitCancellation: true
+            )
         }
-        attempt.task?.cancel()
-        attempt.jobStore.invalidateSession(historyID: noteID)
-        state.retryingNoteIDs.remove(noteID)
-        state.progressByNoteID.removeValue(forKey: noteID)
+        attemptRevisionByNoteID.removeAll()
+        guard state != .initial else { return }
+        state = .initial
+        emitState()
+    }
+
+    @MainActor
+    private func cancelCurrentAttempt(noteID: UUID) {
+        cancelActiveAttempt(
+            noteID: noteID,
+            incrementRevision: false,
+            emitCancellation: true
+        )
+    }
+
+    @MainActor
+    private func cancelActiveAttempt(
+        noteID: UUID,
+        incrementRevision: Bool,
+        emitCancellation: Bool
+    ) {
+        if incrementRevision {
+            _ = nextRevision(noteID: noteID)
+        }
+        let attempt = activeAttempts.removeValue(forKey: noteID)
+        attempt?.task?.cancel()
+        attempt?.jobStore.invalidateSession(historyID: noteID)
+        let removedRetry = state.retryingNoteIDs.remove(noteID) != nil
+        let removedProgress = state.progressByNoteID.removeValue(
+            forKey: noteID
+        ) != nil
+        if removedRetry || removedProgress {
+            emitState()
+        }
+        if emitCancellation, attempt != nil {
+            onEvent?(.completed(noteID, .cancelled))
+        }
+    }
+
+    @MainActor
+    private func nextRevision(noteID: UUID) -> UInt64 {
+        let next = (attemptRevisionByNoteID[noteID] ?? 0) &+ 1
+        attemptRevisionByNoteID[noteID] = next
+        return next
+    }
+
+    @MainActor
+    private func isCurrentAttempt(
+        noteID: UUID,
+        token: UUID,
+        revision: UInt64
+    ) -> Bool {
+        guard let attempt = activeAttempts[noteID] else { return false }
+        return attempt.token == token
+            && attempt.revision == revision
+            && attemptRevisionByNoteID[noteID] == revision
     }
 
     @MainActor
     private func finishAttempt(
         noteID: UUID,
         token: UUID,
+        revision: UInt64,
         outcome: TranscriptionRetryWorkflowOutcome
     ) {
-        guard let attempt = activeAttempts[noteID],
-              attempt.token == token else {
+        guard isCurrentAttempt(
+            noteID: noteID,
+            token: token,
+            revision: revision
+        ), let attempt = activeAttempts[noteID] else {
             return
         }
         activeAttempts.removeValue(forKey: noteID)
