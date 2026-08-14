@@ -107,10 +107,15 @@ struct MeetingSummaryAppStateTests {
         let secondGenerator = MeetingSummaryGeneratorStub { _ in
             makeGenerationResult(overview: "second generator")
         }
+        let firstRecorder = MeetingSummaryGeneratorConfigurationRecorder()
+        let secondRecorder = MeetingSummaryGeneratorConfigurationRecorder()
         var dependencies = AppStateDependencies.live
         dependencies.storageLayout = firstFixture.storageLayout
         dependencies.makePipelineHistoryStore = { _ in firstFixture.store }
-        dependencies.makeMeetingSummaryGenerator = { _ in firstGenerator }
+        dependencies.makeMeetingSummaryGenerator = { configuration in
+            firstRecorder.record(configuration)
+            return firstGenerator
+        }
         let firstDependencies = dependencies
         let firstState = await MainActor.run {
             let appState = AppState(dependencies: firstDependencies)
@@ -120,12 +125,21 @@ struct MeetingSummaryAppStateTests {
 
         dependencies.storageLayout = secondFixture.storageLayout
         dependencies.makePipelineHistoryStore = { _ in secondFixture.store }
-        dependencies.makeMeetingSummaryGenerator = { _ in secondGenerator }
+        dependencies.makeMeetingSummaryGenerator = { configuration in
+            secondRecorder.record(configuration)
+            return secondGenerator
+        }
         let secondDependencies = dependencies
         let secondState = await MainActor.run {
             let appState = AppState(dependencies: secondDependencies)
             configureSummaryGeneration(appState)
             return appState
+        }
+        let firstExpectedFallbackModelID = await MainActor.run {
+            firstState.meetingSummaryFallbackModel
+        }
+        let secondExpectedFallbackModelID = await MainActor.run {
+            secondState.meetingSummaryFallbackModel
         }
 
         try await firstState.generateMeetingSummary(id: firstItem.id)
@@ -141,6 +155,14 @@ struct MeetingSummaryAppStateTests {
                     == "second generator"
             )
         }
+        precondition(
+            firstRecorder.recordedFallbackModelIDs
+                == [firstExpectedFallbackModelID]
+        )
+        precondition(
+            secondRecorder.recordedFallbackModelIDs
+                == [secondExpectedFallbackModelID]
+        )
     }
 
     private static func testSuccessfulGenerationMarksPendingRevealConsumableOnce() async throws {
@@ -1721,6 +1743,23 @@ private final class MeetingSummaryGeneratorStub:
         source: MeetingSummarySource
     ) async throws -> MeetingSummaryGenerationResult {
         try await operation(source)
+    }
+}
+
+private final class MeetingSummaryGeneratorConfigurationRecorder:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var fallbackModelIDs: [String?] = []
+
+    func record(_ configuration: MeetingSummaryGeneratorConfiguration) {
+        lock.withLock {
+            fallbackModelIDs.append(configuration.cloudFallbackModelID)
+        }
+    }
+
+    var recordedFallbackModelIDs: [String?] {
+        lock.withLock { fallbackModelIDs }
     }
 }
 

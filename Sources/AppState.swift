@@ -4464,8 +4464,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
-    func makeMeetingSummaryService() -> MeetingSummaryService {
-        MeetingSummaryService(
+    @MainActor
+    private func meetingSummaryGeneratorConfiguration()
+        -> MeetingSummaryGeneratorConfiguration
+    {
+        MeetingSummaryGeneratorConfiguration(
             backendExecutor: makeAIProcessingBackendExecutor(
                 choice: meetingSummaryBackendChoice
             ),
@@ -6764,8 +6767,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 languageContext: resolvedLanguage.context
             )
             attemptSourceFingerprint = source.fingerprint
-            result = try await dependencies.makeMeetingSummaryGenerator(self)
-                .generate(source: source)
+            result = try await dependencies.makeMeetingSummaryGenerator(
+                meetingSummaryGeneratorConfiguration()
+            ).generate(source: source)
 
             guard let index = pipelineHistory.firstIndex(where: { $0.id == id }) else {
                 throw MeetingSummaryError.sourceChanged
