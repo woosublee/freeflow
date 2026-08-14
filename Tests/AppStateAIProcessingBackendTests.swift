@@ -2480,14 +2480,13 @@ struct AppStateAIProcessingBackendTests {
 
         let body = sourceBlock(
             in: source,
-            from: "private func resumeCloudTranscriptionAfterLaunch(",
+            from: "private func scheduleCloudTranscriptionAutoResume(",
             to: "private func installCloudTranscriptionTask("
         )
         assert(body.contains("postProcessingService: PostProcessingService"))
-        let task = requiredRange(of: "let task = Task", in: body)
-        let taskBody = String(body[task.lowerBound...])
-        assert(!taskBody.contains("makePostProcessingService()"))
-        assert(taskBody.contains("postProcessingService: postProcessingService"))
+        assert(body.contains("makeProcessingBehavior:"))
+        assert(!body.contains("makePostProcessingService()"))
+        assert(body.contains("postProcessingService: postProcessingService"))
     }
 
     private static func testContextCaptureUsesServiceSnapshotAndKeepsCancellationGuards() throws {

@@ -205,33 +205,6 @@ private struct AudioImportTaskConfiguration {
     }
 }
 
-private enum TranscriptionCompletionDeliveryPolicy {
-    case interactive
-    case historyOnly
-}
-
-private struct RetrySnapshot {
-    let item: PipelineHistoryItem
-    let audioURL: URL
-    let restoredContext: AppContext
-    let restoredIntent: SessionIntent
-    let transcriptionChoice: TranscriptionBackendChoice
-    let execution: TranscriptionExecutionSnapshot
-    let transcriptionLanguage: TranscriptionLanguage
-    let localTranscriptionModel: TranscriptionModel
-    let useLocalTranscription: Bool
-    let customVocabulary: String
-    let customSystemPrompt: String
-    let localWhisperPath: String?
-    let useLegacyMlxWhisper: Bool
-    let transcriptionModel: String
-    let cloudExecutionContext: CloudTranscriptionExecutionContext?
-
-    var requiresCloudExecution: Bool {
-        !useLocalTranscription
-    }
-}
-
 private struct TranscriptCommandParsingResult {
     let transcript: String
     let shouldPressEnterAfterPaste: Bool
@@ -3060,11 +3033,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
             let cloudDependenciesFactory = dependencies
                 .makeRetryCloudTranscriptionDependencies
             let postProcessingService = makePostProcessingService()
+            let capturedVoiceMacros = initialMacros
             Task { @MainActor [weak self] in
                 self?.scheduleCloudTranscriptionAutoResume(
                     cloudReconciliation,
                     cloudDependenciesFactory: cloudDependenciesFactory,
-                    postProcessingService: postProcessingService
+                    postProcessingService: postProcessingService,
+                    voiceMacros: capturedVoiceMacros
                 )
             }
         }
@@ -5060,6 +5035,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     ) {
         switch replacement {
         case .fresh(let runtime):
+            transcriptionRetryWorkflow.forgetAll()
             pipelineHistoryStore = runtime.historyStore
             recordingJournalStore = runtime.recordingJournalStore
             cloudTranscriptionJobStore = runtime.cloudTranscriptionJobStore
@@ -5397,6 +5373,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         _ assets: DeletedPipelineHistoryAssets,
         survivingHistory: [PipelineHistoryItem]? = nil
     ) {
+        transcriptionRetryWorkflow.forget(noteID: assets.historyID)
         cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(
             historyID: assets.historyID,
             store: cloudTranscriptionJobStore
@@ -6537,6 +6514,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard requireAvailableHistoryForMutation() else { return }
         let historyIDs = pipelineHistory.map(\.id)
         for historyID in historyIDs {
+            transcriptionRetryWorkflow.cancel(noteID: historyID)
             cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(
                 historyID: historyID,
                 store: cloudTranscriptionJobStore
@@ -6561,6 +6539,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     survivingHistory: []
                 )
             }
+            transcriptionRetryWorkflow.forgetAll()
             meetingSummaryWorkflow.forgetAll()
             forgetAllWarningBannerState()
         } catch {
@@ -6572,6 +6551,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     func deleteHistoryEntry(id: UUID) {
         guard requireAvailableHistoryForMutation(),
               let index = pipelineHistory.firstIndex(where: { $0.id == id }) else { return }
+        transcriptionRetryWorkflow.cancel(noteID: id)
         cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(
             historyID: id,
             store: cloudTranscriptionJobStore
@@ -6840,6 +6820,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             if let index = pipelineHistory.firstIndex(where: { $0.id == id }) {
                 pipelineHistory[index] = updated
             }
+            transcriptionRetryWorkflow.invalidate(noteID: id)
             meetingSummaryWorkflow.invalidate(noteID: id)
         } catch {
             errorMessage = LocalizedUserMessage.providerFailure(prefix: localizedCatalogString("Failed to save transcript edit"), providerDetail: error.localizedDescription)
@@ -7447,60 +7428,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
             aiProcessingOutcome: result.aiProcessingOutcome,
             spokenLanguage: transcription.spokenLanguage,
             disposition: disposition
-        )
-    }
-
-    private func makeRetryHistoryItem(
-        from snapshot: RetrySnapshot,
-        rawTranscript: String,
-        postProcessedTranscript: String,
-        postProcessingPrompt: String?,
-        postProcessingStatus: String,
-        aiProcessingOutcome: String,
-        debugStatus: String,
-        transcriptFileName: String?,
-        spokenLanguage: SpokenLanguageResolution? = nil
-    ) -> PipelineHistoryItem {
-        let completion = snapshot.execution.completion
-        let effectiveSpokenLanguage = spokenLanguage ?? snapshot.item.spokenLanguage
-        return PipelineHistoryItem(
-            intent: snapshot.item.intent,
-            selectedText: snapshot.item.selectedText,
-            capturedSelection: snapshot.item.capturedSelection,
-            id: snapshot.item.id,
-            timestamp: snapshot.item.timestamp,
-            recordingStartedAt: snapshot.item.recordingStartedAt,
-            recordingEndedAt: snapshot.item.recordingEndedAt,
-            calendarMatch: snapshot.item.calendarMatch,
-            rawTranscript: rawTranscript,
-            postProcessedTranscript: postProcessedTranscript,
-            postProcessingPrompt: postProcessingPrompt,
-            systemPrompt: snapshot.item.systemPrompt,
-            contextSummary: snapshot.item.contextSummary,
-            contextSystemPrompt: snapshot.item.contextSystemPrompt,
-            contextPrompt: snapshot.item.contextPrompt,
-            contextScreenshotDataURL: snapshot.item.contextScreenshotDataURL,
-            contextScreenshotStatus: snapshot.item.contextScreenshotStatus,
-            postProcessingStatus: postProcessingStatus,
-            aiProcessingOutcome: aiProcessingOutcome,
-            debugStatus: debugStatus,
-            customVocabulary: snapshot.customVocabulary,
-            customSystemPrompt: snapshot.customSystemPrompt,
-            audioFileName: snapshot.item.audioFileName,
-            usedLocalTranscription: snapshot.useLocalTranscription,
-            usedContextCapture: snapshot.item.usedContextCapture,
-            usedPostProcessing: completion.postProcessingEnabled,
-            transcriptionLanguageCode: snapshot.transcriptionLanguage.code,
-            spokenLanguageCode: effectiveSpokenLanguage?.languageCode,
-            spokenLanguageResolution: effectiveSpokenLanguage?.source,
-            meetingSummaryAttempt: snapshot.item.meetingSummaryAttempt,
-            localTranscriptionModelID: snapshot.localTranscriptionModel.id,
-            transcriptFileName: transcriptFileName,
-            contextAppName: snapshot.item.contextAppName,
-            contextBundleIdentifier: snapshot.item.contextBundleIdentifier,
-            contextWindowTitle: snapshot.item.contextWindowTitle,
-            customTitle: snapshot.item.customTitle,
-            meetingSummaryJSON: snapshot.item.meetingSummaryJSON
         )
     }
 
@@ -10542,8 +10469,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @MainActor
     private func scheduleCloudTranscriptionAutoResume(
         _ reconciliation: CloudTranscriptionReconciliation,
-        cloudDependenciesFactory: @escaping () -> CloudTranscriptionDependencies,
-        postProcessingService: PostProcessingService
+        cloudDependenciesFactory:
+            @escaping @Sendable () -> CloudTranscriptionDependencies,
+        postProcessingService: PostProcessingService,
+        voiceMacros: [VoiceMacro]
     ) {
         guard hasTranscriptionAPIKey else { return }
 
@@ -10559,185 +10488,51 @@ final class AppState: ObservableObject, @unchecked Sendable {
         } catch {
             return
         }
-        let compatible = CloudTranscriptionStartupReconciler(
-            store: cloudTranscriptionJobStore,
-            audioRoot: storageLayout.audioDirectory
-        ).reconcile(
-            history: pipelineHistory,
-            runtime: runtime
-        )
-        guard !compatible.resumable.isEmpty else { return }
-        for record in compatible.resumable {
-            cloudTranscriptionProgressByHistoryID[record.historyID] =
-                CloudTranscriptionDisplayProgress(
-                    completedChunkCount: record.completedChunks.count,
-                    totalChunkCount: record.plan.chunks.count,
-                    activeAttempt: nil
-                )
-        }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            for record in compatible.resumable {
-                self.resumeCloudTranscriptionAfterLaunch(
-                    record,
-                    runtime: runtime,
-                    cloudDependencies: cloudDependenciesFactory(),
-                    postProcessingService: postProcessingService,
-                    completionDelivery: .historyOnly
-                )
-            }
-        }
-    }
 
-    @MainActor
-    private func resumeCloudTranscriptionAfterLaunch(
-        _ record: CloudTranscriptionJobRecord,
-        runtime: CloudTranscriptionExecutionSnapshot,
-        cloudDependencies: CloudTranscriptionDependencies,
-        postProcessingService: PostProcessingService,
-        completionDelivery: TranscriptionCompletionDeliveryPolicy
-    ) {
-        guard completionDelivery == .historyOnly,
-              let item = pipelineHistory.first(where: {
-                  $0.id == record.historyID
-              }),
-              let audioFileName = item.audioFileName else {
-            return
-        }
-        let audioURL = storageLayout.audioDirectory.appendingPathComponent(
-            audioFileName
-        )
-        retryingItemIDs.insert(item.id)
-        let session = cloudTranscriptionJobStore.beginSession(
-            historyID: record.historyID
-        )
-        let completion = TranscriptionCompletionSnapshot(
-            postProcessingEnabled: record.completionPolicy.postProcessingEnabled,
-            outputLanguage: record.completionPolicy.outputLanguage,
-            pressEnterCommandEnabled: record.completionPolicy.pressEnterCommandEnabled
-        )
-        let context = makeCloudExecutionContext(
-            historyID: record.historyID,
-            session: session,
-            completion: completion
-        )
-        let task = Task { [weak self] in
-            guard let self else { return }
-            do {
-                let service = try TranscriptionExecutionSnapshot.cloud(
-                    runtime,
-                    completion
-                ).makeTranscriptionService(
-                    cloudDependencies: cloudDependencies,
-                    cloudExecutionContext: context
+        let input = TranscriptionRetryStartupInput(
+            reconciliation: reconciliation,
+            runtime: runtime,
+            history: pipelineHistory,
+            audioDirectory: storageLayout.audioDirectory,
+            cloudDependenciesFactory: cloudDependenciesFactory,
+            makeProcessingBehavior: { item, completion in
+                let intent = SessionIntent.fromPersisted(
+                    intent: item.intent,
+                    selectedText: item.selectedText
                 )
-                let transcription = try await service.transcribe(
-                    fileURL: audioURL
+                let context = AppContext(
+                    appName: item.contextAppName,
+                    bundleIdentifier: item.contextBundleIdentifier,
+                    windowTitle: item.contextWindowTitle,
+                    selectedText: item.capturedSelection,
+                    currentActivity: item.contextSummary,
+                    contextSystemPrompt: item.contextSystemPrompt,
+                    contextPrompt: item.contextPrompt,
+                    screenshotDataURL: item.contextScreenshotDataURL,
+                    screenshotMimeType: item.contextScreenshotDataURL != nil
+                        ? "image/jpeg"
+                        : nil,
+                    screenshotError: nil
                 )
-                let parsed = Self.parseTranscriptCommands(
-                    from: transcription.text,
-                    pressEnterCommandEnabled: completion.pressEnterCommandEnabled
-                )
-                let result = await Self.processTranscript(
-                    parsed.transcript,
-                    intent: SessionIntent.fromPersisted(
-                        intent: item.intent,
-                        selectedText: item.selectedText
-                    ),
-                    context: AppContext(
-                        appName: item.contextAppName,
-                        bundleIdentifier: item.contextBundleIdentifier,
-                        windowTitle: item.contextWindowTitle,
-                        selectedText: item.capturedSelection,
-                        currentActivity: item.contextSummary,
-                        contextSystemPrompt: item.contextSystemPrompt,
-                        contextPrompt: item.contextPrompt,
-                        screenshotDataURL: item.contextScreenshotDataURL,
-                        screenshotMimeType: item.contextScreenshotDataURL != nil
-                            ? "image/jpeg"
-                            : nil,
-                        screenshotError: nil
-                    ),
-                    postProcessingService: postProcessingService,
-                    precomputedMacros: precomputedMacros,
-                    customVocabulary: item.customVocabulary,
-                    customSystemPrompt: item.customSystemPrompt,
-                    outputLanguage: completion.outputLanguage,
-                    spokenLanguage: transcription.spokenLanguage,
-                    postProcessingEnabled: completion.postProcessingEnabled
-                )
-                let updated = makeRetryHistoryItem(
-                    from: RetrySnapshot(
-                        item: item,
-                        audioURL: audioURL,
-                        restoredContext: AppContext(
-                            appName: item.contextAppName,
-                            bundleIdentifier: item.contextBundleIdentifier,
-                            windowTitle: item.contextWindowTitle,
-                            selectedText: item.capturedSelection,
-                            currentActivity: item.contextSummary,
-                            contextSystemPrompt: item.contextSystemPrompt,
-                            contextPrompt: item.contextPrompt,
-                            screenshotDataURL: item.contextScreenshotDataURL,
-                            screenshotMimeType: item.contextScreenshotDataURL != nil
-                                ? "image/jpeg"
-                                : nil,
-                            screenshotError: nil
-                        ),
-                        restoredIntent: SessionIntent.fromPersisted(
-                            intent: item.intent,
-                            selectedText: item.selectedText
-                        ),
-                        transcriptionChoice: .apiStandard(modelID: runtime.model),
-                        execution: .cloud(runtime, completion),
-                        transcriptionLanguage: TranscriptionLanguage.find(
-                            code: item.transcriptionLanguageCode
-                        ),
-                        localTranscriptionModel: TranscriptionModel.find(
-                            id: item.localTranscriptionModelID
-                        ),
-                        useLocalTranscription: false,
-                        customVocabulary: item.customVocabulary,
-                        customSystemPrompt: item.customSystemPrompt,
-                        localWhisperPath: nil,
-                        useLegacyMlxWhisper: false,
-                        transcriptionModel: runtime.model,
-                        cloudExecutionContext: context
-                    ),
-                    rawTranscript: parsed.transcript,
-                    postProcessedTranscript: result.finalTranscript,
-                    postProcessingPrompt: result.prompt,
-                    postProcessingStatus: result.userIssueRecord?.persistedStatus
-                        ?? Self.statusMessage(
-                            for: result.outcome,
-                            parsedTranscript: parsed,
-                            isRetry: true
-                        ),
-                    aiProcessingOutcome: result.aiProcessingOutcome
-                        .pipelineHistoryStatus,
-                    debugStatus: "Resumed after relaunch",
-                    transcriptFileName: item.transcriptFileName,
-                    spokenLanguage: transcription.spokenLanguage
-                )
-                try pipelineHistoryStore.update(updated)
-                incrementNoteRetryGeneration(for: item.id)
-                pipelineHistory = pipelineHistoryStore.loadAllHistory()
-                completeCloudTranscriptionHistory(
-                    historyID: record.historyID,
-                    context: context,
-                    historySaved: true
-                )
-            } catch {
-                finishCloudTranscriptionJob(
-                    historyID: record.historyID,
-                    context: context
-                )
+                let customVocabulary = item.customVocabulary
+                let customSystemPrompt = item.customSystemPrompt
+                return TranscriptionRetryProcessingBehavior { transcription in
+                    await Self.processRetryTranscription(
+                        transcription,
+                        intent: intent,
+                        context: context,
+                        postProcessingService: postProcessingService,
+                        voiceMacros: voiceMacros,
+                        customVocabulary: customVocabulary,
+                        customSystemPrompt: customSystemPrompt,
+                        completion: completion
+                    )
+                }
             }
-        }
-        cloudTranscriptionHistoryCoordinator.install(
-            task: task,
-            historyID: record.historyID,
-            session: session
+        )
+        transcriptionRetryWorkflow.resumeAtStartup(
+            input: input,
+            runtime: transcriptionRetryWorkflowRuntime()
         )
     }
 
@@ -10811,107 +10606,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         return cloudTranscriptionHistoryCoordinator.context(
             historyID: historyID,
             store: cloudTranscriptionJobStore
-        )
-    }
-
-    @MainActor
-    private func prepareLocalRetryContext(
-        historyID: UUID
-    ) -> CloudTranscriptionExecutionContext? {
-        guard (try? cloudTranscriptionJobStore.load(historyID: historyID)) != nil else {
-            return nil
-        }
-        let session = cloudTranscriptionJobStore.beginSession(
-            historyID: historyID
-        )
-        cloudTranscriptionHistoryCoordinator.activate(
-            historyID: historyID,
-            session: session
-        )
-        return CloudTranscriptionExecutionContext(
-            historyID: historyID,
-            session: session,
-            checkpointStore: cloudTranscriptionJobStore.checkpointStore(
-                session: session
-            ),
-            progress: { _ in }
-        )
-    }
-
-    @MainActor
-    private func prepareCloudRetryContext(
-        historyID: UUID,
-        snapshot: CloudTranscriptionExecutionSnapshot,
-        completion: TranscriptionCompletionSnapshot
-    ) -> CloudTranscriptionExecutionContext {
-        let existingRecord = try? cloudTranscriptionJobStore.load(
-            historyID: historyID
-        )
-        let isCompatibleRetry = existingRecord.map {
-            $0.identity.providerID == snapshot.providerID
-                && $0.identity.model == snapshot.model
-                && $0.identity.language == snapshot.language
-                && $0.identity.responseFormat == snapshot.responseFormat
-                && $0.plan.encodedUploadCeilingBytes
-                    == snapshot.encodedUploadCeilingBytes
-                && $0.completionPolicy == completion.cloudJobPolicy
-        } ?? false
-        if existingRecord != nil, !isCompatibleRetry {
-            cloudTranscriptionHistoryCoordinator.cancelAndInvalidate(
-                historyID: historyID,
-                store: cloudTranscriptionJobStore
-            )
-            cloudTranscriptionProgressByHistoryID.removeValue(
-                forKey: historyID
-            )
-        }
-        let session = cloudTranscriptionJobStore.beginSession(
-            historyID: historyID
-        )
-        if existingRecord != nil, !isCompatibleRetry {
-            let staleSession = CloudTranscriptionJobSession(
-                historyID: historyID,
-                token: UUID()
-            )
-            try? cloudTranscriptionJobStore.replaceForIncompatibleRetry(
-                historyID: historyID,
-                oldSession: staleSession,
-                newSession: session
-            )
-        }
-        return makeCloudExecutionContext(
-            historyID: historyID,
-            session: session,
-            completion: completion
-        )
-    }
-
-    @MainActor
-    private func makeCloudExecutionContext(
-        historyID: UUID,
-        session: CloudTranscriptionJobSession,
-        completion: TranscriptionCompletionSnapshot
-    ) -> CloudTranscriptionExecutionContext {
-        cloudTranscriptionHistoryCoordinator.activate(
-            historyID: historyID,
-            session: session
-        )
-        return CloudTranscriptionExecutionContext(
-            historyID: historyID,
-            session: session,
-            checkpointStore: cloudTranscriptionJobStore.checkpointStore(
-                session: session,
-                completionPolicy: completion.cloudJobPolicy
-            ),
-            progress: { [weak self] progress in
-                Task { @MainActor [weak self] in
-                    self?.updateCloudTranscriptionProgress(
-                        progress,
-                        historyID: historyID,
-                        session: session
-                    )
-                }
-            }
         )
     }
 
