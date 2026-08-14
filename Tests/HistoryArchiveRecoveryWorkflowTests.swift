@@ -23,6 +23,14 @@ struct HistoryArchiveRecoveryWorkflowTests {
         try await testInspectionRejectsDuplicateCurrentSnapshot()
         try await testInspectionInvalidationDropsStaleCompletion()
         try await testInspectionFailureContinuesToNextSnapshot()
+        try await testRecoveryImportInstallsVerifiedReopenedStore()
+        try await testRecoveryImportPublishesOnlyPartialFeedback()
+        try await testRecoveryImportFailureRestoresVerifiedStore()
+        try await testRecoveryReopenFailureNeverInstallsRuntime()
+        try testRecoveryImportRejectsInvalidAndReentrantRequests()
+        try await testSnapshotDeleteRefreshesCatalog()
+        try await testSnapshotFailureNeverInstallsRuntime()
+        try await testSnapshotOperationsWaitForInspection()
         print("HistoryArchiveRecoveryWorkflowTests passed")
     }
 
@@ -481,6 +489,281 @@ struct HistoryArchiveRecoveryWorkflowTests {
         }
     }
 
+    private static func testRecoveryImportInstallsVerifiedReopenedStore() async throws {
+        try await withRecoveryWorkflow { workflow, startup, recorder, events in
+            recorder.importResult = HistoryRecoveryImportResult(
+                snapshotID: recorder.snapshotID,
+                importedRecordCount: 1,
+                alreadyPresentRecordCount: 0,
+                conflictRecordCount: 0,
+                failedRecordCount: 0
+            )
+            let command = await MainActor.run {
+                workflow.requestImport(
+                    snapshotID: recorder.snapshotID,
+                    context: .init(),
+                    currentStore: startup.activeStore,
+                    activeHistory: [],
+                    shouldRescheduleInspection: false
+                )
+            }
+            try expect(command == .accepted, "eligible recovery import is accepted")
+            try await waitUntil {
+                events.kinds.contains(.runtimeInstalled)
+                    && workflow.state.recoveryOperation == .idle
+            }
+            try expect(
+                workflow.state.importResult == nil
+                    && !workflow.state.isHistoryUnavailable,
+                "complete import installs available history without partial feedback"
+            )
+        }
+    }
+
+    private static func testRecoveryImportPublishesOnlyPartialFeedback() async throws {
+        try await withRecoveryWorkflow { workflow, startup, recorder, events in
+            let partialResult = HistoryRecoveryImportResult(
+                snapshotID: recorder.snapshotID,
+                importedRecordCount: 0,
+                alreadyPresentRecordCount: 0,
+                conflictRecordCount: 1,
+                failedRecordCount: 0
+            )
+            recorder.importResult = partialResult
+            let command = await MainActor.run {
+                workflow.requestImport(
+                    snapshotID: recorder.snapshotID,
+                    context: .init(),
+                    currentStore: startup.activeStore,
+                    activeHistory: [],
+                    shouldRescheduleInspection: false
+                )
+            }
+            try expect(command == .accepted, "partial recovery import is accepted")
+            try await waitUntil {
+                events.kinds.contains(.runtimeInstalled)
+                    && workflow.state.recoveryOperation == .idle
+            }
+            try expect(
+                workflow.state.importResult == partialResult,
+                "conflict result remains available as partial feedback"
+            )
+        }
+    }
+
+    private static func testRecoveryImportFailureRestoresVerifiedStore() async throws {
+        try await withRecoveryWorkflow(
+            importShouldFail: true
+        ) { workflow, startup, recorder, events in
+            let command = await MainActor.run {
+                workflow.requestImport(
+                    snapshotID: recorder.snapshotID,
+                    context: .init(),
+                    currentStore: startup.activeStore,
+                    activeHistory: [],
+                    shouldRescheduleInspection: false
+                )
+            }
+            try expect(command == .accepted, "failing recovery import starts")
+            try await waitUntil {
+                events.failures.contains(.recoveryImportFailed)
+            }
+            try expect(
+                events.kinds.contains(.runtimeInstalled),
+                "import failure restores a separately verified active store"
+            )
+            try expect(
+                !workflow.state.isHistoryUnavailable
+                    && workflow.state.recoveryOperation == .idle,
+                "verified restoration returns recovery to available idle state"
+            )
+        }
+    }
+
+    private static func testRecoveryReopenFailureNeverInstallsRuntime() async throws {
+        try await withRecoveryWorkflow(
+            unavailableStoreCalls: [3]
+        ) { workflow, startup, recorder, events in
+            let command = await MainActor.run {
+                workflow.requestImport(
+                    snapshotID: recorder.snapshotID,
+                    context: .init(),
+                    currentStore: startup.activeStore,
+                    activeHistory: [],
+                    shouldRescheduleInspection: false
+                )
+            }
+            try expect(command == .accepted, "reopen failure begins after import")
+            try await waitUntil {
+                events.failures.contains(.activeStoreReopenFailed)
+            }
+            try expect(
+                !events.kinds.contains(.runtimeInstalled),
+                "unverified reopened store is never installed"
+            )
+            try expect(
+                workflow.state.isHistoryUnavailable,
+                "reopen failure leaves history protected"
+            )
+        }
+    }
+
+    private static func testRecoveryImportRejectsInvalidAndReentrantRequests() throws {
+        let root = FileManager.default.temporaryDirectory
+        let snapshotID = UUID()
+        let descriptor = recoverySnapshotDescriptor(
+            id: snapshotID,
+            root: root
+        )
+        var state = HistoryWorkflowState.initial
+        try expect(
+            HistoryWorkflowAdmission.recoveryImport(
+                state: state,
+                snapshotID: snapshotID,
+                context: .init()
+            ) == .rejected(.snapshotUnavailable),
+            "unknown recovery snapshot is rejected"
+        )
+        state.snapshots = [descriptor]
+        state.recoveryOperation = .deletingSnapshot(UUID())
+        try expect(
+            HistoryWorkflowAdmission.recoveryImport(
+                state: state,
+                snapshotID: snapshotID,
+                context: .init()
+            ) == .rejected(.recoveryOperationInProgress),
+            "reentrant recovery import is rejected"
+        )
+    }
+
+    private static func testSnapshotDeleteRefreshesCatalog() async throws {
+        try await withRecoveryWorkflow { workflow, _, recorder, events in
+            let command = await MainActor.run {
+                workflow.requestDeleteSnapshot(
+                    snapshotID: recorder.snapshotID,
+                    activeHistory: [],
+                    shouldRescheduleInspection: false
+                )
+            }
+            try expect(command == .accepted, "eligible snapshot deletion is accepted")
+            try await waitUntil {
+                workflow.state.snapshots.isEmpty
+                    && workflow.state.recoveryOperation == .idle
+            }
+            try expect(
+                !events.kinds.contains(.runtimeInstalled),
+                "snapshot deletion never replaces active history"
+            )
+        }
+    }
+
+    private static func testSnapshotFailureNeverInstallsRuntime() async throws {
+        try await withRecoveryWorkflow(
+            deleteShouldFail: true
+        ) { workflow, _, recorder, events in
+            let command = await MainActor.run {
+                workflow.requestDeleteSnapshot(
+                    snapshotID: recorder.snapshotID,
+                    activeHistory: [],
+                    shouldRescheduleInspection: false
+                )
+            }
+            try expect(command == .accepted, "failing snapshot deletion starts")
+            try await waitUntil {
+                events.failures.contains(.snapshotOperationFailed)
+            }
+            try expect(
+                !events.kinds.contains(.runtimeInstalled),
+                "snapshot-only failure never replaces active history"
+            )
+            try expect(
+                workflow.state.snapshots.contains(where: {
+                    $0.id == recorder.snapshotID
+                }),
+                "snapshot-only failure preserves the catalog entry"
+            )
+        }
+    }
+
+    private static func testSnapshotOperationsWaitForInspection() async throws {
+        try await withRecoveryWorkflow { workflow, _, recorder, _ in
+            recorder.blockInspection()
+            await MainActor.run {
+                workflow.beginInspection(activeHistory: [])
+            }
+            try await waitUntil { recorder.inspectionStarted }
+            let command = await MainActor.run {
+                workflow.requestDeleteSnapshot(
+                    snapshotID: recorder.snapshotID,
+                    activeHistory: [],
+                    shouldRescheduleInspection: false
+                )
+            }
+            try expect(
+                command == .rejected(.inspectionInProgress),
+                "snapshot operation waits for current inspection"
+            )
+            recorder.releaseInspection()
+            try await waitUntil {
+                workflow.state.inspectionSnapshotID == nil
+            }
+        }
+    }
+
+    private static func withRecoveryWorkflow(
+        importShouldFail: Bool = false,
+        deleteShouldFail: Bool = false,
+        unavailableStoreCalls: Set<Int> = [],
+        _ operation: (
+            HistoryArchiveRecoveryWorkflow,
+            HistoryStartupResult,
+            RecoveryOperationRecorder,
+            WorkflowEventRecorder
+        ) async throws -> Void
+    ) async throws {
+        try await withTemporaryDirectoryAsync { root in
+            let snapshotID = UUID()
+            let recorder = RecoveryOperationRecorder(
+                snapshotID: snapshotID,
+                descriptors: [
+                    recoverySnapshotDescriptor(id: snapshotID, root: root),
+                ],
+                importShouldFail: importShouldFail,
+                deleteShouldFail: deleteShouldFail
+            )
+            let storeRecorder = RecoveryStoreFactoryRecorder(
+                unavailableCalls: unavailableStoreCalls
+            )
+            var dependencies = HistoryArchiveRecoveryWorkflowDependencies.live(
+                makeHistoryStore: { storeRecorder.makeStore(at: $0) }
+            )
+            dependencies.rollbackInterruptedTransactions = { _ in .normal }
+            dependencies.inspectArchiveSafety = { _ in .normal }
+            dependencies.removeExpiredSnapshots = { _ in [] }
+            dependencies.listSnapshots = { _ in recorder.descriptors }
+            dependencies.inspectSnapshot = { _, id, _ in
+                try recorder.inspect(id: id)
+            }
+            dependencies.importSnapshot = { _, id, _, _, _ in
+                try recorder.importSnapshot(id: id)
+            }
+            dependencies.cancelScheduledDeletion = { _, id in
+                try recorder.cancelScheduledDeletion(id: id)
+            }
+            dependencies.deleteSnapshot = { _, id in
+                try recorder.deleteSnapshot(id: id)
+            }
+            let workflow = HistoryArchiveRecoveryWorkflow(
+                storageLayout: AppStateStorageLayout(rootDirectory: root),
+                dependencies: dependencies
+            )
+            let startup = workflow.prepareStartup()
+            let events = WorkflowEventRecorder()
+            await MainActor.run { events.attach(to: workflow) }
+            try await operation(workflow, startup, recorder, events)
+        }
+    }
+
     private static func withInspectionWorkflow(
         snapshotIDs: [UUID],
         _ operation: (
@@ -892,6 +1175,157 @@ private final class ArchiveTransitionRecorder: @unchecked Sendable {
                     isDirectory: true
                 )
         )
+    }
+}
+
+private final class RecoveryStoreFactoryRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var callCount = 0
+    private let unavailableCalls: Set<Int>
+
+    init(unavailableCalls: Set<Int>) {
+        self.unavailableCalls = unavailableCalls
+    }
+
+    func makeStore(at url: URL) -> PipelineHistoryStore {
+        let call = lock.withHistoryWorkflowLock { () -> Int in
+            callCount += 1
+            return callCount
+        }
+        guard unavailableCalls.contains(call) else {
+            return PipelineHistoryStore(storeURL: url)
+        }
+        return PipelineHistoryStore(
+            storeURL: url,
+            persistentStoreLoader: { _ in
+                HistoryWorkflowTestFailure(
+                    "intentional unavailable recovery store"
+                )
+            }
+        )
+    }
+}
+
+private final class RecoveryOperationRecorder: @unchecked Sendable {
+    let snapshotID: UUID
+    private let lock = NSLock()
+    private var storedDescriptors: [HistoryRecoverySnapshotDescriptor]
+    private var storedImportResult: HistoryRecoveryImportResult
+    private let importShouldFail: Bool
+    private let deleteShouldFail: Bool
+    private var inspectionSemaphore: DispatchSemaphore?
+    private var didStartInspection = false
+
+    init(
+        snapshotID: UUID,
+        descriptors: [HistoryRecoverySnapshotDescriptor],
+        importShouldFail: Bool,
+        deleteShouldFail: Bool
+    ) {
+        self.snapshotID = snapshotID
+        self.storedDescriptors = descriptors
+        self.storedImportResult = HistoryRecoveryImportResult(
+            snapshotID: snapshotID,
+            importedRecordCount: 0,
+            alreadyPresentRecordCount: 0,
+            conflictRecordCount: 0,
+            failedRecordCount: 0
+        )
+        self.importShouldFail = importShouldFail
+        self.deleteShouldFail = deleteShouldFail
+    }
+
+    var descriptors: [HistoryRecoverySnapshotDescriptor] {
+        lock.withHistoryWorkflowLock { storedDescriptors }
+    }
+
+    var importResult: HistoryRecoveryImportResult {
+        get {
+            lock.withHistoryWorkflowLock { storedImportResult }
+        }
+        set {
+            lock.withHistoryWorkflowLock {
+                storedImportResult = newValue
+            }
+        }
+    }
+
+    var inspectionStarted: Bool {
+        lock.withHistoryWorkflowLock { didStartInspection }
+    }
+
+    func blockInspection() {
+        lock.withHistoryWorkflowLock {
+            inspectionSemaphore = DispatchSemaphore(value: 0)
+        }
+    }
+
+    func releaseInspection() {
+        let semaphore = lock.withHistoryWorkflowLock {
+            inspectionSemaphore
+        }
+        semaphore?.signal()
+    }
+
+    func inspect(id: UUID) throws -> HistoryRecoveryInspection {
+        let semaphore = lock.withHistoryWorkflowLock {
+            didStartInspection = true
+            return inspectionSemaphore
+        }
+        semaphore?.wait()
+        return HistoryRecoveryInspection(
+            snapshotID: id,
+            readableRecordCount: 1,
+            alreadyPresentRecordCount: 0,
+            conflictRecordCount: 0
+        )
+    }
+
+    func importSnapshot(id: UUID) throws -> HistoryRecoveryImportResult {
+        guard id == snapshotID else {
+            throw HistoryWorkflowTestFailure("unexpected recovery snapshot")
+        }
+        if importShouldFail {
+            throw HistoryWorkflowTestFailure(
+                "intentional recovery import failure"
+            )
+        }
+        return importResult
+    }
+
+    func cancelScheduledDeletion(id: UUID) throws {
+        try lock.withHistoryWorkflowLock {
+            guard let index = storedDescriptors.firstIndex(where: {
+                $0.id == id
+            }), let state = storedDescriptors[index].state else {
+                throw HistoryWorkflowTestFailure(
+                    "missing completed recovery snapshot"
+                )
+            }
+            var cancelledState = state
+            cancelledState.automaticDeletionCancelledAt = Date(
+                timeIntervalSince1970: 1_700_000_100
+            )
+            let descriptor = storedDescriptors[index]
+            storedDescriptors[index] = HistoryRecoverySnapshotDescriptor(
+                snapshot: descriptor.snapshot,
+                snapshotURL: descriptor.snapshotURL,
+                payloadByteCount: descriptor.payloadByteCount,
+                integrity: descriptor.integrity,
+                state: cancelledState
+            )
+        }
+    }
+
+    func deleteSnapshot(id: UUID) throws {
+        if deleteShouldFail {
+            throw HistoryWorkflowTestFailure(
+                "intentional snapshot deletion failure"
+            )
+        }
+        lock.withHistoryWorkflowLock {
+            storedDescriptors.removeAll { $0.id == id }
+        }
     }
 }
 

@@ -160,25 +160,6 @@ struct AppStateHistoryProtectionSourceTests {
             "delayed orphan cleanup uses the startup reference snapshot time"
         )
 
-        // A new recovery import must clear any prior partial-result feedback
-        // before it starts, so a stale result from an earlier import cannot be
-        // shown alongside a new one. This requires observing state exactly at
-        // the instant between synchronous clearing and the detached import
-        // task starting, which is not reliably observable from outside.
-        let importRange = try source.range(
-            from: "func importHistoryRecoverySnapshot(id: UUID) -> Bool",
-            to: "func cancelHistoryRecoveryScheduledDeletion(id: UUID) -> Bool"
-        )
-        let recoveryImport = String(source[importRange])
-        try expectOrdered(
-            [
-                "historyRecoveryImportResult = nil",
-                "try pipelineHistoryStore.detachForArchiveVerification()"
-            ],
-            in: recoveryImport,
-            label: "a new recovery import clears prior partial feedback before detaching history"
-        )
-
         print("AppStateHistoryProtectionSourceTests passed")
     }
 
@@ -195,20 +176,6 @@ struct AppStateHistoryProtectionSourceTests {
             }
         }
         return source
-    }
-
-    private static func expectOrdered(
-        _ markers: [String],
-        in source: String,
-        label: String
-    ) throws {
-        var lowerBound = source.startIndex
-        for marker in markers {
-            guard let range = source.range(of: marker, range: lowerBound..<source.endIndex) else {
-                throw TestFailure("\(label): missing or misordered \(marker)")
-            }
-            lowerBound = range.upperBound
-        }
     }
 
     private static func expect(

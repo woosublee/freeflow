@@ -318,6 +318,44 @@ struct HistoryArchiveRecoveryWorkflowDependencies: Sendable {
     }
 }
 
+private enum HistorySnapshotOperation: Sendable {
+    case cancelScheduledDeletion(UUID)
+    case delete(UUID)
+
+    var snapshotID: UUID {
+        switch self {
+        case .cancelScheduledDeletion(let id), .delete(let id):
+            return id
+        }
+    }
+
+    var requiresCompletedSnapshot: Bool {
+        if case .cancelScheduledDeletion = self { return true }
+        return false
+    }
+
+    var recoveryOperation: HistoryRecoveryWorkflowOperation {
+        switch self {
+        case .cancelScheduledDeletion(let id):
+            return .cancellingScheduledDeletion(id)
+        case .delete(let id):
+            return .deletingSnapshot(id)
+        }
+    }
+
+    func perform(
+        root: URL,
+        dependencies: HistoryArchiveRecoveryWorkflowDependencies
+    ) throws {
+        switch self {
+        case .cancelScheduledDeletion(let id):
+            try dependencies.cancelScheduledDeletion(root, id)
+        case .delete(let id):
+            try dependencies.deleteSnapshot(root, id)
+        }
+    }
+}
+
 final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
     let storageLayout: AppStateStorageLayout
     let dependencies: HistoryArchiveRecoveryWorkflowDependencies
@@ -485,6 +523,98 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
 
     @MainActor
     @discardableResult
+    func requestImport(
+        snapshotID: UUID,
+        context: HistoryWorkflowAdmissionContext,
+        currentStore: PipelineHistoryStore,
+        activeHistory: [PipelineHistoryItem],
+        shouldRescheduleInspection: Bool
+    ) -> HistoryWorkflowCommandResult {
+        let admission = HistoryWorkflowAdmission.recoveryImport(
+            state: state,
+            snapshotID: snapshotID,
+            context: context
+        )
+        guard admission == .accepted else { return admission }
+        state.importResult = nil
+        do {
+            try currentStore.detachForArchiveVerification()
+        } catch {
+            emit(.failed(.historyUnavailable))
+            return .rejected(.historyUnavailable)
+        }
+
+        state.recoveryOperation = .importing(snapshotID)
+        emitState()
+        let root = storageLayout.rootDirectory
+        let layout = storageLayout
+        let dependencies = dependencies
+        let priorActiveHistory = activeHistory
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let importStore = dependencies.makeHistoryStore(
+                layout.historyStoreURL
+            )
+            do {
+                guard importStore.availability == .ready,
+                      importStore.durability == .durable,
+                      importStore.verifyHistoryReadable() else {
+                    throw HistoryRecoveryServiceError.snapshotNotReady
+                }
+                let result = try dependencies.importSnapshot(
+                    root,
+                    snapshotID,
+                    importStore,
+                    layout.audioDirectory,
+                    layout.transcriptDirectory
+                )
+                try importStore.detachForArchiveVerification()
+                await self?.completeImportSuccess(
+                    result,
+                    priorActiveHistory: priorActiveHistory,
+                    shouldRescheduleInspection:
+                        shouldRescheduleInspection
+                )
+            } catch {
+                try? importStore.detachForArchiveVerification()
+                await self?.completeImportFailure(
+                    .recoveryImportFailed,
+                    priorActiveHistory: priorActiveHistory,
+                    shouldRescheduleInspection:
+                        shouldRescheduleInspection
+                )
+            }
+        }
+        return .accepted
+    }
+
+    @MainActor
+    func requestCancelScheduledDeletion(
+        snapshotID: UUID,
+        activeHistory: [PipelineHistoryItem],
+        shouldRescheduleInspection: Bool
+    ) -> HistoryWorkflowCommandResult {
+        requestSnapshotOperation(
+            .cancelScheduledDeletion(snapshotID),
+            activeHistory: activeHistory,
+            shouldRescheduleInspection: shouldRescheduleInspection
+        )
+    }
+
+    @MainActor
+    func requestDeleteSnapshot(
+        snapshotID: UUID,
+        activeHistory: [PipelineHistoryItem],
+        shouldRescheduleInspection: Bool
+    ) -> HistoryWorkflowCommandResult {
+        requestSnapshotOperation(
+            .delete(snapshotID),
+            activeHistory: activeHistory,
+            shouldRescheduleInspection: shouldRescheduleInspection
+        )
+    }
+
+    @MainActor
+    @discardableResult
     func requestArchive(
         context: HistoryWorkflowAdmissionContext,
         currentStore: PipelineHistoryStore,
@@ -536,6 +666,154 @@ final class HistoryArchiveRecoveryWorkflow: @unchecked Sendable {
         state.showsPersistenceWarning = state.isHistoryUnavailable
             || activeStore.durability == .inMemory
         return state
+    }
+
+    @MainActor
+    private func requestSnapshotOperation(
+        _ operation: HistorySnapshotOperation,
+        activeHistory: [PipelineHistoryItem],
+        shouldRescheduleInspection: Bool
+    ) -> HistoryWorkflowCommandResult {
+        let admission = HistoryWorkflowAdmission.snapshotOperation(
+            state: state,
+            snapshotID: operation.snapshotID,
+            requiresCompletedSnapshot: operation.requiresCompletedSnapshot
+        )
+        guard admission == .accepted else { return admission }
+        state.importResult = nil
+        state.recoveryOperation = operation.recoveryOperation
+        emitState()
+        let root = storageLayout.rootDirectory
+        let dependencies = dependencies
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                try operation.perform(
+                    root: root,
+                    dependencies: dependencies
+                )
+                await self?.completeSnapshotOperationSuccess()
+            } catch {
+                await self?.completeSnapshotOperationFailure(
+                    activeHistory: activeHistory,
+                    shouldRescheduleInspection:
+                        shouldRescheduleInspection
+                )
+            }
+        }
+        return .accepted
+    }
+
+    @MainActor
+    private func completeImportSuccess(
+        _ result: HistoryRecoveryImportResult,
+        priorActiveHistory: [PipelineHistoryItem],
+        shouldRescheduleInspection: Bool
+    ) {
+        let reopenedStore = dependencies.makeHistoryStore(
+            storageLayout.historyStoreURL
+        )
+        guard reopenedStore.availability == .ready,
+              reopenedStore.durability == .durable,
+              reopenedStore.verifyHistoryReadable() else {
+            completeImportFailure(
+                .activeStoreReopenFailed,
+                priorActiveHistory: priorActiveHistory,
+                shouldRescheduleInspection: shouldRescheduleInspection,
+                reopenedStore: reopenedStore
+            )
+            return
+        }
+        let history = reopenedStore.loadAllHistory()
+        guard reopenedStore.availability == .ready else {
+            completeImportFailure(
+                .activeStoreReopenFailed,
+                priorActiveHistory: priorActiveHistory,
+                shouldRescheduleInspection: shouldRescheduleInspection,
+                reopenedStore: reopenedStore
+            )
+            return
+        }
+        emit(.installRuntime(.recovered(
+            historyStore: reopenedStore,
+            history: history
+        )))
+        refreshSafetyAndSnapshots()
+        state.recoveryOperation = .idle
+        state.importResult = result.failedRecordCount > 0
+                || result.conflictRecordCount > 0
+            ? result
+            : nil
+        synchronizeStateForVerifiedStore(reopenedStore)
+        invalidateInspection(
+            activeHistory: history,
+            shouldReschedule: shouldRescheduleInspection
+        )
+    }
+
+    @MainActor
+    private func completeImportFailure(
+        _ requestedFailure: HistoryWorkflowFailure,
+        priorActiveHistory: [PipelineHistoryItem],
+        shouldRescheduleInspection: Bool,
+        reopenedStore suppliedStore: PipelineHistoryStore? = nil
+    ) {
+        let reopenedStore = suppliedStore ?? dependencies.makeHistoryStore(
+            storageLayout.historyStoreURL
+        )
+        var activeHistory = priorActiveHistory
+        let failure: HistoryWorkflowFailure
+        if reopenedStore.availability == .ready,
+           reopenedStore.durability == .durable,
+           reopenedStore.verifyHistoryReadable() {
+            activeHistory = reopenedStore.loadAllHistory()
+            if reopenedStore.availability == .ready {
+                emit(.installRuntime(.recovered(
+                    historyStore: reopenedStore,
+                    history: activeHistory
+                )))
+                synchronizeStateForVerifiedStore(reopenedStore)
+                failure = requestedFailure
+            } else {
+                state.isHistoryUnavailable = true
+                state.showsPersistenceWarning = true
+                failure = .activeStoreReopenFailed
+            }
+        } else {
+            state.isHistoryUnavailable = true
+            state.showsPersistenceWarning = true
+            failure = .activeStoreReopenFailed
+        }
+        refreshSafetyAndSnapshots()
+        state.recoveryOperation = .idle
+        state.importResult = nil
+        invalidateInspection(
+            activeHistory: activeHistory,
+            shouldReschedule: shouldRescheduleInspection
+        )
+        emit(.failed(failure))
+    }
+
+    @MainActor
+    private func completeSnapshotOperationSuccess() {
+        refreshSafetyAndSnapshots()
+        state.recoveryOperation = .idle
+        emitState()
+        startNextInspection()
+    }
+
+    @MainActor
+    private func completeSnapshotOperationFailure(
+        activeHistory: [PipelineHistoryItem],
+        shouldRescheduleInspection: Bool
+    ) {
+        refreshSafetyAndSnapshots()
+        state.recoveryOperation = .idle
+        state.importResult = nil
+        invalidateInspection(
+            activeHistory: activeHistory,
+            shouldReschedule: shouldRescheduleInspection
+        )
+        emit(.failed(.snapshotOperationFailed))
     }
 
     @MainActor
