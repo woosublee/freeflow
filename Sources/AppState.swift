@@ -2048,8 +2048,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var selectedSettingsTab: SettingsTab? = .general
     @Published var pipelineHistory: [PipelineHistoryItem] = []
     @Published private(set) var meetingSummaryGeneratingNoteIDs: Set<UUID> = []
-    private var meetingSummaryGenerationRevisionByID: [UUID: Int] = [:]
-    private var meetingSummaryPendingRevealNoteIDs: Set<UUID> = []
+    private let meetingSummaryWorkflow: MeetingSummaryWorkflow
     @Published var debugStatusMessage = "Idle"
     @Published var debugShowsUpdateReminderAfterDictation = false
     @Published var lastRawTranscript = ""
@@ -2433,8 +2432,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
             storageLayout: storageLayout,
             makeHistoryStore: dependencies.makePipelineHistoryStore
         )
+        let meetingSummaryWorkflow = MeetingSummaryWorkflow(
+            dependencies: MeetingSummaryWorkflowDependencies(
+                makeGenerator: dependencies.makeMeetingSummaryGenerator,
+                now: { Date() }
+            )
+        )
         let historyStartup = historyWorkflow.prepareStartup()
         self.historyWorkflow = historyWorkflow
+        self.meetingSummaryWorkflow = meetingSummaryWorkflow
         pipelineHistoryStore = historyStartup.activeStore
         let audioDirectory = storageLayout.audioDirectory
         recordingJournalStore = RecordingJournalStore(
@@ -3094,6 +3100,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         historyWorkflow.onEvent = { [weak self] event in
             self?.applyHistoryWorkflowEvent(event)
+        }
+        meetingSummaryWorkflow.onEvent = { [weak self] event in
+            self?.applyMeetingSummaryWorkflowEvent(event)
         }
 
         overlayManager.onStopButtonPressed = { [weak self] in
@@ -4464,8 +4473,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
-    func makeMeetingSummaryService() -> MeetingSummaryService {
-        MeetingSummaryService(
+    @MainActor
+    private func meetingSummaryGeneratorConfiguration()
+        -> MeetingSummaryGeneratorConfiguration
+    {
+        MeetingSummaryGeneratorConfiguration(
             backendExecutor: makeAIProcessingBackendExecutor(
                 choice: meetingSummaryBackendChoice
             ),
@@ -4907,6 +4919,28 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
+    private func applyMeetingSummaryWorkflowEvent(
+        _ event: MeetingSummaryWorkflowEvent
+    ) {
+        switch event {
+        case .stateChanged(let state):
+            applyMeetingSummaryWorkflowState(state)
+        case .itemPersisted(let item):
+            guard let index = pipelineHistory.firstIndex(where: {
+                $0.id == item.id
+            }) else { return }
+            pipelineHistory[index] = item
+        }
+    }
+
+    @MainActor
+    private func applyMeetingSummaryWorkflowState(
+        _ state: MeetingSummaryWorkflowState
+    ) {
+        meetingSummaryGeneratingNoteIDs = state.generatingNoteIDs
+    }
+
+    @MainActor
     private func applyHistoryWorkflowEvent(
         _ event: HistoryWorkflowEvent
     ) {
@@ -4958,8 +4992,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             retryingItemIDs = []
             pendingAudioImportJobIDs = []
             cloudTranscriptionProgressByHistoryID = [:]
-            meetingSummaryGeneratingNoteIDs = []
-            meetingSummaryPendingRevealNoteIDs = []
+            meetingSummaryWorkflow.forgetAll()
             forgetAllWarningBannerState()
         case .recovered(let historyStore, let history):
             pipelineHistoryStore = historyStore
@@ -6453,7 +6486,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     survivingHistory: []
                 )
             }
-            forgetAllMeetingSummaryGenerationState()
+            meetingSummaryWorkflow.forgetAll()
             forgetAllWarningBannerState()
         } catch {
             errorMessage = LocalizedUserMessage.providerFailure(prefix: localizedCatalogString("Unable to clear run history"), providerDetail: error.localizedDescription)
@@ -6482,7 +6515,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 cleanupDeletedPipelineHistoryAssets(deletedAssets)
             }
             pipelineHistory.remove(at: index)
-            forgetMeetingSummaryGenerationState(for: id)
+            meetingSummaryWorkflow.forget(noteID: id)
             forgetWarningBannerState(for: id)
         } catch {
             errorMessage = LocalizedUserMessage.providerFailure(prefix: localizedCatalogString("Unable to delete run history entry"), providerDetail: error.localizedDescription)
@@ -6538,167 +6571,49 @@ final class AppState: ObservableObject, @unchecked Sendable {
     func meetingSummarySource(
         for item: PipelineHistoryItem
     ) -> MeetingSummarySource {
-        meetingSummarySource(
-            for: item,
-            languageContext: MeetingSummaryLanguageContext(
-                requestedOutputLanguage: "",
-                appliedLanguageCode: "",
-                resolutionSource: .unavailable
-            )
+        MeetingSummaryWorkflow.availabilitySource(for: item)
+    }
+
+    @MainActor
+    private func meetingSummaryWorkflowRequest(
+        for item: PipelineHistoryItem
+    ) -> MeetingSummaryWorkflowRequest {
+        let backendKind: MeetingSummaryBackendKind =
+            meetingSummaryBackendChoice.isLocal ? .local : .cloud
+        return MeetingSummaryWorkflowRequest(
+            noteID: item.id,
+            initialItem: item,
+            requestedOutputLanguage: meetingSummaryOutputLanguage,
+            configuredBackendKind: backendKind,
+            configuredModelID: meetingSummaryBackendChoice.modelID,
+            providerHost: backendKind == .cloud
+                ? URL(string: apiBaseURL)?.host
+                : nil,
+            generatorConfiguration: meetingSummaryGeneratorConfiguration()
         )
     }
 
     @MainActor
-    private func meetingSummarySource(
-        for item: PipelineHistoryItem,
-        languageContext: MeetingSummaryLanguageContext
-    ) -> MeetingSummarySource {
-        let calendar = item.calendarMatch.map { match in
-            MeetingSummaryCalendarContext(
-                title: match.title,
-                start: match.start,
-                end: match.end,
-                attendees: match.attendees.compactMap { attendee in
-                    let name = attendee.displayName?.trimmingCharacters(
-                        in: .whitespacesAndNewlines
-                    ) ?? ""
-                    if !name.isEmpty { return name }
-                    let email = attendee.email?.trimmingCharacters(
-                        in: .whitespacesAndNewlines
-                    ) ?? ""
-                    return email.isEmpty ? nil : email
+    private func meetingSummaryHistoryAccess()
+        -> MeetingSummaryHistoryAccess
+    {
+        let store = pipelineHistoryStore
+        return MeetingSummaryHistoryAccess(
+            durability: { store.durability },
+            item: { id in
+                let history = store.loadAllHistory()
+                guard store.availability == .ready else {
+                    throw PipelineHistoryStoreError.storeUnavailable
                 }
-            )
-        }
-        return MeetingSummarySource(
-            transcript: meetingSummaryTranscript(for: item),
-            calendar: calendar,
-            languageContext: languageContext
+                return history.first(where: { $0.id == id })
+            },
+            persist: { item, requiresDurableStore in
+                try store.update(
+                    item,
+                    requiresDurableStore: requiresDurableStore
+                )
+            }
         )
-    }
-
-    @MainActor
-    private func meetingSummaryTranscript(for item: PipelineHistoryItem) -> String {
-        let processed = item.postProcessedTranscript.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        return processed.isEmpty ? item.rawTranscript : processed
-    }
-
-    @MainActor
-    func resolvedMeetingSummaryLanguage(
-        for item: PipelineHistoryItem,
-        transcript: String
-    ) throws -> (
-        context: MeetingSummaryLanguageContext,
-        resolvedSpokenLanguage: SpokenLanguageResolution?
-    ) {
-        let requested = meetingSummaryOutputLanguage.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        if let explicitCode = TranscriptionLanguage.code(forSummaryOutput: requested) {
-            return (
-                MeetingSummaryLanguageContext(
-                    requestedOutputLanguage: requested,
-                    appliedLanguageCode: explicitCode,
-                    resolutionSource: .configured
-                ),
-                nil
-            )
-        }
-        let existingSpokenLanguage = item.spokenLanguage
-        let requiresTranscriptResolution = existingSpokenLanguage?.source == .transcriptInferred
-            || existingSpokenLanguage?.source == .unavailable
-        let spoken = requiresTranscriptResolution
-            ? SpokenLanguageResolver.resolve(
-                requestedLanguageCode: item.transcriptionLanguageCode,
-                engineLanguageCode: nil,
-                transcript: transcript
-            )
-            : existingSpokenLanguage ?? SpokenLanguageResolver.resolve(
-                requestedLanguageCode: item.transcriptionLanguageCode,
-                engineLanguageCode: nil,
-                transcript: transcript
-            )
-        guard let code = spoken.languageCode else {
-            throw QuillUserIssueError.meetingSummaryLanguageUnavailable()
-        }
-        return (
-            MeetingSummaryLanguageContext(
-                requestedOutputLanguage: "",
-                appliedLanguageCode: code,
-                resolutionSource: spoken.source
-            ),
-            requiresTranscriptResolution || existingSpokenLanguage == nil
-                ? spoken
-                : nil
-        )
-    }
-
-    @MainActor
-    private func meetingSummaryProviderHost(
-        for backendKind: MeetingSummaryBackendKind
-    ) -> String? {
-        guard backendKind == .cloud else { return nil }
-        return URL(string: apiBaseURL)?.host
-    }
-
-    @MainActor
-    private func meetingSummaryIssue(
-        for error: Error,
-        providerHost: String?,
-        backendKind: MeetingSummaryBackendKind,
-        modelID: String
-    ) -> QuillUserIssueRecord {
-        if let issue = error as? QuillUserIssueError {
-            return issue.record
-        }
-        let localBackend = backendKind == .local ? "Local AI" : nil
-        if let summaryError = error as? MeetingSummaryError {
-            return summaryError.userIssue(
-                providerHost: providerHost,
-                modelID: modelID,
-                localBackend: localBackend
-            )
-        }
-        return QuillUserIssueRecord(
-            code: .meetingSummaryUnavailable,
-            context: QuillUserIssueContext(
-                providerHost: providerHost,
-                modelID: modelID,
-                localBackend: localBackend
-            )
-        )
-    }
-
-    @MainActor
-    private func persistMeetingSummaryHistoryItem(
-        _ item: PipelineHistoryItem,
-        at index: Int
-    ) throws {
-        try pipelineHistoryStore.update(item, requiresDurableStore: true)
-        pipelineHistory[index] = item
-    }
-
-    @MainActor
-    private func invalidateMeetingSummaryGeneration(for id: UUID) {
-        meetingSummaryGenerationRevisionByID[id, default: 0] += 1
-        meetingSummaryGeneratingNoteIDs.remove(id)
-        meetingSummaryPendingRevealNoteIDs.remove(id)
-    }
-
-    @MainActor
-    private func forgetMeetingSummaryGenerationState(for id: UUID) {
-        meetingSummaryGenerationRevisionByID.removeValue(forKey: id)
-        meetingSummaryGeneratingNoteIDs.remove(id)
-        meetingSummaryPendingRevealNoteIDs.remove(id)
-    }
-
-    @MainActor
-    private func forgetAllMeetingSummaryGenerationState() {
-        meetingSummaryGenerationRevisionByID.removeAll()
-        meetingSummaryGeneratingNoteIDs.removeAll()
-        meetingSummaryPendingRevealNoteIDs.removeAll()
     }
 
     @MainActor
@@ -6709,162 +6624,28 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard meetingSummaryAvailability(for: startItem) == .available else {
             throw MeetingSummaryError.invalidInput
         }
-        switch pipelineHistoryStore.durability {
-        case .durable:
-            break
-        case .inMemory:
-            throw QuillUserIssueError.historyPersistenceUnavailable()
-        }
 
-        let configuredBackendKind: MeetingSummaryBackendKind = meetingSummaryBackendChoice.isLocal
-            ? .local
-            : .cloud
-        let configuredModelID = meetingSummaryBackendChoice.modelID
-        let generationRevision = meetingSummaryGenerationRevisionByID[id, default: 0]
-        var languageContext: MeetingSummaryLanguageContext?
-        var attemptSourceFingerprint = meetingSummarySource(for: startItem).fingerprint
-        meetingSummaryGeneratingNoteIDs.insert(id)
-        defer {
-            if meetingSummaryGenerationRevisionByID[id, default: 0] == generationRevision {
-                meetingSummaryGeneratingNoteIDs.remove(id)
-            }
-        }
-
-        let source: MeetingSummarySource
-        let result: MeetingSummaryGenerationResult
-        let currentIndex: Int
-        let currentItem: PipelineHistoryItem
-        do {
-            let transcript = meetingSummaryTranscript(for: startItem)
-            let resolvedLanguage = try resolvedMeetingSummaryLanguage(
-                for: startItem,
-                transcript: transcript
-            )
-            languageContext = resolvedLanguage.context
-
-            var sourceItem = startItem
-            if let spokenLanguage = resolvedLanguage.resolvedSpokenLanguage {
-                guard let sourceIndex = pipelineHistory.firstIndex(
-                    where: { $0.id == id }
-                ) else {
-                    throw MeetingSummaryError.sourceChanged
-                }
-                let updated = pipelineHistory[sourceIndex].withSpokenLanguage(
-                    spokenLanguage
-                )
-                try persistMeetingSummaryHistoryItem(
-                    updated,
-                    at: sourceIndex
-                )
-                sourceItem = updated
-            }
-
-            source = meetingSummarySource(
-                for: sourceItem,
-                languageContext: resolvedLanguage.context
-            )
-            attemptSourceFingerprint = source.fingerprint
-            result = try await dependencies.makeMeetingSummaryGenerator(self)
-                .generate(source: source)
-
-            guard let index = pipelineHistory.firstIndex(where: { $0.id == id }) else {
-                throw MeetingSummaryError.sourceChanged
-            }
-            let item = pipelineHistory[index]
-            guard meetingSummaryGenerationRevisionByID[id, default: 0] == generationRevision,
-                  meetingSummarySource(for: item).fingerprint == source.fingerprint else {
-                throw MeetingSummaryError.sourceChanged
-            }
-            currentIndex = index
-            currentItem = item
-        } catch {
-            guard let currentIndex = pipelineHistory.firstIndex(
-                where: { $0.id == id }
-            ), meetingSummaryGenerationRevisionByID[id, default: 0] == generationRevision,
-              meetingSummarySource(for: pipelineHistory[currentIndex]).fingerprint
-                == attemptSourceFingerprint else {
-                throw MeetingSummaryError.sourceChanged
-            }
-            if let summaryError = error as? MeetingSummaryError,
-               summaryError == .sourceChanged {
-                throw summaryError
-            }
-            let index = currentIndex
-            do {
-                let providerHost = meetingSummaryProviderHost(
-                    for: configuredBackendKind
-                )
-                let effectiveModelID = (error as? MeetingSummaryError)
-                    .map { $0.effectiveModelID(fallback: configuredModelID) }
-                    ?? configuredModelID
-                let attempt = MeetingSummaryAttempt(
-                    occurredAt: Date(),
-                    outcome: .failed,
-                    backendKind: configuredBackendKind,
-                    modelID: effectiveModelID,
-                    providerHost: providerHost,
-                    language: languageContext,
-                    issue: meetingSummaryIssue(
-                        for: error,
-                        providerHost: providerHost,
-                        backendKind: configuredBackendKind,
-                        modelID: effectiveModelID
-                    ),
-                    sourceFingerprint: attemptSourceFingerprint
-                )
-                let updated = pipelineHistory[index].withMeetingSummaryAttempt(attempt)
-                do {
-                    try persistMeetingSummaryHistoryItem(
-                        updated,
-                        at: index
-                    )
-                } catch {
-                    throw QuillUserIssueError.historyPersistenceUnavailable()
-                }
-            }
-            throw error
-        }
-
-        let envelope = MeetingSummaryEnvelope(
-            schemaVersion: MeetingSummaryEnvelope.currentSchemaVersion,
-            promptVersion: result.promptVersion,
-            generatedAt: Date(),
-            sourceFingerprint: source.fingerprint,
-            modelID: result.modelID,
-            backendKind: result.backendKind,
-            languageContext: source.languageContext,
-            evidenceVerification: result.evidenceVerification == .unverified
-                ? .unverified
-                : nil,
-            content: result.draft.materialized()
-        ).preservingCompletion(from: currentItem.meetingSummary)
-        let attempt = MeetingSummaryAttempt(
-            occurredAt: Date(),
-            outcome: .succeeded,
-            backendKind: result.backendKind,
-            modelID: result.modelID,
-            providerHost: meetingSummaryProviderHost(for: result.backendKind),
-            language: source.languageContext,
-            issue: nil,
-            sourceFingerprint: source.fingerprint
+        let outcome = await meetingSummaryWorkflow.generate(
+            request: meetingSummaryWorkflowRequest(for: startItem),
+            history: meetingSummaryHistoryAccess()
         )
-        let updated = currentItem
-            .withMeetingSummary(envelope)
-            .withMeetingSummaryAttempt(attempt)
-        do {
-            try persistMeetingSummaryHistoryItem(
-                updated,
-                at: currentIndex
-            )
-            meetingSummaryPendingRevealNoteIDs.insert(id)
-        } catch {
+        switch outcome {
+        case .verifiedSuccess, .unverifiedSuccess:
+            return
+        case .invalidInput:
+            throw MeetingSummaryError.invalidInput
+        case .sourceChanged:
+            throw MeetingSummaryError.sourceChanged
+        case .generationFailed(let error):
+            throw error
+        case .persistenceFailed:
             throw QuillUserIssueError.historyPersistenceUnavailable()
         }
     }
 
     @MainActor
     func consumeMeetingSummaryPendingReveal(id: UUID) -> Bool {
-        meetingSummaryPendingRevealNoteIDs.remove(id) != nil
+        meetingSummaryWorkflow.consumePendingReveal(noteID: id)
     }
 
     @MainActor
@@ -6919,7 +6700,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             throw QuillUserIssueError.historyPersistenceUnavailable()
         }
         pipelineHistory[noteIndex] = updated
-        invalidateMeetingSummaryGeneration(for: noteID)
+        meetingSummaryWorkflow.invalidate(noteID: noteID)
     }
 
     @MainActor
@@ -6984,7 +6765,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             if let index = pipelineHistory.firstIndex(where: { $0.id == id }) {
                 pipelineHistory[index] = updated
             }
-            invalidateMeetingSummaryGeneration(for: id)
+            meetingSummaryWorkflow.invalidate(noteID: id)
         } catch {
             errorMessage = LocalizedUserMessage.providerFailure(prefix: localizedCatalogString("Failed to save transcript edit"), providerDetail: error.localizedDescription)
         }
@@ -7424,7 +7205,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     self.incrementNoteRetryGeneration(for: snapshot.item.id)
                     self.pipelineHistory = self.pipelineHistoryStore.loadAllHistory()
                     if retrySucceeded {
-                        self.invalidateMeetingSummaryGeneration(for: snapshot.item.id)
+                        self.meetingSummaryWorkflow.invalidate(
+                            noteID: snapshot.item.id
+                        )
                         if snapshot.useLocalTranscription,
                            let cloudContext = snapshot.cloudExecutionContext {
                             self.completeCloudTranscriptionHistory(

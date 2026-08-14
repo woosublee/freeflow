@@ -3442,24 +3442,28 @@ struct AppStateTranscriptionConfigurationTests {
         assert(clear.contains("try pipelineHistoryStore.clearAll("))
         assert(clear.contains("requiresDurableStore: true"))
         assert(clear.contains("pipelineHistory = []"))
-        assert(clear.contains("forgetAllMeetingSummaryGenerationState()"))
+        assert(clear.contains("meetingSummaryWorkflow.forgetAll()"))
         assert(
             clear.range(of: "pipelineHistory = []")!.lowerBound
-                < clear.range(of: "forgetAllMeetingSummaryGenerationState()")!.lowerBound
+                < clear.range(of: "meetingSummaryWorkflow.forgetAll()")!.lowerBound
         )
         assert(delete.contains("try pipelineHistoryStore.delete("))
         assert(delete.contains("requiresDurableStore: true"))
         assert(delete.contains("pipelineHistory.remove(at: index)"))
-        assert(delete.contains("forgetMeetingSummaryGenerationState(for: id)"))
+        assert(delete.contains("meetingSummaryWorkflow.forget(noteID: id)"))
         assert(
             delete.range(of: "pipelineHistory.remove(at: index)")!.lowerBound
-                < delete.range(of: "forgetMeetingSummaryGenerationState(for: id)")!.lowerBound
+                < delete.range(
+                    of: "meetingSummaryWorkflow.forget(noteID: id)"
+                )!.lowerBound
         )
         assert(retry.contains("try self.pipelineHistoryStore.update("))
         assert(retry.contains("requiresDurableStore: true"))
         assert(
             retry.range(of: "requiresDurableStore: true")!.lowerBound
-                < retry.range(of: "self.invalidateMeetingSummaryGeneration(for: snapshot.item.id)")!.lowerBound
+                < retry.range(
+                    of: "self.meetingSummaryWorkflow.invalidate("
+                )!.lowerBound
         )
     }
 

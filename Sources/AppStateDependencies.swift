@@ -122,7 +122,8 @@ struct AppStateDependencies {
     var makePipelineHistoryStore:
         @Sendable (URL) -> PipelineHistoryStore
     var makeMeetingSummaryGenerator:
-        @MainActor (AppState) -> any MeetingSummaryGenerating
+        @MainActor (MeetingSummaryGeneratorConfiguration)
+            -> any MeetingSummaryGenerating
     var makeRetryCloudTranscriptionDependencies:
         @Sendable () -> CloudTranscriptionDependencies
 
@@ -133,8 +134,11 @@ struct AppStateDependencies {
             localAI: .live,
             nativeWhisper: .live,
             makePipelineHistoryStore: { PipelineHistoryStore(storeURL: $0) },
-            makeMeetingSummaryGenerator: { appState in
-                appState.makeMeetingSummaryService()
+            makeMeetingSummaryGenerator: { configuration in
+                MeetingSummaryService(
+                    backendExecutor: configuration.backendExecutor,
+                    cloudFallbackModelID: configuration.cloudFallbackModelID
+                )
             },
             makeRetryCloudTranscriptionDependencies: { .live }
         )
