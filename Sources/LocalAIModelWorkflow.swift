@@ -30,6 +30,8 @@ final class LocalAIModelWorkflow: @unchecked Sendable {
     private let serverManager: LocalAIServerManager
     nonisolated(unsafe) var onEvent:
         (@MainActor (LocalAIModelWorkflowEvent) -> Void)?
+    var onStatusRefreshDeliveryForTesting:
+        (@MainActor (_ model: LocalAIModel, _ generation: Int) -> Void)?
     private(set) var state = LocalAIModelWorkflowState()
 
     private var installTasks: [String: LocalAIInstallTask] = [:]
@@ -164,6 +166,7 @@ final class LocalAIModelWorkflow: @unchecked Sendable {
         for model: LocalAIModel,
         generation: Int
     ) {
+        defer { onStatusRefreshDeliveryForTesting?(model, generation) }
         guard statusRefreshGenerations[model.id] == generation,
               installTasks[model.id] == nil,
               !deletionRequestedModelIDs.contains(model.id) else {

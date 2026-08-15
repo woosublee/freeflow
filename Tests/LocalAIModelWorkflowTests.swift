@@ -40,7 +40,19 @@ struct LocalAIModelWorkflowTests {
 
     @MainActor
     private static func testCanonicalModelRejectsForgedModels() throws {
-        let workflow = makeWorkflow()
+        let installCalls = LocalAICallCounter()
+        let deleteCalls = LocalAICallCounter()
+        let workflow = LocalAIModelWorkflow(
+            dependencies: dependencies(
+                startInstall: { _, _, _ in
+                    installCalls.increment()
+                    return LocalAIInstallTask()
+                },
+                deleteModel: { _ in deleteCalls.increment() }
+            ),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        workflow.markInitialRefreshCompletedForTesting()
         let real = LocalAIModelCatalog.quality
         try expect(workflow.canonicalModel(for: real) == real, "genuine catalog model is canonical")
 
@@ -55,6 +67,11 @@ struct LocalAIModelWorkflowTests {
             runtime: real.runtime
         )
         try expect(workflow.canonicalModel(for: forged) == nil, "forged model with same id is rejected")
+
+        workflow.startInstall(forged)
+        try expect(!workflow.deleteModel(forged), "forged model delete is rejected")
+        try expectEqual(installCalls.value, 0, "forged model cannot reach install dependency")
+        try expectEqual(deleteCalls.value, 0, "forged model cannot reach delete dependency")
     }
 
     @MainActor
@@ -371,11 +388,21 @@ struct LocalAIModelWorkflowTests {
     private static func testStaleStatusRefreshGenerationIsIgnored() async throws {
         let model = LocalAIModelCatalog.quality
         let statusHarness = OverlappingLocalAIStatusHarness(blockedModelID: model.id)
+        let deliveryHarness = LocalAIStatusRefreshDeliveryHarness(
+            modelID: model.id,
+            generation: 1
+        )
         let workflow = LocalAIModelWorkflow(
             dependencies: dependencies(installStatus: { statusHarness.status(for: $0) }),
             serverManager: LocalAIServerManager(store: LocalAIModelStore())
         )
-        defer { statusHarness.releaseFirstLookup() }
+        workflow.onStatusRefreshDeliveryForTesting = { deliveredModel, generation in
+            deliveryHarness.record(modelID: deliveredModel.id, generation: generation)
+        }
+        defer {
+            workflow.onStatusRefreshDeliveryForTesting = nil
+            statusHarness.releaseFirstLookup()
+        }
 
         workflow.refreshAllInstallStates()
         statusHarness.waitUntilFirstLookupStarts()
@@ -389,7 +416,7 @@ struct LocalAIModelWorkflowTests {
         )
 
         statusHarness.releaseFirstLookup()
-        await statusHarness.waitForStaleDeliveryToDrain()
+        await deliveryHarness.waitForDelivery()
         try expectEqual(
             workflow.installState(for: model).status,
             .notInstalled,
@@ -447,6 +474,10 @@ struct LocalAIModelWorkflowTests {
 
     private static func dependencies(
         installStatus: @escaping @Sendable (LocalAIModel) -> LocalAIInstallStatus = { _ in .notInstalled },
+        startInstall: @escaping AppStateLocalAIDependencies.InstallStarter = { _, _, completion in
+            completion(.failure(.alreadyInProgress))
+            return LocalAIInstallTask()
+        },
         deleteModel: @escaping @Sendable (LocalAIModel) throws -> Void = { _ in },
         processingAvailability: @escaping () -> LocalAIProcessingAvailability = supportedProcessingAvailability
     ) -> AppStateLocalAIDependencies {
@@ -454,10 +485,7 @@ struct LocalAIModelWorkflowTests {
             makeServerManager: { LocalAIServerManager(store: LocalAIModelStore()) },
             idleShutdownSleep: { _ in try await Task.sleep(nanoseconds: UInt64.max) },
             installStatus: installStatus,
-            startInstall: { _, _, completion in
-                completion(.failure(.alreadyInProgress))
-                return LocalAIInstallTask()
-            },
+            startInstall: startInstall,
             progressSchedule: { _, operation in operation() },
             deleteModel: deleteModel,
             deletePartialModel: { _ in },
@@ -517,11 +545,25 @@ struct LocalAIModelWorkflowTests {
         workflow.startInstall(model)
         try expect(workflow.hasActiveInstalls, "install active")
 
-        let quiesceTask = Task { await workflow.waitForInstallsToQuiesce() }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        let waiterStarted = LocalAIValueBox(false)
+        let waiterCompleted = LocalAIValueBox(false)
+        let quiesceTask = Task { @MainActor in
+            waiterStarted.set(true)
+            await workflow.waitForInstallsToQuiesce()
+            waiterCompleted.set(true)
+        }
+        try await waitUntil { waiterStarted.value }
+        try expect(
+            !waiterCompleted.value,
+            "quiescence waiter remains suspended while install is active"
+        )
 
         harness.complete(model: model, with: .success(()))
         await quiesceTask.value
+        try expect(
+            waiterCompleted.value,
+            "quiescence waiter resumes after install completion"
+        )
         try expect(!workflow.hasActiveInstalls, "install no longer active")
     }
 
@@ -564,8 +606,6 @@ private final class OverlappingLocalAIStatusHarness: @unchecked Sendable {
     private let blockedModelID: String
     private var hasStartedFirstLookup = false
     private var mayFinishFirstLookup = false
-    private var staleDeliveryDidDrain = false
-    private var staleDeliveryWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(blockedModelID: String) {
         self.blockedModelID = blockedModelID
@@ -583,13 +623,6 @@ private final class OverlappingLocalAIStatusHarness: @unchecked Sendable {
             condition.wait()
         }
         condition.unlock()
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            DispatchQueue.main.async { [self] in
-                self.markStaleDeliveryDrained()
-            }
-        }
         return .ready
     }
 
@@ -615,35 +648,60 @@ private final class OverlappingLocalAIStatusHarness: @unchecked Sendable {
         condition.broadcast()
         condition.unlock()
     }
+}
 
-    func waitForStaleDeliveryToDrain() async {
-        if withConditionLock({ staleDeliveryDidDrain }) { return }
-        await withCheckedContinuation { continuation in
-            let shouldResume = withConditionLock { () -> Bool in
-                if staleDeliveryDidDrain { return true }
-                staleDeliveryWaiters.append(continuation)
-                return false
-            }
-            if shouldResume { continuation.resume() }
-        }
+private final class LocalAIStatusRefreshDeliveryHarness: @unchecked Sendable {
+    private let lock = NSLock()
+    private let modelID: String
+    private let generation: Int
+    private var didObserveDelivery = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(modelID: String, generation: Int) {
+        self.modelID = modelID
+        self.generation = generation
     }
 
-    private func markStaleDeliveryDrained() {
-        let waiters = withConditionLock { () -> [CheckedContinuation<Void, Never>] in
-            staleDeliveryDidDrain = true
-            let waiters = staleDeliveryWaiters
-            staleDeliveryWaiters.removeAll()
-            return waiters
+    func record(modelID: String, generation: Int) {
+        let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            guard modelID == self.modelID,
+                  generation == self.generation,
+                  !didObserveDelivery else {
+                return []
+            }
+            didObserveDelivery = true
+            let continuations = self.waiters
+            self.waiters.removeAll()
+            return continuations
         }
         for waiter in waiters {
             waiter.resume()
         }
     }
 
-    private func withConditionLock<Value>(_ body: () -> Value) -> Value {
-        condition.lock()
-        defer { condition.unlock() }
-        return body()
+    func waitForDelivery() async {
+        if lock.withLock({ didObserveDelivery }) { return }
+        await withCheckedContinuation { continuation in
+            let shouldResume = lock.withLock { () -> Bool in
+                if didObserveDelivery { return true }
+                waiters.append(continuation)
+                return false
+            }
+            if shouldResume { continuation.resume() }
+        }
+    }
+}
+
+private final class LocalAICallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+
+    var value: Int {
+        lock.withLock { calls }
+    }
+
+    func increment() {
+        lock.withLock { calls += 1 }
     }
 }
 

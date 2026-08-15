@@ -9,6 +9,7 @@ struct NativeWhisperModelWorkflowTests {
         try testInitialStateIsNotInstalled()
         try testRefreshInstallStatusUpdatesStateAndEmitsEvent()
         try await testStartInstallEmitsProgressAndSucceeds()
+        try await testProgressCoalescesAndQueuedDeliveryCannotBeatCancellation()
         try await testCancelInstallEmitsCancelledOutcome()
         try await testFailedInstallEmitsFailedOutcomeWithIssue()
         try await testDeleteModelSuccessClearsIssueAndRefreshesStatus()
@@ -73,6 +74,67 @@ struct NativeWhisperModelWorkflowTests {
             },
             "installCompleted(.succeeded) event fired"
         )
+    }
+
+    @MainActor
+    private static func testProgressCoalescesAndQueuedDeliveryCannotBeatCancellation() async throws {
+        let harness = ControlledInstallHarness()
+        let scheduler = ControlledNativeWhisperProgressScheduler()
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: harness.dependencies(
+                finalStatus: .notInstalled,
+                progressSchedule: scheduler.schedule
+            )
+        )
+
+        workflow.startInstall()
+        for value in 1...10_000 {
+            harness.reportProgress(
+                NativeWhisperDownloadProgress(
+                    downloadedBytes: Int64(value),
+                    totalBytes: 10_000
+                )
+            )
+        }
+
+        try expectEqual(
+            scheduler.scheduledCount,
+            1,
+            "burst coalesces to one scheduled delivery"
+        )
+        scheduler.runNext()
+        try expectEqual(
+            workflow.state.installProgress.downloadedBytes,
+            1,
+            "first progress delivery"
+        )
+        try expectEqual(scheduler.scheduledCount, 1, "latest progress remains coalesced")
+        scheduler.runAll()
+        try expectEqual(
+            workflow.state.installProgress.downloadedBytes,
+            10_000,
+            "latest burst progress delivered"
+        )
+
+        harness.reportProgress(
+            NativeWhisperDownloadProgress(
+                downloadedBytes: 10_001,
+                totalBytes: 20_000
+            )
+        )
+        try expectEqual(scheduler.scheduledCount, 1, "post-burst progress queued")
+
+        workflow.cancelInstall()
+        scheduler.runAll()
+        try expect(workflow.state.installProgress.isCancelled, "cancellation remains final")
+        try expectEqual(
+            workflow.state.installProgress.downloadedBytes,
+            10_000,
+            "queued progress cannot overwrite delivered bytes after cancellation"
+        )
+
+        harness.complete(.failure(.cancelled))
+        try await waitUntil { !workflow.state.isInstalling }
     }
 
     @MainActor
@@ -276,6 +338,38 @@ struct NativeWhisperModelWorkflowTests {
     }
 }
 
+private final class ControlledNativeWhisperProgressScheduler: @unchecked Sendable {
+    typealias Operation = @Sendable () -> Void
+
+    private let lock = NSLock()
+    private var scheduled: [Operation] = []
+
+    var schedule: LatestValueProgressCoalescer<NativeWhisperDownloadProgress>.Schedule {
+        { [weak self] _, operation in
+            self?.lock.withLock {
+                self?.scheduled.append(operation)
+            }
+        }
+    }
+
+    var scheduledCount: Int {
+        lock.withLock { scheduled.count }
+    }
+
+    func runNext() {
+        let operation = lock.withLock {
+            scheduled.isEmpty ? nil : scheduled.removeFirst()
+        }
+        operation?()
+    }
+
+    func runAll() {
+        while scheduledCount > 0 {
+            runNext()
+        }
+    }
+}
+
 private final class ControlledInstallHarness: @unchecked Sendable {
     private let lock = NSLock()
     private var progressCallback: ((NativeWhisperDownloadProgress) -> Void)?
@@ -283,7 +377,10 @@ private final class ControlledInstallHarness: @unchecked Sendable {
     private var finalStatus: NativeWhisperInstallStatus = .notInstalled
 
     func dependencies(
-        finalStatus: NativeWhisperInstallStatus
+        finalStatus: NativeWhisperInstallStatus,
+        progressSchedule: @escaping LatestValueProgressCoalescer<
+            NativeWhisperDownloadProgress
+        >.Schedule = { _, operation in operation() }
     ) -> AppStateNativeWhisperDependencies {
         self.finalStatus = finalStatus
         return AppStateNativeWhisperDependencies(
@@ -295,7 +392,7 @@ private final class ControlledInstallHarness: @unchecked Sendable {
                 }
                 return NativeWhisperInstallTask()
             },
-            progressSchedule: { _, operation in operation() },
+            progressSchedule: progressSchedule,
             deleteModel: { _ in },
             makeExecutionSnapshot: {
                 .live(store: NativeWhisperModelStore())
