@@ -151,7 +151,7 @@ struct AIProcessingChoiceDisplay: Identifiable, Equatable {
     var id: String { choice.id }
 }
 
-struct LocalAIModelInstallViewState: Equatable {
+struct LocalAIModelInstallViewState: Equatable, Sendable {
     var status: LocalAIInstallStatus
     var progress: LocalAIDownloadProgress
     var isInstalling: Bool

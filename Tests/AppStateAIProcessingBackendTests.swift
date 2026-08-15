@@ -40,35 +40,28 @@ struct AppStateAIProcessingBackendTests {
         await testSettingsDismissalDisablesAIWithoutReadyModels()
         await testSettingsDismissalFallsBackToReadyLocalAIModel()
         await testSameModelDownloadCoalescesAndSelectsBothFeatures()
-        await testNativeWhisperProgressCoalescesAndCancellationWins()
         await testLocalAIProgressCoalescesAndCompletionWins()
         await testChoosingCloudClearsOnlyOnePendingSelection()
         await testCancelPendingSelectionClearsOnlyOneConsumer()
         await testPendingSelectionChangesPublishObjectWillChange()
         await testCancellationWaitsForCompletionAndRetriesAfterQuiescence()
         try await testIdleShutdownMonitoringIsIdempotentAndStops()
-        await testLocalAIInstallQuiescenceWaitsForActiveWorker()
         try await testTerminationWaitsForLocalAIQuiescenceAndSuppressesDuplicates()
-        try await testNativeWhisperTerminationWaitsForWorkerQuiescence()
         try await testCombinedNativeAndLocalTerminationWaitsForBothWorkers()
         await testTerminationCleanupBlocksNewModelInstalls()
         await testPendingRecordingTerminationCancelRepliesFalseOnce()
         await testPartialCleanupFailureSetsModelIssue()
-        await testInstallerSuccessRequiresReadyStatus()
-        await testInstallerSuccessRechecksHardwareAvailability()
-        await testInstallerFailureClearsPendingAndSetsIssue()
+        await testInstallerFailureClearsPendingSelectionAndMirrorsIssue()
         await testUnsupportedHardwareRejectsLocalSelection()
         await testLowMemoryPreservesStoredLocalChoiceWithoutStartingIt()
-        await testCanonicalModelValidationRejectsForgedModels()
         await testAIProcessingChoiceDisplayMetadata()
         testManagedLocalAIModelResolutionReconcilesRetainedLifecycle()
         await testCloudSelectionPublishesContextChoiceOnce()
         await testSelectionWaitsForInitialStatusRefresh()
-        await testBackgroundStatusRefreshIgnoresStaleGeneration()
         await testAppStateInstancesKeepIndependentLocalAIEnvironments()
         await testExecutorUsesOriginatingLocalAIAvailability()
         try await testDeleteDuringInstallWaitsAndCannotAutoSelect()
-        try await testDeleteFailureAndSuccessStateReset()
+        try await testDeleteFailurePreservesSelectedLocalChoice()
         try await testDeletingOnlyLocalModelDoesNotSubstituteCloud()
         try testEveryBackendExecutorConstructionUsesCentralFactory()
         try testEveryPostProcessingConstructionUsesCentralFactory()
@@ -840,71 +833,6 @@ struct AppStateAIProcessingBackendTests {
         }
     }
 
-    private static func testNativeWhisperProgressCoalescesAndCancellationWins() async {
-        resetAIProcessingDefaults()
-        let statusHarness = NativeWhisperStatusHarness(status: .notInstalled)
-        let installHarness = ControlledNativeWhisperInstallHarness()
-        let scheduler = ProgressScheduleHarness()
-        var dependencies = modelTestDependencies()
-        dependencies.nativeWhisper.installStatus = {
-            statusHarness.installStatus(for: $0)
-        }
-        dependencies.nativeWhisper.startInstall = { model, progress, completion in
-            installHarness.start(
-                model: model,
-                progress: progress,
-                completion: completion
-            )
-        }
-        dependencies.nativeWhisper.progressSchedule = scheduler.schedule
-
-        let appState = await MainActor.run { AppState(dependencies: dependencies) }
-        await MainActor.run {
-            appState.installNativeWhisperModel()
-        }
-        for value in 1...10_000 {
-            installHarness.sendProgress(
-                NativeWhisperDownloadProgress(
-                    downloadedBytes: Int64(value),
-                    totalBytes: 10_000
-                )
-            )
-        }
-
-        precondition(scheduler.scheduledCount == 1)
-        await MainActor.run { scheduler.runNext() }
-        let firstBytes = await MainActor.run {
-            appState.nativeWhisperInstallProgress.downloadedBytes
-        }
-        precondition(firstBytes == 1)
-        precondition(scheduler.scheduledCount == 1)
-        await MainActor.run { scheduler.runNext() }
-        let latestBytes = await MainActor.run {
-            appState.nativeWhisperInstallProgress.downloadedBytes
-        }
-        precondition(latestBytes == 10_000)
-
-        installHarness.sendProgress(
-            NativeWhisperDownloadProgress(
-                downloadedBytes: 10_001,
-                totalBytes: 20_000
-            )
-        )
-        precondition(scheduler.scheduledCount == 1)
-        await MainActor.run {
-            appState.cancelNativeWhisperInstall()
-        }
-        await MainActor.run { scheduler.runAll() }
-        let cancelledProgress = await MainActor.run {
-            appState.nativeWhisperInstallProgress
-        }
-        precondition(cancelledProgress.isCancelled)
-        precondition(cancelledProgress.downloadedBytes == 10_000)
-
-        installHarness.complete(with: .failure(.cancelled))
-        await appState.waitForNativeWhisperInstallToQuiesce()
-    }
-
     private static func testLocalAIProgressCoalescesAndCompletionWins() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
@@ -1239,38 +1167,6 @@ struct AppStateAIProcessingBackendTests {
         precondition(sleepHarness.callCount == 2)
     }
 
-    private static func testLocalAIInstallQuiescenceWaitsForActiveWorker() async {
-        resetAIProcessingDefaults()
-        let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
-        let installHarness = LocalAIInstallHarness()
-        let completion = LockedBox(false)
-        var dependencies = modelTestDependencies()
-        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
-        dependencies.localAI.startInstall = installHarness.start
-        dependencies.localAI.deletePartialModel = { _ in }
-
-        let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState(dependencies: dependencies)
-        await MainActor.run {
-            appState.installLocalAIModel(model)
-        }
-        let waiter = Task {
-            await appState.waitForLocalAIInstallsToQuiesce()
-            completion.set(true)
-        }
-        await yieldMainActor()
-        precondition(!completion.value)
-
-        await MainActor.run {
-            appState.cancelLocalAIInstall(model)
-        }
-        precondition(installHarness.task(for: model, startIndex: 0)?.isCancelled == true)
-
-        installHarness.complete(model: model, with: .failure(.cancelled))
-        await waiter.value
-        precondition(completion.value)
-    }
-
     private static func testTerminationWaitsForLocalAIQuiescenceAndSuppressesDuplicates() async throws {
         let effects = ModelTerminationEffectSnapshot()
         defer { effects.restore() }
@@ -1338,62 +1234,6 @@ struct AppStateAIProcessingBackendTests {
         precondition(partialDeletionHarness.deletedModelIDs == [model.id])
         precondition(partialDeletionHarness.managerWasStoppedValues == [false])
         precondition(installHarness.starts(for: model) == 1)
-        await yieldMainActor()
-        precondition(replyHarness.values == [true])
-    }
-
-    private static func testNativeWhisperTerminationWaitsForWorkerQuiescence() async throws {
-        let effects = ModelTerminationEffectSnapshot()
-        defer { effects.restore() }
-        resetAIProcessingDefaults()
-        let nativeStatusHarness = NativeWhisperStatusHarness(status: .notInstalled)
-        let nativeInstallHarness = ControlledNativeWhisperInstallHarness()
-        let replyHarness = TerminationReplyHarness()
-        let process = TestLocalAIServerProcess()
-        let manager = LocalAIServerManager(
-            launchProcess: { _, _, port, _ in (process, port) },
-            pollHealth: { _ in true },
-            readinessProbe: successfulReadinessProbe,
-            validateModel: { _ in .ready },
-            terminationGracePeriod: 0,
-            waitForProcessExit: { _, _ in true }
-        )
-        var dependencies = modelTestDependencies()
-        dependencies.nativeWhisper.installStatus = {
-            nativeStatusHarness.installStatus(for: $0)
-        }
-        dependencies.nativeWhisper.startInstall = { model, progress, completion in
-            nativeInstallHarness.start(
-                model: model,
-                progress: progress,
-                completion: completion
-            )
-        }
-        dependencies.localAI.makeServerManager = { manager }
-        AppState.modelDownloadQuitAlertPresenter = { .alertFirstButtonReturn }
-        AppState.applicationTerminationReply = replyHarness.reply
-
-        let appState = await makeRefreshedAppState(dependencies: dependencies)
-        _ = try await manager.withBaseURL(for: LocalAIModelCatalog.quality) { $0 }
-        await MainActor.run {
-            appState.installNativeWhisperModel(autoSelectWhenReady: true)
-        }
-        let statusCallsBeforeCancellation = nativeStatusHarness.callCount
-
-        let terminationReply = await MainActor.run {
-            appState.requestTerminationAfterModelCleanup()
-        }
-        precondition(terminationReply == .terminateLater)
-        precondition(nativeInstallHarness.task?.isCancelled == true)
-        precondition(process.isRunning)
-        precondition(replyHarness.values.isEmpty)
-        precondition(nativeStatusHarness.callCount == statusCallsBeforeCancellation)
-
-        nativeInstallHarness.complete(with: .failure(.cancelled))
-        await waitUntil { !appState.isInstallingNativeWhisper }
-        await waitUntil { !process.isRunning }
-        await waitUntil { replyHarness.values == [true] }
-        precondition(nativeStatusHarness.callCount == statusCallsBeforeCancellation + 1)
         await yieldMainActor()
         precondition(replyHarness.values == [true])
     }
@@ -1602,80 +1442,7 @@ struct AppStateAIProcessingBackendTests {
         }
     }
 
-    private static func testInstallerSuccessRequiresReadyStatus() async {
-        resetAIProcessingDefaults()
-        let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
-        let installHarness = LocalAIInstallHarness()
-        var dependencies = modelTestDependencies()
-        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
-        dependencies.localAI.startInstall = installHarness.start
-
-        let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState(dependencies: dependencies)
-        let originalChoice = await MainActor.run { () -> AIProcessingBackendChoice in
-            let originalChoice = appState.postProcessingBackendChoice
-            appState.selectAIProcessingBackendChoice(
-                .localAI(modelID: model.id),
-                for: .postProcessing
-            )
-            appState.installLocalAIModel(model, autoSelectFor: .postProcessing)
-            return originalChoice
-        }
-
-        installHarness.complete(model: model, with: .success(()))
-        await waitUntil {
-            !appState.localAIInstallState(for: model).isInstalling
-        }
-        await MainActor.run {
-            precondition(appState.postProcessingBackendChoice == originalChoice)
-            precondition(appState.pendingLocalAIModelID(for: .postProcessing) == nil)
-            precondition(
-                appState.localAIInstallState(for: model).issue?.code
-                    == .localAIModelUnavailable
-            )
-            precondition(appState.localAIInstallState(for: model).status == .notInstalled)
-        }
-    }
-
-    private static func testInstallerSuccessRechecksHardwareAvailability() async {
-        resetAIProcessingDefaults()
-        let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
-        let installHarness = LocalAIInstallHarness()
-        let availability = LockedBox(supportedLocalAIAvailability())
-        var dependencies = modelTestDependencies()
-        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
-        dependencies.localAI.startInstall = installHarness.start
-        dependencies.localAI.processingAvailability = { availability.value }
-
-        let model = LocalAIModelCatalog.quality
-        let appState = await makeRefreshedAppState(dependencies: dependencies)
-        let originalChoice = await MainActor.run { () -> AIProcessingBackendChoice in
-            let originalChoice = appState.contextBackendChoice
-            appState.selectAIProcessingBackendChoice(
-                .localAI(modelID: model.id),
-                for: .context
-            )
-            appState.installLocalAIModel(model, autoSelectFor: .context)
-            return originalChoice
-        }
-
-        statusHarness.set(.ready, for: model)
-        availability.set(unsupportedLocalAIAvailability())
-        installHarness.complete(model: model, with: .success(()))
-        await waitUntil {
-            !appState.localAIInstallState(for: model).isInstalling
-        }
-        await MainActor.run {
-            precondition(appState.contextBackendChoice == originalChoice)
-            precondition(appState.pendingLocalAIModelID(for: .context) == nil)
-            precondition(
-                appState.localAIInstallState(for: model).issue?.code
-                    == .localAIModelUnavailable
-            )
-        }
-    }
-
-    private static func testInstallerFailureClearsPendingAndSetsIssue() async {
+    private static func testInstallerFailureClearsPendingSelectionAndMirrorsIssue() async {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
         let installHarness = LocalAIInstallHarness()
@@ -1777,43 +1544,6 @@ struct AppStateAIProcessingBackendTests {
             precondition(!appState.localAIInstallState(for: model).isInstalling)
         }
         precondition(installHarness.starts(for: model) == 0)
-    }
-
-    private static func testCanonicalModelValidationRejectsForgedModels() async {
-        resetAIProcessingDefaults()
-        let statusHarness = LocalAIStatusHarness(defaultStatus: .notInstalled)
-        let installHarness = LocalAIInstallHarness()
-        let deletionHarness = LocalAIDeletionHarness()
-        var dependencies = modelTestDependencies()
-        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
-        dependencies.localAI.startInstall = installHarness.start
-
-        let canonical = LocalAIModelCatalog.quality
-        let forged = LocalAIModel(
-            id: canonical.id,
-            displayName: "Forged",
-            description: canonical.description,
-            artifacts: canonical.artifacts,
-            approximateResidentRAMBytes: canonical.approximateResidentRAMBytes
-        )
-        let appState = await makeRefreshedAppState(dependencies: dependencies)
-        dependencies.localAI.deleteModel = { model in
-            deletionHarness.record(modelID: model.id, managerWasStopped: true)
-        }
-        await MainActor.run {
-            precondition(
-                !appState.isAIProcessingChoiceAvailable(
-                    .localAI(modelID: "unknown-local-model"),
-                    for: .postProcessing
-                )
-            )
-            appState.installLocalAIModel(forged, autoSelectFor: .postProcessing)
-            appState.deleteLocalAIModel(forged)
-            precondition(appState.pendingLocalAIModelID(for: .postProcessing) == nil)
-        }
-        await yieldMainActor()
-        precondition(installHarness.starts(for: canonical) == 0)
-        precondition(deletionHarness.callCount == 0)
     }
 
     private static func testAIProcessingChoiceDisplayMetadata() async {
@@ -2044,7 +1774,10 @@ struct AppStateAIProcessingBackendTests {
             statusHarness.releaseBlockedCall()
         }
 
-        let appState = await MainActor.run { AppState(dependencies: dependencies) }
+        let dependenciesSnapshot = dependencies
+        let appState = await MainActor.run {
+            AppState(dependencies: dependenciesSnapshot)
+        }
         statusHarness.waitUntilBlockedCallEntered()
         await MainActor.run {
             appState.selectAIProcessingBackendChoice(
@@ -2070,41 +1803,6 @@ struct AppStateAIProcessingBackendTests {
         precondition(statusHarness.mainThreadCallCount == 0)
     }
 
-    private static func testBackgroundStatusRefreshIgnoresStaleGeneration() async {
-        resetAIProcessingDefaults()
-        let statusHarness = ControlledLocalAIStatusHarness(
-            blockedModelID: LocalAIModelCatalog.quality.id,
-            blockedResult: .ready,
-            subsequentResult: .notInstalled
-        )
-        var dependencies = modelTestDependencies()
-        dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
-        defer {
-            statusHarness.releaseBlockedCall()
-        }
-
-        let appState = await MainActor.run { AppState(dependencies: dependencies) }
-        statusHarness.waitUntilBlockedCallEntered()
-        await MainActor.run {
-            appState.refreshAllLocalAIInstallStates()
-        }
-        await appState.waitForLocalAIInstallStateRefresh()
-        statusHarness.releaseBlockedCall()
-        await yieldMainActor()
-
-        let callsBeforeReads = statusHarness.callCount
-        await MainActor.run {
-            precondition(
-                appState.localAIInstallState(for: LocalAIModelCatalog.quality).status
-                    == .notInstalled
-            )
-            precondition(!appState.isAIProcessingBackendReady(for: .postProcessing))
-            _ = appState.aiProcessingChoiceDisplays(for: .postProcessing)
-        }
-        precondition(statusHarness.callCount == callsBeforeReads)
-        precondition(statusHarness.mainThreadCallCount == 0)
-    }
-
     private static func testAppStateInstancesKeepIndependentLocalAIEnvironments() async {
         resetAIProcessingDefaults()
         let firstStatus = LocalAIStatusHarness(defaultStatus: .ready)
@@ -2112,18 +1810,20 @@ struct AppStateAIProcessingBackendTests {
         let firstManager = LocalAIServerManager()
         let secondManager = LocalAIServerManager()
         var firstDependencies = modelTestDependencies()
-        firstDependencies.localAI.installStatus = firstStatus.status
+        firstDependencies.localAI.installStatus = { firstStatus.status(for: $0) }
         firstDependencies.localAI.processingAvailability = supportedLocalAIAvailability
         firstDependencies.localAI.makeServerManager = { firstManager }
         var secondDependencies = modelTestDependencies()
-        secondDependencies.localAI.installStatus = secondStatus.status
+        secondDependencies.localAI.installStatus = { secondStatus.status(for: $0) }
         secondDependencies.localAI.processingAvailability = unsupportedLocalAIAvailability
         secondDependencies.localAI.makeServerManager = { secondManager }
+        let firstDependenciesSnapshot = firstDependencies
+        let secondDependenciesSnapshot = secondDependencies
 
         let instances = await MainActor.run {
             (
-                AppState(dependencies: firstDependencies),
-                AppState(dependencies: secondDependencies)
+                AppState(dependencies: firstDependenciesSnapshot),
+                AppState(dependencies: secondDependenciesSnapshot)
             )
         }
         await instances.0.waitForLocalAIInstallStateRefresh()
@@ -2150,8 +1850,9 @@ struct AppStateAIProcessingBackendTests {
         var dependencies = modelTestDependencies()
         dependencies.localAI.installStatus = { _ in .ready }
         dependencies.localAI.processingAvailability = unsupportedLocalAIAvailability
+        let dependenciesSnapshot = dependencies
         let appState = await MainActor.run {
-            AppState(dependencies: dependencies)
+            AppState(dependencies: dependenciesSnapshot)
         }
         await appState.waitForLocalAIInstallStateRefresh()
 
@@ -2241,10 +1942,9 @@ struct AppStateAIProcessingBackendTests {
         precondition(installHarness.starts(for: model) == 1)
     }
 
-    private static func testDeleteFailureAndSuccessStateReset() async throws {
+    private static func testDeleteFailurePreservesSelectedLocalChoice() async throws {
         resetAIProcessingDefaults()
         let statusHarness = LocalAIStatusHarness(defaultStatus: .ready)
-        let deletionHarness = LocalAIDeletionHarness()
         var dependencies = modelTestDependencies()
         let manager = LocalAIServerManager(
             launchProcess: { _, _, port, _ in (TestLocalAIServerProcess(), port) },
@@ -2253,8 +1953,7 @@ struct AppStateAIProcessingBackendTests {
             validateModel: { _ in .ready }
         )
         dependencies.localAI.installStatus = { statusHarness.status(for: $0) }
-        dependencies.localAI.deleteModel = { model in
-            deletionHarness.record(modelID: model.id, managerWasStopped: true)
+        dependencies.localAI.deleteModel = { _ in
             throw TestLocalAILifecycleError.fullDeleteFailed
         }
         dependencies.localAI.makeServerManager = { manager }
@@ -2265,7 +1964,6 @@ struct AppStateAIProcessingBackendTests {
             appState.postProcessingBackendChoice = .localAI(modelID: model.id)
             appState.deleteLocalAIModel(model)
         }
-        await waitUntil { deletionHarness.callCount == 1 }
         await waitUntil {
             appState.localAIInstallState(for: model).issue?.code
                 == .localAIModelUnavailable
@@ -2275,7 +1973,6 @@ struct AppStateAIProcessingBackendTests {
                 appState.postProcessingBackendChoice
                     == .localAI(modelID: model.id)
             )
-            precondition(appState.localAIInstallState(for: model).status == .ready)
         }
     }
 
@@ -2560,22 +2257,32 @@ struct AppStateAIProcessingBackendTests {
             encoding: .utf8
         )
         let state = try appStateSource()
+        let terminationCleanup = sourceBlock(
+            in: state,
+            from: "func requestTerminationAfterModelCleanup(",
+            to: "private var shouldConfirmEscapeCancellation"
+        )
+        let localCancellation = sourceBlock(
+            in: state,
+            from: "private func cancelAllLocalAIInstalls()",
+            to: "func requestTerminationAfterModelCleanup("
+        )
+
         assert(delegate.contains("requestTerminationAfterModelCleanup()"))
         assert(!delegate.contains("requestTerminationWhileNativeWhisperInstalling()"))
-        assert(state.contains("await manager.stop()"))
-        assert(state.contains("cancelAllLocalAIInstalls()"))
-        assert(state.contains("localAIDeferredInstallModelIDs.removeAll()"))
-        assert(state.contains("localAIRestartAfterCancellationModelIDs.removeAll()"))
-        assert(state.contains("pendingLocalAISelections.removeAll()"))
-        assert(state.contains("nativeWhisperInstallTask != nil"))
-        assert(state.contains("!localAIInstallTasks.isEmpty"))
-        assert(state.contains("waitForNativeWhisperInstallToQuiesce()"))
-        assert(state.contains("waitForLocalAIInstallsToQuiesce()"))
         assert(
-            state.components(
-                separatedBy: "guard !isModelTerminationCleanupPending else { return }"
-            ).count - 1 >= 2
+            terminationCleanup.contains(
+                "guard !isModelTerminationCleanupPending else { return .terminateLater }"
+            )
         )
+        assert(terminationCleanup.contains("cancelAllLocalAIInstalls()"))
+        assert(terminationCleanup.contains("nativeWhisperWorkflow.beginTerminationCleanup()"))
+        assert(terminationCleanup.contains("localAIWorkflow.beginTerminationCleanup()"))
+        assert(terminationCleanup.contains("waitForNativeWhisperInstallToQuiesce()"))
+        assert(terminationCleanup.contains("waitForLocalAIInstallsToQuiesce()"))
+        assert(terminationCleanup.contains("await manager.stop()"))
+        assert(localCancellation.contains("pendingLocalAISelections.removeAll()"))
+        assert(state.contains("isInstallingNativeWhisper || localAIWorkflow.hasActiveInstalls"))
         assert(
             state.contains(
                 "requestTerminationAfterModelCleanup(replyIsAlreadyPending: true)"
@@ -2586,8 +2293,54 @@ struct AppStateAIProcessingBackendTests {
             from: "func cancelNativeWhisperInstall()",
             to: "func deleteNativeWhisperModel()"
         )
-        assert(!nativeCancellation.contains("deletePartialModel"))
-        assert(!nativeCancellation.contains("refreshNativeWhisperInstallStatus()"))
+        assert(nativeCancellation.contains("nativeWhisperWorkflow.cancelInstall()"))
+
+        let cancelNative = requiredRange(
+            of: "cancelNativeWhisperInstallIfNeeded()",
+            in: terminationCleanup
+        )
+        let cancelLocal = requiredRange(
+            of: "cancelAllLocalAIInstalls()",
+            in: terminationCleanup
+        )
+        let stopIdleMonitoring = requiredRange(
+            of: "stopLocalAIIdleShutdownMonitoring()",
+            in: terminationCleanup
+        )
+        let appStateTerminationFlag = requiredRange(
+            of: "isModelTerminationCleanupPending = true",
+            in: terminationCleanup
+        )
+        let nativeWorkflowTerminationFlag = requiredRange(
+            of: "nativeWhisperWorkflow.beginTerminationCleanup()",
+            in: terminationCleanup
+        )
+        let localWorkflowTerminationFlag = requiredRange(
+            of: "localAIWorkflow.beginTerminationCleanup()",
+            in: terminationCleanup
+        )
+        let waitForNativeQuiescence = requiredRange(
+            of: "await self.waitForNativeWhisperInstallToQuiesce()",
+            in: terminationCleanup
+        )
+        let waitForLocalQuiescence = requiredRange(
+            of: "await self.waitForLocalAIInstallsToQuiesce()",
+            in: terminationCleanup
+        )
+        let stopServer = requiredRange(of: "await manager.stop()", in: terminationCleanup)
+        let terminationReply = requiredRange(
+            of: "Self.applicationTerminationReply(true)",
+            in: terminationCleanup
+        )
+        assert(cancelNative.lowerBound < cancelLocal.lowerBound)
+        assert(cancelLocal.lowerBound < stopIdleMonitoring.lowerBound)
+        assert(stopIdleMonitoring.lowerBound < appStateTerminationFlag.lowerBound)
+        assert(appStateTerminationFlag.lowerBound < nativeWorkflowTerminationFlag.lowerBound)
+        assert(nativeWorkflowTerminationFlag.lowerBound < localWorkflowTerminationFlag.lowerBound)
+        assert(localWorkflowTerminationFlag.lowerBound < waitForNativeQuiescence.lowerBound)
+        assert(waitForNativeQuiescence.lowerBound < waitForLocalQuiescence.lowerBound)
+        assert(waitForLocalQuiescence.lowerBound < stopServer.lowerBound)
+        assert(stopServer.lowerBound < terminationReply.lowerBound)
     }
 
     // Dismissing a warning banner hides it for the note's current retry

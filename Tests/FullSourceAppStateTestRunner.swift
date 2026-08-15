@@ -19,6 +19,8 @@ struct FullSourceAppStateTestRunner {
             try LatestValueProgressCoalescerTests.main()
             try await HistoryArchiveRecoveryWorkflowTests.main()
             try await TranscriptionRetryWorkflowTests.main()
+            try await NativeWhisperModelWorkflowTests.main()
+            try await LocalAIModelWorkflowTests.main()
             try await AppStateStorageSafetyTests.main()
             try AppStateHistoryProtectionSourceTests.main()
             try await AppStateTranscriptionConfigurationTests.main()

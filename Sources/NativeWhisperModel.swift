@@ -45,7 +45,7 @@ struct NativeWhisperModelCatalog {
     }
 }
 
-enum NativeWhisperInstallStatus: Equatable {
+enum NativeWhisperInstallStatus: Equatable, Sendable {
     case notInstalled
     case partial(downloadedBytes: Int64, expectedBytes: Int64?)
     case ready

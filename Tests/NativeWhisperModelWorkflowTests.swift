@@ -1,0 +1,484 @@
+import Foundation
+
+#if !QUILL_GROUPED_TEST_RUNNER
+@main
+#endif
+struct NativeWhisperModelWorkflowTests {
+    @MainActor
+    static func main() async throws {
+        try testInitialStateIsNotInstalled()
+        try testRefreshInstallStatusUpdatesStateAndEmitsEvent()
+        try await testStartInstallEmitsProgressAndSucceeds()
+        try await testProgressCoalescesAndQueuedDeliveryCannotBeatCancellation()
+        try testCancelInstallWhenIdleIsNoOp()
+        try await testCancelInstallEmitsCancelledOutcome()
+        try await testFailedInstallEmitsFailedOutcomeWithIssue()
+        try await testDeleteModelSuccessClearsIssueAndRefreshesStatus()
+        try testDeleteModelFailureSetsIssue()
+        try await testWaitUntilQuiescedResumesAfterCompletion()
+        try testTerminationCleanupBlocksNewInstalls()
+        print("NativeWhisperModelWorkflowTests passed")
+    }
+
+    @MainActor
+    private static func testInitialStateIsNotInstalled() throws {
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: fixedStatusDependencies(.notInstalled)
+        )
+        try expectEqual(workflow.state.installStatus, .notInstalled, "initial status")
+        try expect(!workflow.state.isInstalling, "initial not installing")
+        try expectEqual(workflow.state.installProgress.downloadedBytes, 0, "initial progress")
+    }
+
+    @MainActor
+    private static func testRefreshInstallStatusUpdatesStateAndEmitsEvent() throws {
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: fixedStatusDependencies(.ready)
+        )
+        var events: [NativeWhisperModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.refreshInstallStatus()
+
+        try expectEqual(workflow.state.installStatus, .ready, "refreshed status")
+        guard case .stateChanged(let state)? = events.first else {
+            throw TestFailure("expected a stateChanged event")
+        }
+        try expectEqual(state.installStatus, .ready, "event status")
+    }
+
+    @MainActor
+    private static func testStartInstallEmitsProgressAndSucceeds() async throws {
+        let harness = ControlledInstallHarness()
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: harness.dependencies(finalStatus: .ready)
+        )
+        var events: [NativeWhisperModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.startInstall()
+        try expect(workflow.state.isInstalling, "installing after start")
+
+        harness.reportProgress(
+            NativeWhisperDownloadProgress(downloadedBytes: 10, totalBytes: 100)
+        )
+        try await waitUntil { workflow.state.installProgress.downloadedBytes == 10 }
+
+        harness.complete(.success(()))
+        try await waitUntil { !workflow.state.isInstalling }
+
+        try expectEqual(workflow.state.installStatus, .ready, "final status")
+        try expect(
+            events.contains { event in
+                if case .installCompleted(.succeeded) = event { return true }
+                return false
+            },
+            "installCompleted(.succeeded) event fired"
+        )
+    }
+
+    @MainActor
+    private static func testProgressCoalescesAndQueuedDeliveryCannotBeatCancellation() async throws {
+        let harness = ControlledInstallHarness()
+        let scheduler = ControlledNativeWhisperProgressScheduler()
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: harness.dependencies(
+                finalStatus: .notInstalled,
+                progressSchedule: scheduler.schedule
+            )
+        )
+
+        workflow.startInstall()
+        for value in 1...10_000 {
+            harness.reportProgress(
+                NativeWhisperDownloadProgress(
+                    downloadedBytes: Int64(value),
+                    totalBytes: 10_000
+                )
+            )
+        }
+
+        try expectEqual(
+            scheduler.scheduledCount,
+            1,
+            "burst coalesces to one scheduled delivery"
+        )
+        scheduler.runNext()
+        try expectEqual(
+            workflow.state.installProgress.downloadedBytes,
+            1,
+            "first progress delivery"
+        )
+        try expectEqual(scheduler.scheduledCount, 1, "latest progress remains coalesced")
+        scheduler.runAll()
+        try expectEqual(
+            workflow.state.installProgress.downloadedBytes,
+            10_000,
+            "latest burst progress delivered"
+        )
+
+        harness.reportProgress(
+            NativeWhisperDownloadProgress(
+                downloadedBytes: 10_001,
+                totalBytes: 20_000
+            )
+        )
+        try expectEqual(scheduler.scheduledCount, 1, "post-burst progress queued")
+
+        workflow.cancelInstall()
+        scheduler.runAll()
+        try expect(workflow.state.installProgress.isCancelled, "cancellation remains final")
+        try expectEqual(
+            workflow.state.installProgress.downloadedBytes,
+            10_000,
+            "queued progress cannot overwrite delivered bytes after cancellation"
+        )
+
+        harness.complete(.failure(.cancelled))
+        try await waitUntil { !workflow.state.isInstalling }
+    }
+
+    @MainActor
+    private static func testCancelInstallWhenIdleIsNoOp() throws {
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: fixedStatusDependencies(.notInstalled)
+        )
+        var events: [NativeWhisperModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.cancelInstall()
+
+        try expect(
+            !workflow.state.installProgress.isCancelled,
+            "idle progress remains unchanged"
+        )
+        try expect(events.isEmpty, "idle cancellation emits no state change")
+    }
+
+    @MainActor
+    private static func testCancelInstallEmitsCancelledOutcome() async throws {
+        let harness = ControlledInstallHarness()
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: harness.dependencies(finalStatus: .notInstalled)
+        )
+        var events: [NativeWhisperModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.startInstall()
+        workflow.cancelInstall()
+        try expect(workflow.state.installProgress.isCancelled, "progress marked cancelled")
+
+        harness.complete(.failure(.cancelled))
+        try await waitUntil { !workflow.state.isInstalling }
+
+        try expect(
+            events.contains { if case .installCompleted(.cancelled) = $0 { return true }; return false },
+            "installCompleted(.cancelled) event fired"
+        )
+    }
+
+    @MainActor
+    private static func testFailedInstallEmitsFailedOutcomeWithIssue() async throws {
+        let harness = ControlledInstallHarness()
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: harness.dependencies(finalStatus: .notInstalled)
+        )
+        var events: [NativeWhisperModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.startInstall()
+        harness.complete(.failure(.downloadFailed("offline")))
+        try await waitUntil { !workflow.state.isInstalling }
+
+        try expectEqual(
+            workflow.state.installIssue?.code,
+            .localModelMissing,
+            "failed install sets localModelMissing issue"
+        )
+        try expect(
+            events.contains {
+                if case .installCompleted(.failed(let issue)) = $0 {
+                    return issue.code == .localModelMissing
+                }
+                return false
+            },
+            "installCompleted(.failed) event fired with matching issue"
+        )
+    }
+
+    @MainActor
+    private static func testDeleteModelSuccessClearsIssueAndRefreshesStatus() async throws {
+        // Capture the install completion to simulate a failed install.
+        let completionCallback = NativeWhisperValueBox<
+            ((Result<Void, NativeWhisperInstallerError>) -> Void)?
+        >(nil)
+        let deleteCalled = NativeWhisperValueBox(false)
+
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: AppStateNativeWhisperDependencies(
+                installStatus: { _ in .notInstalled },
+                startInstall: { _, _, completion in
+                    completionCallback.set(completion)
+                    return NativeWhisperInstallTask()
+                },
+                progressSchedule: { _, operation in operation() },
+                deleteModel: { _ in deleteCalled.set(true) },
+                makeExecutionSnapshot: { .live(store: NativeWhisperModelStore()) }
+            )
+        )
+
+        // Drive a failed install to set installIssue.
+        workflow.startInstall()
+        completionCallback.value?(.failure(.downloadFailed("offline")))
+        try await waitUntil { !workflow.state.isInstalling }
+
+        // Verify issue is set before delete
+        try expectEqual(
+            workflow.state.installIssue?.code,
+            .localModelMissing,
+            "failed install sets issue"
+        )
+
+        // Now delete the model
+        workflow.deleteModel()
+
+        // Verify delete was called and issue is cleared.
+        try expect(deleteCalled.value, "delete was invoked")
+        try expect(workflow.state.installIssue == nil, "issue cleared on successful delete")
+    }
+
+    @MainActor
+    private static func testDeleteModelFailureSetsIssue() throws {
+        struct DeleteFailure: Error {}
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: AppStateNativeWhisperDependencies(
+                installStatus: { _ in .notInstalled },
+                startInstall: { _, _, completion in
+                    completion(.failure(.alreadyInProgress))
+                    return NativeWhisperInstallTask()
+                },
+                progressSchedule: { _, operation in operation() },
+                deleteModel: { _ in throw DeleteFailure() },
+                makeExecutionSnapshot: { .live(store: NativeWhisperModelStore()) }
+            )
+        )
+        workflow.deleteModel()
+        try expectEqual(
+            workflow.state.installIssue?.code,
+            .localModelMissing,
+            "delete failure sets localModelMissing issue"
+        )
+    }
+
+    @MainActor
+    private static func testWaitUntilQuiescedResumesAfterCompletion() async throws {
+        let harness = ControlledInstallHarness()
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: harness.dependencies(finalStatus: .ready)
+        )
+        workflow.startInstall()
+
+        let waiterStarted = NativeWhisperValueBox(false)
+        let waiterCompleted = NativeWhisperValueBox(false)
+        let quiesceTask = Task { @MainActor in
+            waiterStarted.set(true)
+            await workflow.waitUntilQuiesced()
+            waiterCompleted.set(true)
+        }
+        try await waitUntil { waiterStarted.value }
+        try expect(
+            !waiterCompleted.value,
+            "quiescence waiter remains suspended while install is active"
+        )
+
+        harness.complete(.success(()))
+        await quiesceTask.value
+        try expect(
+            waiterCompleted.value,
+            "quiescence waiter resumes after install completion"
+        )
+    }
+
+    @MainActor
+    private static func testTerminationCleanupBlocksNewInstalls() throws {
+        let startCalls = NativeWhisperCallCounter()
+        let workflow = NativeWhisperModelWorkflow(
+            dependencies: AppStateNativeWhisperDependencies(
+                installStatus: { _ in .notInstalled },
+                startInstall: { _, _, completion in
+                    startCalls.increment()
+                    completion(.failure(.alreadyInProgress))
+                    return NativeWhisperInstallTask()
+                },
+                progressSchedule: { _, operation in operation() },
+                deleteModel: { _ in },
+                makeExecutionSnapshot: { .live(store: NativeWhisperModelStore()) }
+            )
+        )
+        workflow.beginTerminationCleanup()
+        workflow.startInstall()
+        try expectEqual(
+            startCalls.value,
+            0,
+            "no install starts after termination cleanup begins"
+        )
+    }
+
+    @MainActor
+    private static func waitUntil(
+        timeoutNanoseconds: UInt64 = 2_000_000_000,
+        _ condition: @escaping () -> Bool
+    ) async throws {
+        let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if condition() { return }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        throw TestFailure("timed out waiting for condition")
+    }
+
+    private static func fixedStatusDependencies(
+        _ status: NativeWhisperInstallStatus
+    ) -> AppStateNativeWhisperDependencies {
+        AppStateNativeWhisperDependencies(
+            installStatus: { _ in status },
+            startInstall: { _, _, completion in
+                completion(.failure(.alreadyInProgress))
+                return NativeWhisperInstallTask()
+            },
+            progressSchedule: { _, operation in operation() },
+            deleteModel: { _ in },
+            makeExecutionSnapshot: {
+                .live(store: NativeWhisperModelStore())
+            }
+        )
+    }
+
+    private static func expect(
+        _ condition: @autoclosure () -> Bool,
+        _ label: String
+    ) throws {
+        guard condition() else { throw TestFailure(label) }
+    }
+
+    private static func expectEqual<T: Equatable>(
+        _ actual: T,
+        _ expected: T,
+        _ label: String
+    ) throws {
+        guard actual == expected else {
+            throw TestFailure("\(label): expected \(expected), got \(actual)")
+        }
+    }
+}
+
+private final class NativeWhisperCallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+
+    var value: Int {
+        lock.withLock { calls }
+    }
+
+    func increment() {
+        lock.withLock { calls += 1 }
+    }
+}
+
+private final class NativeWhisperValueBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: Value
+
+    init(_ value: Value) {
+        storedValue = value
+    }
+
+    var value: Value {
+        lock.withLock { storedValue }
+    }
+
+    func set(_ value: Value) {
+        lock.withLock { storedValue = value }
+    }
+}
+
+private final class ControlledNativeWhisperProgressScheduler: @unchecked Sendable {
+    typealias Operation = @Sendable () -> Void
+
+    private let lock = NSLock()
+    private var scheduled: [Operation] = []
+
+    var schedule: LatestValueProgressCoalescer<NativeWhisperDownloadProgress>.Schedule {
+        { [weak self] _, operation in
+            self?.lock.withLock {
+                self?.scheduled.append(operation)
+            }
+        }
+    }
+
+    var scheduledCount: Int {
+        lock.withLock { scheduled.count }
+    }
+
+    func runNext() {
+        let operation = lock.withLock {
+            scheduled.isEmpty ? nil : scheduled.removeFirst()
+        }
+        operation?()
+    }
+
+    func runAll() {
+        while scheduledCount > 0 {
+            runNext()
+        }
+    }
+}
+
+private final class ControlledInstallHarness: @unchecked Sendable {
+    private let lock = NSLock()
+    private var progressCallback: ((NativeWhisperDownloadProgress) -> Void)?
+    private var completionCallback: ((Result<Void, NativeWhisperInstallerError>) -> Void)?
+    private var finalStatus: NativeWhisperInstallStatus = .notInstalled
+
+    func dependencies(
+        finalStatus: NativeWhisperInstallStatus,
+        progressSchedule: @escaping LatestValueProgressCoalescer<
+            NativeWhisperDownloadProgress
+        >.Schedule = { _, operation in operation() }
+    ) -> AppStateNativeWhisperDependencies {
+        self.finalStatus = finalStatus
+        return AppStateNativeWhisperDependencies(
+            installStatus: { [weak self] _ in self?.finalStatus ?? .notInstalled },
+            startInstall: { [weak self] _, progress, completion in
+                self?.lock.withLock {
+                    self?.progressCallback = progress
+                    self?.completionCallback = completion
+                }
+                return NativeWhisperInstallTask()
+            },
+            progressSchedule: progressSchedule,
+            deleteModel: { _ in },
+            makeExecutionSnapshot: {
+                .live(store: NativeWhisperModelStore())
+            }
+        )
+    }
+
+    func reportProgress(_ progress: NativeWhisperDownloadProgress) {
+        let callback = lock.withLock { progressCallback }
+        callback?(progress)
+    }
+
+    func complete(_ result: Result<Void, NativeWhisperInstallerError>) {
+        let callback = lock.withLock { completionCallback }
+        callback?(result)
+    }
+}
+
+private struct TestFailure: Error, CustomStringConvertible {
+    let description: String
+
+    init(_ description: String) {
+        self.description = description
+    }
+}
