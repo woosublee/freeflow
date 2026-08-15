@@ -432,7 +432,6 @@ struct NoteBrowserView: View {
         let q = searchText.lowercased()
         return appState.pipelineHistory.filter {
             $0.postProcessedTranscript.lowercased().contains(q) ||
-            $0.contextSummary.lowercased().contains(q) ||
             ($0.customTitle ?? "").lowercased().contains(q) ||
             ($0.calendarMatch?.title ?? "").lowercased().contains(q)
         }
@@ -1683,7 +1682,6 @@ private struct NoteDetailView: View {
                 detailTimestampLabel(detailTimestamp)
                 statusBadges
                 noteStateIndicator
-                contextSummaryLabel
                 Spacer(minLength: 0)
             }
             VStack(alignment: .leading, spacing: 4) {
@@ -1694,7 +1692,6 @@ private struct NoteDetailView: View {
                 }
                 HStack(spacing: 8) {
                     statusBadges
-                    contextSummaryLabel
                     Spacer(minLength: 0)
                 }
             }
@@ -1728,21 +1725,6 @@ private struct NoteDetailView: View {
                 .font(.system(size: 10, weight: .light))
                 .foregroundStyle(.red.opacity(0.6))
                 .help("Transcription failed")
-        }
-    }
-
-    @ViewBuilder
-    private var contextSummaryLabel: some View {
-        if !item.contextSummary.isEmpty
-            && !item.contextSummary.hasPrefix("Could not")
-            && item.contextSummary != "Context capture disabled" {
-            Text("·")
-                .foregroundStyle(.quaternary)
-                .font(.system(size: 10))
-            Text(item.contextSummary)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
         }
     }
 
