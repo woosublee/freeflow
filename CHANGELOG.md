@@ -8,6 +8,13 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.40] - 2026-08-16
+
+### Improved
+
+- Simplified the selected-note metadata header by keeping the compact `CTX` indicator without displaying generated Context summary prose.
+- Hardened internal ownership and lifecycle boundaries for note storage, history recovery, Meeting Summary generation, transcription retry and resume, and local model management while preserving existing user-facing behavior.
+
 ## [0.1.39] - 2026-08-11
 
 ### Improved
