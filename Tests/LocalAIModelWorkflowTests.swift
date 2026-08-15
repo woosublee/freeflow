@@ -270,14 +270,20 @@ struct LocalAIModelWorkflowTests {
         workflow.markInitialRefreshCompletedForTesting()
 
         workflow.startInstall(model)
+        try expectEqual(harness.startCount, 1, "initial install starts once")
         workflow.cancelInstall(model)
         // A second startInstall while cancellation is still in flight requests
         // a restart once the cancelled attempt finishes.
         workflow.startInstall(model)
 
         harness.complete(model: model, with: .failure(.cancelled))
-        try await waitUntil { workflow.installState(for: model).isInstalling }
-        try expect(workflow.installState(for: model).isInstalling, "restarted install is in flight")
+        try await waitUntil { harness.startCount == 2 }
+        try expectEqual(harness.startCount, 2, "replacement install starts after cancellation")
+        try expect(workflow.installState(for: model).isInstalling, "replacement install is in flight")
+
+        try expect(workflow.cancelInstall(model), "replacement install can be cancelled")
+        harness.complete(model: model, with: .failure(.cancelled))
+        try await waitUntil { !workflow.installState(for: model).isInstalling }
     }
 
     @MainActor
@@ -738,10 +744,15 @@ private final class LocalAIValueBox<Value>: @unchecked Sendable {
 private final class ControlledLocalAIInstallHarness: @unchecked Sendable {
     private let lock = NSLock()
     private var completions: [String: (Result<Void, LocalAIInstallerError>) -> Void] = [:]
+    private var startCalls = 0
     private let finalStatus: LocalAIInstallStatus
 
     init(finalStatus: LocalAIInstallStatus) {
         self.finalStatus = finalStatus
+    }
+
+    var startCount: Int {
+        lock.withLock { startCalls }
     }
 
     func dependencies(
@@ -758,7 +769,10 @@ private final class ControlledLocalAIInstallHarness: @unchecked Sendable {
             idleShutdownSleep: { _ in try await Task.sleep(nanoseconds: UInt64.max) },
             installStatus: { [weak self] _ in self?.finalStatus ?? .notInstalled },
             startInstall: { [weak self] model, _, completion in
-                self?.lock.withLock { self?.completions[model.id] = completion }
+                self?.lock.withLock {
+                    self?.startCalls += 1
+                    self?.completions[model.id] = completion
+                }
                 return LocalAIInstallTask()
             },
             progressSchedule: { _, operation in operation() },

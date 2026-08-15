@@ -261,12 +261,25 @@ struct NativeWhisperModelWorkflowTests {
         )
         workflow.startInstall()
 
-        let quiesceTask = Task { await workflow.waitUntilQuiesced() }
-        try await Task.sleep(nanoseconds: 20_000_000)
-        try expect(!quiesceTask.isCancelled, "quiesce task still waiting")
+        let waiterStarted = NativeWhisperValueBox(false)
+        let waiterCompleted = NativeWhisperValueBox(false)
+        let quiesceTask = Task { @MainActor in
+            waiterStarted.set(true)
+            await workflow.waitUntilQuiesced()
+            waiterCompleted.set(true)
+        }
+        try await waitUntil { waiterStarted.value }
+        try expect(
+            !waiterCompleted.value,
+            "quiescence waiter remains suspended while install is active"
+        )
 
         harness.complete(.success(()))
         await quiesceTask.value
+        try expect(
+            waiterCompleted.value,
+            "quiescence waiter resumes after install completion"
+        )
     }
 
     @MainActor
@@ -335,6 +348,23 @@ struct NativeWhisperModelWorkflowTests {
         guard actual == expected else {
             throw TestFailure("\(label): expected \(expected), got \(actual)")
         }
+    }
+}
+
+private final class NativeWhisperValueBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: Value
+
+    init(_ value: Value) {
+        storedValue = value
+    }
+
+    var value: Value {
+        lock.withLock { storedValue }
+    }
+
+    func set(_ value: Value) {
+        lock.withLock { storedValue = value }
     }
 }
 
