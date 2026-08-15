@@ -13,6 +13,9 @@ struct LocalAIModelWorkflowTests {
         try await testCancelThenRestartResumesAfterCancellationCompletes()
         try await testDeleteModelDuringInstallCancelsFirst()
         try await testDeleteModelWhenIdleGoesStraightToDeletion()
+        try await testRefreshAllInstallStatesCompletesAndEmitsDeferredIDs()
+        try await testStaleStatusRefreshGenerationIsIgnored()
+        try await testInstallRequestedBeforeRefreshCompletesIsDeferredThenReported()
         print("LocalAIModelWorkflowTests passed")
     }
 
@@ -207,6 +210,72 @@ struct LocalAIModelWorkflowTests {
     }
 
     @MainActor
+    private static func testRefreshAllInstallStatesCompletesAndEmitsDeferredIDs() async throws {
+        let workflow = LocalAIModelWorkflow(
+            dependencies: dependencies(installStatus: { _ in .notInstalled }),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        var events: [LocalAIModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.refreshAllInstallStates()
+        try await waitUntil { workflow.state.hasCompletedInitialStatusRefresh }
+
+        try expect(
+            events.contains {
+                if case .initialStatusRefreshCompleted = $0 { return true }
+                return false
+            },
+            "initialStatusRefreshCompleted fired"
+        )
+    }
+
+    @MainActor
+    private static func testStaleStatusRefreshGenerationIsIgnored() async throws {
+        let model = LocalAIModelCatalog.quality
+        let statusBox = LocalAIStatusBox(.notInstalled)
+        let workflow = LocalAIModelWorkflow(
+            dependencies: dependencies(installStatus: { statusBox.status(for: $0) }),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        workflow.refreshAllInstallStates()
+        try await waitUntil { workflow.state.hasCompletedInitialStatusRefresh }
+
+        // A second refresh bumps the generation; only its result should apply.
+        statusBox.set(.ready, for: model)
+        workflow.refreshAllInstallStates()
+        try await waitUntil { workflow.state.hasCompletedInitialStatusRefresh }
+        try expectEqual(workflow.installState(for: model).status, .ready, "latest refresh wins")
+    }
+
+    @MainActor
+    private static func testInstallRequestedBeforeRefreshCompletesIsDeferredThenReported() async throws {
+        let model = LocalAIModelCatalog.quality
+        let harness = ControlledLocalAIInstallHarness(finalStatus: .notInstalled)
+        let workflow = LocalAIModelWorkflow(
+            dependencies: harness.dependencies(),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        var deferredModelIDsSeen: Set<String>?
+        workflow.onEvent = { event in
+            if case .initialStatusRefreshCompleted(let deferredModelIDs) = event {
+                deferredModelIDsSeen = deferredModelIDs
+            }
+        }
+
+        workflow.startInstall(model)
+        try expect(!workflow.installState(for: model).isInstalling, "install deferred before refresh")
+
+        workflow.refreshAllInstallStates()
+        try await waitUntil { workflow.state.hasCompletedInitialStatusRefresh }
+
+        try expect(
+            deferredModelIDsSeen?.contains(model.id) == true,
+            "deferred model ID reported in initialStatusRefreshCompleted event"
+        )
+    }
+
+    @MainActor
     private static func waitUntil(
         timeoutNanoseconds: UInt64 = 2_000_000_000,
         _ condition: @escaping () -> Bool
@@ -267,6 +336,24 @@ struct LocalAIModelWorkflowTests {
         guard actual == expected else {
             throw TestFailure("\(label): expected \(expected), got \(actual)")
         }
+    }
+}
+
+private final class LocalAIStatusBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var overrides: [String: LocalAIInstallStatus] = [:]
+    private let defaultStatus: LocalAIInstallStatus
+
+    init(_ defaultStatus: LocalAIInstallStatus) {
+        self.defaultStatus = defaultStatus
+    }
+
+    func status(for model: LocalAIModel) -> LocalAIInstallStatus {
+        lock.withLock { overrides[model.id] ?? defaultStatus }
+    }
+
+    func set(_ status: LocalAIInstallStatus, for model: LocalAIModel) {
+        lock.withLock { overrides[model.id] = status }
     }
 }
 
