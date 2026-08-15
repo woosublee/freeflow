@@ -2560,21 +2560,32 @@ struct AppStateAIProcessingBackendTests {
             encoding: .utf8
         )
         let state = try appStateSource()
+        let terminationCleanup = sourceBlock(
+            in: state,
+            from: "func requestTerminationAfterModelCleanup(",
+            to: "private var shouldConfirmEscapeCancellation"
+        )
+        let localCancellation = sourceBlock(
+            in: state,
+            from: "private func cancelAllLocalAIInstalls()",
+            to: "func requestTerminationAfterModelCleanup("
+        )
+
         assert(delegate.contains("requestTerminationAfterModelCleanup()"))
         assert(!delegate.contains("requestTerminationWhileNativeWhisperInstalling()"))
-        assert(state.contains("await manager.stop()"))
-        assert(state.contains("cancelAllLocalAIInstalls()"))
-        assert(state.contains("pendingLocalAISelections.removeAll()"))
-        assert(state.contains("nativeWhisperWorkflow.beginTerminationCleanup()"))
-        assert(state.contains("localAIWorkflow.beginTerminationCleanup()"))
-        assert(state.contains("isInstallingNativeWhisper || localAIWorkflow.hasActiveInstalls"))
-        assert(state.contains("waitForNativeWhisperInstallToQuiesce()"))
-        assert(state.contains("waitForLocalAIInstallsToQuiesce()"))
         assert(
-            state.components(
-                separatedBy: "guard !isModelTerminationCleanupPending else { return }"
-            ).count - 1 >= 1
+            terminationCleanup.contains(
+                "guard !isModelTerminationCleanupPending else { return .terminateLater }"
+            )
         )
+        assert(terminationCleanup.contains("cancelAllLocalAIInstalls()"))
+        assert(terminationCleanup.contains("nativeWhisperWorkflow.beginTerminationCleanup()"))
+        assert(terminationCleanup.contains("localAIWorkflow.beginTerminationCleanup()"))
+        assert(terminationCleanup.contains("waitForNativeWhisperInstallToQuiesce()"))
+        assert(terminationCleanup.contains("waitForLocalAIInstallsToQuiesce()"))
+        assert(terminationCleanup.contains("await manager.stop()"))
+        assert(localCancellation.contains("pendingLocalAISelections.removeAll()"))
+        assert(state.contains("isInstallingNativeWhisper || localAIWorkflow.hasActiveInstalls"))
         assert(
             state.contains(
                 "requestTerminationAfterModelCleanup(replyIsAlreadyPending: true)"
@@ -2586,6 +2597,53 @@ struct AppStateAIProcessingBackendTests {
             to: "func deleteNativeWhisperModel()"
         )
         assert(nativeCancellation.contains("nativeWhisperWorkflow.cancelInstall()"))
+
+        let cancelNative = requiredRange(
+            of: "cancelNativeWhisperInstallIfNeeded()",
+            in: terminationCleanup
+        )
+        let cancelLocal = requiredRange(
+            of: "cancelAllLocalAIInstalls()",
+            in: terminationCleanup
+        )
+        let stopIdleMonitoring = requiredRange(
+            of: "stopLocalAIIdleShutdownMonitoring()",
+            in: terminationCleanup
+        )
+        let appStateTerminationFlag = requiredRange(
+            of: "isModelTerminationCleanupPending = true",
+            in: terminationCleanup
+        )
+        let nativeWorkflowTerminationFlag = requiredRange(
+            of: "nativeWhisperWorkflow.beginTerminationCleanup()",
+            in: terminationCleanup
+        )
+        let localWorkflowTerminationFlag = requiredRange(
+            of: "localAIWorkflow.beginTerminationCleanup()",
+            in: terminationCleanup
+        )
+        let waitForNativeQuiescence = requiredRange(
+            of: "await self.waitForNativeWhisperInstallToQuiesce()",
+            in: terminationCleanup
+        )
+        let waitForLocalQuiescence = requiredRange(
+            of: "await self.waitForLocalAIInstallsToQuiesce()",
+            in: terminationCleanup
+        )
+        let stopServer = requiredRange(of: "await manager.stop()", in: terminationCleanup)
+        let terminationReply = requiredRange(
+            of: "Self.applicationTerminationReply(true)",
+            in: terminationCleanup
+        )
+        assert(cancelNative.lowerBound < cancelLocal.lowerBound)
+        assert(cancelLocal.lowerBound < stopIdleMonitoring.lowerBound)
+        assert(stopIdleMonitoring.lowerBound < appStateTerminationFlag.lowerBound)
+        assert(appStateTerminationFlag.lowerBound < nativeWorkflowTerminationFlag.lowerBound)
+        assert(nativeWorkflowTerminationFlag.lowerBound < localWorkflowTerminationFlag.lowerBound)
+        assert(localWorkflowTerminationFlag.lowerBound < waitForNativeQuiescence.lowerBound)
+        assert(waitForNativeQuiescence.lowerBound < waitForLocalQuiescence.lowerBound)
+        assert(waitForLocalQuiescence.lowerBound < stopServer.lowerBound)
+        assert(stopServer.lowerBound < terminationReply.lowerBound)
     }
 
     // Dismissing a warning banner hides it for the note's current retry
