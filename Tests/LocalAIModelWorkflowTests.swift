@@ -4,6 +4,7 @@ import Foundation
 @main
 #endif
 struct LocalAIModelWorkflowTests {
+    @MainActor
     static func main() async throws {
         try testInitialInstallStateIsNotInstalled()
         try testCanonicalModelRejectsForgedModels()
@@ -16,6 +17,9 @@ struct LocalAIModelWorkflowTests {
         try await testRefreshAllInstallStatesCompletesAndEmitsDeferredIDs()
         try await testStaleStatusRefreshGenerationIsIgnored()
         try await testInstallRequestedBeforeRefreshCompletesIsDeferredThenReported()
+        try testIdleShutdownMonitoringIsIdempotentAndStops()
+        try await testWaitForInstallsToQuiesceResumesAfterCompletion()
+        try testTerminationCleanupBlocksNewInstalls()
         print("LocalAIModelWorkflowTests passed")
     }
 
@@ -336,6 +340,70 @@ struct LocalAIModelWorkflowTests {
         guard actual == expected else {
             throw TestFailure("\(label): expected \(expected), got \(actual)")
         }
+    }
+
+    @MainActor
+    private static func testIdleShutdownMonitoringIsIdempotentAndStops() throws {
+        let workflow = makeWorkflow()
+        workflow.startIdleShutdownMonitoring()
+        workflow.startIdleShutdownMonitoring()
+        workflow.stopIdleShutdownMonitoring()
+        // No crash and no dangling task is the assertion here; a second
+        // stop() call must also be a safe no-op.
+        workflow.stopIdleShutdownMonitoring()
+    }
+
+    @MainActor
+    private static func testWaitForInstallsToQuiesceResumesAfterCompletion() async throws {
+        let model = LocalAIModelCatalog.quality
+        let harness = ControlledLocalAIInstallHarness(finalStatus: .ready)
+        let workflow = LocalAIModelWorkflow(
+            dependencies: harness.dependencies(),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        workflow.markInitialRefreshCompletedForTesting()
+        workflow.startInstall(model)
+        try expect(workflow.hasActiveInstalls, "install active")
+
+        let quiesceTask = Task { await workflow.waitForInstallsToQuiesce() }
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        harness.complete(model: model, with: .success(()))
+        await quiesceTask.value
+        try expect(!workflow.hasActiveInstalls, "install no longer active")
+    }
+
+    @MainActor
+    private static func testTerminationCleanupBlocksNewInstalls() throws {
+        let model = LocalAIModelCatalog.quality
+        var startCount = 0
+        let workflow = LocalAIModelWorkflow(
+            dependencies: AppStateLocalAIDependencies(
+                makeServerManager: { LocalAIServerManager(store: LocalAIModelStore()) },
+                idleShutdownSleep: { _ in try await Task.sleep(nanoseconds: UInt64.max) },
+                installStatus: { _ in .notInstalled },
+                startInstall: { _, _, completion in
+                    startCount += 1
+                    completion(.failure(.alreadyInProgress))
+                    return LocalAIInstallTask()
+                },
+                progressSchedule: { _, operation in operation() },
+                deleteModel: { _ in },
+                deletePartialModel: { _ in },
+                processingAvailability: {
+                    LocalAIProcessingAvailability(
+                        isAppleSilicon: true,
+                        runnerIsExecutable: true,
+                        physicalMemory: 32 * 1024 * 1024 * 1024
+                    )
+                }
+            ),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        workflow.markInitialRefreshCompletedForTesting()
+        workflow.beginTerminationCleanup()
+        workflow.startInstall(model)
+        try expectEqual(startCount, 0, "no install starts after termination cleanup begins")
     }
 }
 

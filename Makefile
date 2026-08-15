@@ -76,6 +76,7 @@ FULL_SOURCE_APP_STATE_TESTS = \
 	Tests/HistoryArchiveRecoveryWorkflowTests.swift \
 	Tests/TranscriptionRetryWorkflowTests.swift \
 	Tests/NativeWhisperModelWorkflowTests.swift \
+	Tests/LocalAIModelWorkflowTests.swift \
 	Tests/AppStateStorageSafetyTests.swift \
 	Tests/AppStateHistoryProtectionSourceTests.swift \
 	Tests/AppStateTranscriptionConfigurationTests.swift \
