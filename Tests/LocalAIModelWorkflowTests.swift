@@ -10,10 +10,14 @@ struct LocalAIModelWorkflowTests {
         try testCanonicalModelRejectsForgedModels()
         try testIsModelAvailableReflectsProcessingAvailability()
         try await testStartInstallSucceedsAndEmitsReadyOutcome()
+        try await testInstallerSuccessWithoutReadyStatusEmitsUnavailableOutcome()
+        try await testInstallerSuccessRechecksProcessingAvailability()
+        try await testFailedInstallEmitsFailedOutcomeWithIssue()
         try await testCancelInstallClearsInstallingStateWithoutEmittingOutcome()
         try await testCancelThenRestartResumesAfterCancellationCompletes()
         try await testDeleteModelDuringInstallCancelsFirst()
         try await testDeleteModelWhenIdleGoesStraightToDeletion()
+        try await testDeleteFailurePreservesReadyStatusAndSetsIssue()
         try await testRefreshAllInstallStatesCompletesAndEmitsDeferredIDs()
         try await testStaleStatusRefreshGenerationIsIgnored()
         try await testInstallRequestedBeforeRefreshCompletesIsDeferredThenReported()
@@ -111,6 +115,103 @@ struct LocalAIModelWorkflowTests {
     }
 
     @MainActor
+    private static func testInstallerSuccessWithoutReadyStatusEmitsUnavailableOutcome() async throws {
+        let model = LocalAIModelCatalog.quality
+        let harness = ControlledLocalAIInstallHarness(finalStatus: .notInstalled)
+        let workflow = LocalAIModelWorkflow(
+            dependencies: harness.dependencies(),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        workflow.markInitialRefreshCompletedForTesting()
+        var events: [LocalAIModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.startInstall(model)
+        harness.complete(model: model, with: .success(()))
+        try await waitUntil { !workflow.installState(for: model).isInstalling }
+
+        let issue = workflow.installState(for: model).issue
+        try expectEqual(issue?.code, .localAIModelUnavailable, "success without ready status issue")
+        try expect(
+            events.contains {
+                if case .installOutcome(
+                    let outcomeModel,
+                    .succeededButUnavailable(let outcomeIssue)
+                ) = $0 {
+                    return outcomeModel.id == model.id && outcomeIssue == issue
+                }
+                return false
+            },
+            "installOutcome(.succeededButUnavailable) fired for non-ready status"
+        )
+    }
+
+    @MainActor
+    private static func testInstallerSuccessRechecksProcessingAvailability() async throws {
+        let model = LocalAIModelCatalog.quality
+        let harness = ControlledLocalAIInstallHarness(finalStatus: .ready)
+        let availability = LocalAIValueBox(supportedProcessingAvailability())
+        let workflow = LocalAIModelWorkflow(
+            dependencies: harness.dependencies(
+                processingAvailability: { availability.value }
+            ),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        workflow.markInitialRefreshCompletedForTesting()
+        var events: [LocalAIModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.startInstall(model)
+        availability.set(unsupportedProcessingAvailability())
+        harness.complete(model: model, with: .success(()))
+        try await waitUntil { !workflow.installState(for: model).isInstalling }
+
+        let issue = workflow.installState(for: model).issue
+        try expectEqual(issue?.code, .localAIModelUnavailable, "availability recheck issue")
+        try expect(
+            events.contains {
+                if case .installOutcome(
+                    let outcomeModel,
+                    .succeededButUnavailable(let outcomeIssue)
+                ) = $0 {
+                    return outcomeModel.id == model.id && outcomeIssue == issue
+                }
+                return false
+            },
+            "installOutcome(.succeededButUnavailable) fired after availability changed"
+        )
+    }
+
+    @MainActor
+    private static func testFailedInstallEmitsFailedOutcomeWithIssue() async throws {
+        let model = LocalAIModelCatalog.quality
+        let harness = ControlledLocalAIInstallHarness(finalStatus: .notInstalled)
+        let workflow = LocalAIModelWorkflow(
+            dependencies: harness.dependencies(),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        workflow.markInitialRefreshCompletedForTesting()
+        var events: [LocalAIModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.startInstall(model)
+        harness.complete(model: model, with: .failure(.downloadFailed("offline")))
+        try await waitUntil { !workflow.installState(for: model).isInstalling }
+
+        let issue = workflow.installState(for: model).issue
+        try expectEqual(issue?.code, .localAIModelUnavailable, "failed install issue")
+        try expect(
+            events.contains {
+                if case .installOutcome(let outcomeModel, .failed(let outcomeIssue)) = $0 {
+                    return outcomeModel.id == model.id && outcomeIssue == issue
+                }
+                return false
+            },
+            "installOutcome(.failed) fired with mirrored issue"
+        )
+    }
+
+    @MainActor
     private static func testCancelInstallClearsInstallingStateWithoutEmittingOutcome() async throws {
         let model = LocalAIModelCatalog.quality
         let harness = ControlledLocalAIInstallHarness(finalStatus: .notInstalled)
@@ -180,7 +281,7 @@ struct LocalAIModelWorkflowTests {
     @MainActor
     private static func testDeleteModelWhenIdleGoesStraightToDeletion() async throws {
         let model = LocalAIModelCatalog.quality
-        var deleteCalled = false
+        let deletionHarness = LocalAIDeletionCallHarness()
         let workflow = LocalAIModelWorkflow(
             dependencies: AppStateLocalAIDependencies(
                 makeServerManager: { LocalAIServerManager(store: LocalAIModelStore()) },
@@ -191,7 +292,7 @@ struct LocalAIModelWorkflowTests {
                     return LocalAIInstallTask()
                 },
                 progressSchedule: { _, operation in operation() },
-                deleteModel: { _ in deleteCalled = true },
+                deleteModel: { deletionHarness.record(model: $0) },
                 deletePartialModel: { _ in },
                 processingAvailability: {
                     LocalAIProcessingAvailability(
@@ -207,10 +308,42 @@ struct LocalAIModelWorkflowTests {
         workflow.onEvent = { events.append($0) }
 
         try expect(workflow.deleteModel(model), "delete accepted when idle")
-        try await waitUntil { deleteCalled }
+        try await waitUntil { deletionHarness.wasCalled }
         try await waitUntil {
             events.contains { if case .deletionOutcome = $0 { return true }; return false }
         }
+    }
+
+    @MainActor
+    private static func testDeleteFailurePreservesReadyStatusAndSetsIssue() async throws {
+        let model = LocalAIModelCatalog.quality
+        let workflow = LocalAIModelWorkflow(
+            dependencies: dependencies(
+                installStatus: { _ in .ready },
+                deleteModel: { _ in throw LocalAIWorkflowTestError.deletionFailed }
+            ),
+            serverManager: LocalAIServerManager(store: LocalAIModelStore())
+        )
+        var events: [LocalAIModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
+
+        workflow.refreshAllInstallStates()
+        await workflow.waitForInitialStatusRefresh()
+        try expectEqual(workflow.installState(for: model).status, .ready, "status before delete")
+
+        try expect(workflow.deleteModel(model), "delete accepted for ready model")
+        try await waitUntil {
+            events.contains {
+                if case .deletionOutcome(let outcomeModel, let errorDescription) = $0 {
+                    return outcomeModel.id == model.id && errorDescription != nil
+                }
+                return false
+            }
+        }
+
+        let state = workflow.installState(for: model)
+        try expectEqual(state.status, .ready, "failed delete preserves ready status")
+        try expectEqual(state.issue?.code, .localAIModelUnavailable, "failed delete issue")
     }
 
     @MainActor
@@ -237,19 +370,31 @@ struct LocalAIModelWorkflowTests {
     @MainActor
     private static func testStaleStatusRefreshGenerationIsIgnored() async throws {
         let model = LocalAIModelCatalog.quality
-        let statusBox = LocalAIStatusBox(.notInstalled)
+        let statusHarness = OverlappingLocalAIStatusHarness(blockedModelID: model.id)
         let workflow = LocalAIModelWorkflow(
-            dependencies: dependencies(installStatus: { statusBox.status(for: $0) }),
+            dependencies: dependencies(installStatus: { statusHarness.status(for: $0) }),
             serverManager: LocalAIServerManager(store: LocalAIModelStore())
         )
-        workflow.refreshAllInstallStates()
-        try await waitUntil { workflow.state.hasCompletedInitialStatusRefresh }
+        defer { statusHarness.releaseFirstLookup() }
 
-        // A second refresh bumps the generation; only its result should apply.
-        statusBox.set(.ready, for: model)
         workflow.refreshAllInstallStates()
-        try await waitUntil { workflow.state.hasCompletedInitialStatusRefresh }
-        try expectEqual(workflow.installState(for: model).status, .ready, "latest refresh wins")
+        statusHarness.waitUntilFirstLookupStarts()
+
+        workflow.refreshAllInstallStates()
+        await workflow.waitForInitialStatusRefresh()
+        try expectEqual(
+            workflow.installState(for: model).status,
+            .notInstalled,
+            "newer refresh applies while stale lookup remains blocked"
+        )
+
+        statusHarness.releaseFirstLookup()
+        await statusHarness.waitForStaleDeliveryToDrain()
+        try expectEqual(
+            workflow.installState(for: model).status,
+            .notInstalled,
+            "stale overlapping refresh cannot overwrite newer status"
+        )
     }
 
     @MainActor
@@ -302,13 +447,8 @@ struct LocalAIModelWorkflowTests {
 
     private static func dependencies(
         installStatus: @escaping @Sendable (LocalAIModel) -> LocalAIInstallStatus = { _ in .notInstalled },
-        processingAvailability: @escaping () -> LocalAIProcessingAvailability = {
-            LocalAIProcessingAvailability(
-                isAppleSilicon: true,
-                runnerIsExecutable: true,
-                physicalMemory: 32 * 1024 * 1024 * 1024
-            )
-        }
+        deleteModel: @escaping @Sendable (LocalAIModel) throws -> Void = { _ in },
+        processingAvailability: @escaping () -> LocalAIProcessingAvailability = supportedProcessingAvailability
     ) -> AppStateLocalAIDependencies {
         AppStateLocalAIDependencies(
             makeServerManager: { LocalAIServerManager(store: LocalAIModelStore()) },
@@ -319,10 +459,22 @@ struct LocalAIModelWorkflowTests {
                 return LocalAIInstallTask()
             },
             progressSchedule: { _, operation in operation() },
-            deleteModel: { _ in },
+            deleteModel: deleteModel,
             deletePartialModel: { _ in },
             processingAvailability: processingAvailability
         )
+    }
+
+    private static func supportedProcessingAvailability() -> LocalAIProcessingAvailability {
+        LocalAIProcessingAvailability(
+            isAppleSilicon: true,
+            runnerIsExecutable: true,
+            physicalMemory: 32 * 1024 * 1024 * 1024
+        )
+    }
+
+    private static func unsupportedProcessingAvailability() -> LocalAIProcessingAvailability {
+        LocalAIProcessingAvailability(isAppleSilicon: false, runnerIsExecutable: false)
     }
 
     private static func expect(
@@ -407,21 +559,121 @@ struct LocalAIModelWorkflowTests {
     }
 }
 
-private final class LocalAIStatusBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var overrides: [String: LocalAIInstallStatus] = [:]
-    private let defaultStatus: LocalAIInstallStatus
+private final class OverlappingLocalAIStatusHarness: @unchecked Sendable {
+    private let condition = NSCondition()
+    private let blockedModelID: String
+    private var hasStartedFirstLookup = false
+    private var mayFinishFirstLookup = false
+    private var staleDeliveryDidDrain = false
+    private var staleDeliveryWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(_ defaultStatus: LocalAIInstallStatus) {
-        self.defaultStatus = defaultStatus
+    init(blockedModelID: String) {
+        self.blockedModelID = blockedModelID
     }
 
     func status(for model: LocalAIModel) -> LocalAIInstallStatus {
-        lock.withLock { overrides[model.id] ?? defaultStatus }
+        condition.lock()
+        guard model.id == blockedModelID, !hasStartedFirstLookup else {
+            condition.unlock()
+            return .notInstalled
+        }
+        hasStartedFirstLookup = true
+        condition.broadcast()
+        while !mayFinishFirstLookup {
+            condition.wait()
+        }
+        condition.unlock()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            DispatchQueue.main.async { [self] in
+                self.markStaleDeliveryDrained()
+            }
+        }
+        return .ready
     }
 
-    func set(_ status: LocalAIInstallStatus, for model: LocalAIModel) {
-        lock.withLock { overrides[model.id] = status }
+    func waitUntilFirstLookupStarts() {
+        condition.lock()
+        defer { condition.unlock() }
+        let deadline = Date().addingTimeInterval(5)
+        while !hasStartedFirstLookup {
+            precondition(
+                condition.wait(until: deadline),
+                "first status lookup did not enter the controlled overlap"
+            )
+        }
+    }
+
+    func releaseFirstLookup() {
+        condition.lock()
+        guard !mayFinishFirstLookup else {
+            condition.unlock()
+            return
+        }
+        mayFinishFirstLookup = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func waitForStaleDeliveryToDrain() async {
+        if withConditionLock({ staleDeliveryDidDrain }) { return }
+        await withCheckedContinuation { continuation in
+            let shouldResume = withConditionLock { () -> Bool in
+                if staleDeliveryDidDrain { return true }
+                staleDeliveryWaiters.append(continuation)
+                return false
+            }
+            if shouldResume { continuation.resume() }
+        }
+    }
+
+    private func markStaleDeliveryDrained() {
+        let waiters = withConditionLock { () -> [CheckedContinuation<Void, Never>] in
+            staleDeliveryDidDrain = true
+            let waiters = staleDeliveryWaiters
+            staleDeliveryWaiters.removeAll()
+            return waiters
+        }
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func withConditionLock<Value>(_ body: () -> Value) -> Value {
+        condition.lock()
+        defer { condition.unlock() }
+        return body()
+    }
+}
+
+private final class LocalAIDeletionCallHarness: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calledModelIDs: [String] = []
+
+    var wasCalled: Bool {
+        lock.withLock { !calledModelIDs.isEmpty }
+    }
+
+    func record(model: LocalAIModel) {
+        lock.withLock { calledModelIDs.append(model.id) }
+    }
+}
+
+private final class LocalAIValueBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: Value
+
+    init(_ value: Value) {
+        storedValue = value
+    }
+
+    var value: Value {
+        lock.withLock { storedValue }
+    }
+
+    func set(_ value: Value) {
+        lock.withLock { storedValue = value }
     }
 }
 
@@ -434,7 +686,15 @@ private final class ControlledLocalAIInstallHarness: @unchecked Sendable {
         self.finalStatus = finalStatus
     }
 
-    func dependencies() -> AppStateLocalAIDependencies {
+    func dependencies(
+        processingAvailability: @escaping () -> LocalAIProcessingAvailability = {
+            LocalAIProcessingAvailability(
+                isAppleSilicon: true,
+                runnerIsExecutable: true,
+                physicalMemory: 32 * 1024 * 1024 * 1024
+            )
+        }
+    ) -> AppStateLocalAIDependencies {
         AppStateLocalAIDependencies(
             makeServerManager: { LocalAIServerManager(store: LocalAIModelStore()) },
             idleShutdownSleep: { _ in try await Task.sleep(nanoseconds: UInt64.max) },
@@ -446,19 +706,21 @@ private final class ControlledLocalAIInstallHarness: @unchecked Sendable {
             progressSchedule: { _, operation in operation() },
             deleteModel: { _ in },
             deletePartialModel: { _ in },
-            processingAvailability: {
-                LocalAIProcessingAvailability(
-                    isAppleSilicon: true,
-                    runnerIsExecutable: true,
-                    physicalMemory: 32 * 1024 * 1024 * 1024
-                )
-            }
+            processingAvailability: processingAvailability
         )
     }
 
     func complete(model: LocalAIModel, with result: Result<Void, LocalAIInstallerError>) {
         let completion = lock.withLock { completions[model.id] }
         completion?(result)
+    }
+}
+
+private enum LocalAIWorkflowTestError: LocalizedError {
+    case deletionFailed
+
+    var errorDescription: String? {
+        "deletion failed"
     }
 }
 
