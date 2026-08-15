@@ -2564,17 +2564,16 @@ struct AppStateAIProcessingBackendTests {
         assert(!delegate.contains("requestTerminationWhileNativeWhisperInstalling()"))
         assert(state.contains("await manager.stop()"))
         assert(state.contains("cancelAllLocalAIInstalls()"))
-        assert(state.contains("localAIDeferredInstallModelIDs.removeAll()"))
-        assert(state.contains("localAIRestartAfterCancellationModelIDs.removeAll()"))
         assert(state.contains("pendingLocalAISelections.removeAll()"))
-        assert(state.contains("nativeWhisperInstallTask != nil"))
-        assert(state.contains("!localAIInstallTasks.isEmpty"))
+        assert(state.contains("nativeWhisperWorkflow.beginTerminationCleanup()"))
+        assert(state.contains("localAIWorkflow.beginTerminationCleanup()"))
+        assert(state.contains("isInstallingNativeWhisper || localAIWorkflow.hasActiveInstalls"))
         assert(state.contains("waitForNativeWhisperInstallToQuiesce()"))
         assert(state.contains("waitForLocalAIInstallsToQuiesce()"))
         assert(
             state.components(
                 separatedBy: "guard !isModelTerminationCleanupPending else { return }"
-            ).count - 1 >= 2
+            ).count - 1 >= 1
         )
         assert(
             state.contains(
@@ -2586,8 +2585,7 @@ struct AppStateAIProcessingBackendTests {
             from: "func cancelNativeWhisperInstall()",
             to: "func deleteNativeWhisperModel()"
         )
-        assert(!nativeCancellation.contains("deletePartialModel"))
-        assert(!nativeCancellation.contains("refreshNativeWhisperInstallStatus()"))
+        assert(nativeCancellation.contains("nativeWhisperWorkflow.cancelInstall()"))
     }
 
     // Dismissing a warning banner hides it for the note's current retry

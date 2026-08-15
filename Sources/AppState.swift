@@ -7785,6 +7785,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         cancelAllLocalAIInstalls()
         stopLocalAIIdleShutdownMonitoring()
         isModelTerminationCleanupPending = true
+        nativeWhisperWorkflow.beginTerminationCleanup()
+        localAIWorkflow.beginTerminationCleanup()
         let manager = localAIServerManager
         Task { [weak self] in
             guard let self else { return }
