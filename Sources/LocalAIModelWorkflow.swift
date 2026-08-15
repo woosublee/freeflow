@@ -28,7 +28,8 @@ private struct LocalAIModelDeletionOutcome: Sendable {
 final class LocalAIModelWorkflow: @unchecked Sendable {
     private let dependencies: AppStateLocalAIDependencies
     private let serverManager: LocalAIServerManager
-    var onEvent: ((LocalAIModelWorkflowEvent) -> Void)?
+    nonisolated(unsafe) var onEvent:
+        (@MainActor (LocalAIModelWorkflowEvent) -> Void)?
     private(set) var state = LocalAIModelWorkflowState()
 
     private var installTasks: [String: LocalAIInstallTask] = [:]
@@ -45,7 +46,7 @@ final class LocalAIModelWorkflow: @unchecked Sendable {
     private var idleShutdownTask: Task<Void, Never>?
     private var isTerminationCleanupPending = false
 
-    init(
+    nonisolated init(
         dependencies: AppStateLocalAIDependencies,
         serverManager: LocalAIServerManager
     ) {

@@ -354,19 +354,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     static var applicationTerminationReply: @MainActor (Bool) -> Void = {
         NSApp.reply(toApplicationShouldTerminate: $0)
     }
-    private final class WeakAppStateReference: @unchecked Sendable {
-        weak var value: AppState?
-
-        init(_ value: AppState) {
-            self.value = value
-        }
-    }
-
-    private struct LocalAIModelDeletionOutcome: Sendable {
-        let status: LocalAIInstallStatus
-        let errorDescription: String?
-    }
-
     private struct TranscriptionJob {
         let id: UUID
         let startedAt: Date
@@ -2173,23 +2160,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var activeTranscriptionJobs: [UUID: TranscriptionJob] = [:]
     private var pendingAudioImportJobIDs: Set<UUID> = []
     let localAIServerManager: LocalAIServerManager
+    private let localAIWorkflow: LocalAIModelWorkflow
     @Published private(set) var localAIInstallStates: [String: LocalAIModelInstallViewState] = [:]
     @Published private(set) var contextModelCapabilityWarning: String?
     @Published private var pendingLocalAISelections: [AIProcessingFeature: String] = [:]
-    private var localAIInstallTasks: [String: LocalAIInstallTask] = [:]
-    private var localAIProgressCoalescers:
-        [String: LatestValueProgressCoalescer<LocalAIDownloadProgress>] = [:]
-    private var localAIInstallTokens: [String: UUID] = [:]
-    private var localAICancellingModelIDs: Set<String> = []
-    private var localAIRestartAfterCancellationModelIDs: Set<String> = []
-    private var localAIDeferredInstallModelIDs: Set<String> = []
-    private var localAIDeletionRequestedModelIDs: Set<String> = []
-    private var localAIStatusRefreshGenerations: [String: Int] = [:]
-    private var localAIStatusRefreshPendingModelIDs: Set<String> = []
-    private var localAIStatusRefreshWaiters: [CheckedContinuation<Void, Never>] = []
-    private var localAIInstallQuiescenceWaiters: [CheckedContinuation<Void, Never>] = []
-    private var localAIIdleShutdownTask: Task<Void, Never>?
-    private var hasCompletedLocalAIStatusRefresh = false
 
     @Published var postProcessingBackendChoice: AIProcessingBackendChoice {
         didSet {
@@ -2867,6 +2841,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let shouldRestoreMutedAudio = UserDefaults.standard.bool(forKey: pendingMutedAudioRestoreStorageKey)
 
         self.localAIServerManager = localAIServerManager
+        let localAIWorkflow = LocalAIModelWorkflow(
+            dependencies: dependencies.localAI,
+            serverManager: localAIServerManager
+        )
+        self.localAIWorkflow = localAIWorkflow
         self.contextService = Self.makeAppContextService(
             choice: contextBackendChoice,
             apiKey: apiKey,
@@ -2968,6 +2947,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.nativeWhisperWorkflow.onEvent = { [weak self] event in
             self?.applyNativeWhisperModelWorkflowEvent(event)
         }
+        self.localAIWorkflow.onEvent = { [weak self] event in
+            self?.applyLocalAIModelWorkflowEvent(event)
+        }
         if let cloudReconciliation {
             let cloudDependenciesFactory = dependencies
                 .makeRetryCloudTranscriptionDependencies
@@ -3066,122 +3048,39 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     deinit {
-        localAIIdleShutdownTask?.cancel()
         removeAudioDeviceObservers()
     }
 
     @MainActor
     func startLocalAIIdleShutdownMonitoring() {
-        guard localAIIdleShutdownTask == nil else { return }
-        let manager = localAIServerManager
-        let sleep = dependencies.localAI.idleShutdownSleep
-        localAIIdleShutdownTask = Task {
-            while !Task.isCancelled {
-                do {
-                    try await sleep(30_000_000_000)
-                } catch {
-                    return
-                }
-                guard !Task.isCancelled else { return }
-                await manager.shutdownIfIdle()
-            }
-        }
+        localAIWorkflow.startIdleShutdownMonitoring()
     }
 
     @MainActor
     func stopLocalAIIdleShutdownMonitoring() {
-        localAIIdleShutdownTask?.cancel()
-        localAIIdleShutdownTask = nil
+        localAIWorkflow.stopIdleShutdownMonitoring()
     }
 
     @MainActor
     func localAIInstallState(
         for model: LocalAIModel
     ) -> LocalAIModelInstallViewState {
-        localAIInstallStates[model.id]
-            ?? .initial(model: model, status: .notInstalled)
+        localAIWorkflow.installState(for: model)
     }
 
     @MainActor
     func refreshAllLocalAIInstallStates() {
-        hasCompletedLocalAIStatusRefresh = false
-        localAIStatusRefreshPendingModelIDs = Set(
-            LocalAIModelCatalog.all.map(\.id)
-        )
-        for model in LocalAIModelCatalog.all {
-            if localAIInstallStates[model.id] == nil {
-                localAIInstallStates[model.id] = .initial(
-                    model: model,
-                    status: .notInstalled
-                )
-            }
-            let generation = nextLocalAIStatusRefreshGeneration(for: model)
-            let statusProvider = dependencies.localAI.installStatus
-            let appStateReference = WeakAppStateReference(self)
-            Task.detached(priority: .utility) {
-                let status = statusProvider(model)
-                await MainActor.run {
-                    appStateReference.value?.applyLocalAIStatusRefresh(
-                        status,
-                        for: model,
-                        generation: generation
-                    )
-                }
-            }
-        }
+        localAIWorkflow.refreshAllInstallStates()
     }
 
     @MainActor
     func waitForLocalAIInstallStateRefresh() async {
-        guard !hasCompletedLocalAIStatusRefresh else { return }
-        await withCheckedContinuation { continuation in
-            localAIStatusRefreshWaiters.append(continuation)
-        }
+        await localAIWorkflow.waitForInitialStatusRefresh()
     }
 
     @MainActor
     func waitForLocalAIInstallsToQuiesce() async {
-        guard !localAIInstallTasks.isEmpty else { return }
-        await withCheckedContinuation { continuation in
-            localAIInstallQuiescenceWaiters.append(continuation)
-        }
-    }
-
-    @MainActor
-    private func resumeLocalAIInstallQuiescenceWaitersIfNeeded() {
-        guard localAIInstallTasks.isEmpty else { return }
-        let waiters = localAIInstallQuiescenceWaiters
-        localAIInstallQuiescenceWaiters.removeAll()
-        for waiter in waiters {
-            waiter.resume()
-        }
-    }
-
-    @MainActor
-    private func nextLocalAIStatusRefreshGeneration(
-        for model: LocalAIModel
-    ) -> Int {
-        let generation = localAIStatusRefreshGenerations[model.id, default: 0] + 1
-        localAIStatusRefreshGenerations[model.id] = generation
-        return generation
-    }
-
-    @MainActor
-    private func applyLocalAIStatusRefresh(
-        _ status: LocalAIInstallStatus,
-        for model: LocalAIModel,
-        generation: Int
-    ) {
-        guard localAIStatusRefreshGenerations[model.id] == generation,
-              localAIInstallTasks[model.id] == nil,
-              !localAIDeletionRequestedModelIDs.contains(model.id) else {
-            return
-        }
-        var state = localAIInstallState(for: model)
-        state.status = status
-        localAIInstallStates[model.id] = state
-        localAIStatusRefreshPendingModelIDs.remove(model.id)
-        finishLocalAIStatusRefreshIfReady()
+        await localAIWorkflow.waitForInstallsToQuiesce()
     }
 
     @MainActor
@@ -3208,48 +3107,43 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func finishLocalAIStatusRefreshIfReady() {
-        guard localAIStatusRefreshPendingModelIDs.isEmpty else { return }
-        hasCompletedLocalAIStatusRefresh = true
-        normalizeAIProcessingChoices()
-        initializeMeetingSummarySettingsIfNeeded()
-        resumeDeferredLocalAIRequests()
-        let waiters = localAIStatusRefreshWaiters
-        localAIStatusRefreshWaiters.removeAll()
-        for waiter in waiters {
-            waiter.resume()
-        }
-    }
-
-    @MainActor
-    private func completeLocalAIStatusOperation(
-        _ status: LocalAIInstallStatus,
-        for model: LocalAIModel
+    private func applyLocalAIModelWorkflowEvent(
+        _ event: LocalAIModelWorkflowEvent
     ) {
-        _ = nextLocalAIStatusRefreshGeneration(for: model)
-        let completedRefresh = localAIStatusRefreshPendingModelIDs.remove(model.id) != nil
-        var state = localAIInstallState(for: model)
-        state.status = status
-        localAIInstallStates[model.id] = state
-        if completedRefresh {
-            finishLocalAIStatusRefreshIfReady()
+        switch event {
+        case .stateChanged(let state):
+            localAIInstallStates = state.installStates
+
+        case .installOutcome(let model, let outcome):
+            switch outcome {
+            case .readyAndAvailable:
+                applyReadyLocalAIModelToWaitingFeatures(model)
+            case .succeededButUnavailable, .cancelled, .failed:
+                clearPendingLocalAISelections(forModelID: model.id)
+            }
+
+        case .deletionOutcome:
+            break
+
+        case .initialStatusRefreshCompleted(let deferredModelIDs):
+            normalizeAIProcessingChoices()
+            initializeMeetingSummarySettingsIfNeeded()
+            resumeDeferredLocalAIRequests(deferredModelIDs: deferredModelIDs)
         }
     }
 
     @MainActor
-    private func resumeDeferredLocalAIRequests() {
+    private func resumeDeferredLocalAIRequests(deferredModelIDs: Set<String>) {
         let pendingModelIDs = Set(pendingLocalAISelections.values)
         for modelID in pendingModelIDs {
             guard let model = LocalAIModelCatalog.model(id: modelID),
-                  !localAIDeletionRequestedModelIDs.contains(modelID) else {
+                  !localAIWorkflow.isDeletionRequested(modelID) else {
                 clearPendingLocalAISelections(forModelID: modelID)
                 continue
             }
             guard isLocalAIModelAvailable(model) else {
                 clearPendingLocalAISelections(forModelID: modelID)
-                var state = localAIInstallState(for: model)
-                state.issue = localAIModelUnavailableIssue(for: model)
-                localAIInstallStates[model.id] = state
+                localAIWorkflow.markUnavailable(model)
                 continue
             }
             if localAIInstallState(for: model).status == .ready {
@@ -3257,25 +3151,21 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         }
 
-        let requestedModelIDs = localAIDeferredInstallModelIDs
-        localAIDeferredInstallModelIDs.removeAll()
-        for modelID in requestedModelIDs {
+        for modelID in deferredModelIDs {
             guard let model = LocalAIModelCatalog.model(id: modelID),
-                  !localAIDeletionRequestedModelIDs.contains(modelID) else {
+                  !localAIWorkflow.isDeletionRequested(modelID) else {
                 clearPendingLocalAISelections(forModelID: modelID)
                 continue
             }
             guard isLocalAIModelAvailable(model) else {
                 clearPendingLocalAISelections(forModelID: modelID)
-                var state = localAIInstallState(for: model)
-                state.issue = localAIModelUnavailableIssue(for: model)
-                localAIInstallStates[model.id] = state
+                localAIWorkflow.markUnavailable(model)
                 continue
             }
             if localAIInstallState(for: model).status == .ready {
                 applyReadyLocalAIModelToWaitingFeatures(model)
             } else {
-                startLocalAIInstallIfPossible(model)
+                localAIWorkflow.startInstall(model)
             }
         }
     }
@@ -3479,10 +3369,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func isLocalAIModelAvailable(_ model: LocalAIModel) -> Bool {
-        guard LocalAIModelCatalog.model(id: model.id) == model else {
+        guard localAIWorkflow.canonicalModel(for: model) != nil else {
             return false
         }
-        return dependencies.localAI.processingAvailability().isModelSupported(model)
+        return localAIWorkflow.isModelAvailable(model)
     }
 
     @MainActor
@@ -3526,7 +3416,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case .cloud:
             return !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case .localAI(let modelID):
-            guard hasCompletedLocalAIStatusRefresh,
+            guard localAIWorkflow.state.hasCompletedInitialStatusRefresh,
                   let model = LocalAIModelCatalog.model(id: modelID),
                   isLocalAIModelAvailable(model) else {
                 return false
@@ -3567,7 +3457,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
 
         let availability = dependencies.localAI.processingAvailability()
-        if hasCompletedLocalAIStatusRefresh, availability.isSupported {
+        if localAIWorkflow.state.hasCompletedInitialStatusRefresh, availability.isSupported {
             let readyModels = availability.availableModels.filter {
                 $0.capabilities.supports(feature.modelFeature)
                     && (feature != .context || $0.capabilities.modalities.contains(.image))
@@ -3732,10 +3622,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case .localAI(let modelID):
             guard let model = LocalAIModelCatalog.model(id: modelID),
                   isLocalAIModelAvailable(model),
-                  !localAIDeletionRequestedModelIDs.contains(modelID) else {
+                  !localAIWorkflow.isDeletionRequested(modelID) else {
                 return
             }
-            guard hasCompletedLocalAIStatusRefresh else {
+            guard localAIWorkflow.state.hasCompletedInitialStatusRefresh else {
                 setPendingLocalAIModelID(modelID, for: feature)
                 return
             }
@@ -3753,10 +3643,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         _ model: LocalAIModel,
         autoSelectFor feature: AIProcessingFeature? = nil
     ) {
-        guard !isModelTerminationCleanupPending else { return }
-        guard let canonicalModel = canonicalLocalAIModel(model),
-              isLocalAIModelAvailable(canonicalModel),
-              !localAIDeletionRequestedModelIDs.contains(model.id) else {
+        guard !isModelTerminationCleanupPending,
+              let canonicalModel = localAIWorkflow.canonicalModel(for: model),
+              localAIWorkflow.isModelAvailable(canonicalModel),
+              !localAIWorkflow.isDeletionRequested(model.id) else {
             return
         }
         if let feature {
@@ -3768,167 +3658,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 updateContextModelCapabilityWarning(for: choice)
             }
         }
-        guard hasCompletedLocalAIStatusRefresh else {
-            localAIDeferredInstallModelIDs.insert(model.id)
-            return
-        }
-        if localAIInstallState(for: canonicalModel).status == .ready {
-            applyReadyLocalAIModelToWaitingFeatures(canonicalModel)
-            return
-        }
-        if localAICancellingModelIDs.contains(model.id) {
-            localAIRestartAfterCancellationModelIDs.insert(model.id)
-            return
-        }
-        startLocalAIInstallIfPossible(canonicalModel)
-    }
-
-    @MainActor
-    private func startLocalAIInstallIfPossible(_ model: LocalAIModel) {
-        guard !isModelTerminationCleanupPending else { return }
-        guard localAIInstallTasks[model.id] == nil,
-              !localAICancellingModelIDs.contains(model.id),
-              !localAIDeletionRequestedModelIDs.contains(model.id),
-              isLocalAIModelAvailable(model) else {
-            return
-        }
-
-        let token = UUID()
-        localAIInstallTokens[model.id] = token
-        _ = nextLocalAIStatusRefreshGeneration(for: model)
-        var state = localAIInstallState(for: model)
-        state.isInstalling = true
-        state.issue = nil
-        state.progress = LocalAIDownloadProgress(
-            downloadedBytes: 0,
-            totalBytes: model.approximateBytes
-        )
-        localAIInstallStates[model.id] = state
-
-        let progressCoalescer = LatestValueProgressCoalescer<LocalAIDownloadProgress>(
-            schedule: dependencies.localAI.progressSchedule
-        ) { [weak self] progress in
-            MainActor.assumeIsolated {
-                guard let self,
-                      self.localAIInstallTokens[model.id] == token,
-                      !self.localAICancellingModelIDs.contains(model.id),
-                      !self.localAIDeletionRequestedModelIDs.contains(model.id) else {
-                    return
-                }
-                var state = self.localAIInstallState(for: model)
-                state.progress = progress
-                self.localAIInstallStates[model.id] = state
-            }
-        }
-        localAIProgressCoalescers[model.id] = progressCoalescer
-
-        let statusProvider = dependencies.localAI.installStatus
-        let partialModelDelete = dependencies.localAI.deletePartialModel
-        let startInstall = dependencies.localAI.startInstall
-        localAIInstallTasks[model.id] = startInstall(
-            model,
-            { progress in
-                progressCoalescer.submit(progress)
-            },
-            { [weak self] result in
-                guard let appState = self else { return }
-                Task.detached(priority: .utility) {
-                    let cleanupErrorDescription: String? = {
-                        guard case .failure(.cancelled) = result else {
-                            return nil
-                        }
-                        do {
-                            try partialModelDelete(model)
-                            return nil
-                        } catch {
-                            return error.localizedDescription
-                        }
-                    }()
-                    let status = statusProvider(model)
-                    await MainActor.run {
-                        appState.finishLocalAIInstall(
-                            model: model,
-                            token: token,
-                            result: result,
-                            status: status,
-                            cleanupErrorDescription: cleanupErrorDescription
-                        )
-                    }
-                }
-            }
-        )
-    }
-
-    @MainActor
-    private func finishLocalAIInstall(
-        model: LocalAIModel,
-        token: UUID,
-        result: Result<Void, LocalAIInstallerError>,
-        status: LocalAIInstallStatus,
-        cleanupErrorDescription: String?
-    ) {
-        guard localAIInstallTokens[model.id] == token,
-              localAIInstallTasks.removeValue(forKey: model.id) != nil else {
-            return
-        }
-        localAIProgressCoalescers.removeValue(forKey: model.id)?.invalidate()
-        defer { resumeLocalAIInstallQuiescenceWaitersIfNeeded() }
-        localAIInstallTokens.removeValue(forKey: model.id)
-        let wasCancelling = localAICancellingModelIDs.remove(model.id) != nil
-        let shouldDelete = localAIDeletionRequestedModelIDs.contains(model.id)
-        let shouldRestart = localAIRestartAfterCancellationModelIDs.remove(model.id) != nil
-
-        var state = localAIInstallState(for: model)
-        state.isInstalling = false
-        state.status = status
-        localAIInstallStates[model.id] = state
-        if let cleanupErrorDescription {
-            state.issue = localAIModelUnavailableIssue(for: model)
-            print("Local AI partial cleanup failed: \(cleanupErrorDescription)")
-        } else if shouldDelete {
-            state.issue = nil
-        } else if wasCancelling {
-            state.issue = nil
-        } else {
-            switch result {
-            case .success
-                where status == .ready
-                    && isLocalAIModelAvailable(model):
-                state.issue = nil
-                applyReadyLocalAIModelToWaitingFeatures(model)
-            case .success:
-                clearPendingLocalAISelections(forModelID: model.id)
-                state.issue = localAIModelUnavailableIssue(for: model)
-            case .failure(.cancelled):
-                clearPendingLocalAISelections(forModelID: model.id)
-                state.issue = nil
-            case .failure(let error):
-                clearPendingLocalAISelections(forModelID: model.id)
-                state.issue = localAIModelUnavailableIssue(for: model)
-                print("Local AI install failed: \(error.localizedDescription)")
-            }
-        }
-        localAIInstallStates[model.id] = state
-        completeLocalAIStatusOperation(status, for: model)
-
-        if shouldDelete {
-            beginLocalAIModelDeletion(model)
-            return
-        }
-        guard wasCancelling, shouldRestart else { return }
-        guard cleanupErrorDescription == nil,
-              isLocalAIModelAvailable(model) else {
-            clearPendingLocalAISelections(forModelID: model.id)
-            var unavailableState = localAIInstallState(for: model)
-            unavailableState.issue = localAIModelUnavailableIssue(for: model)
-            localAIInstallStates[model.id] = unavailableState
-            return
-        }
-        if status == .ready {
-            applyReadyLocalAIModelToWaitingFeatures(model)
-        } else {
-            startLocalAIInstallIfPossible(model)
-        }
+        localAIWorkflow.startInstall(canonicalModel)
     }
 
     @MainActor
@@ -3936,9 +3666,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard isLocalAIModelAvailable(model),
               localAIInstallState(for: model).status == .ready else {
             clearPendingLocalAISelections(forModelID: model.id)
-            var state = localAIInstallState(for: model)
-            state.issue = localAIModelUnavailableIssue(for: model)
-            localAIInstallStates[model.id] = state
+            localAIWorkflow.markUnavailable(model)
             return
         }
         let choice = AIProcessingBackendChoice.localAI(modelID: model.id)
@@ -3956,29 +3684,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func canonicalLocalAIModel(_ model: LocalAIModel) -> LocalAIModel? {
-        guard let canonical = LocalAIModelCatalog.model(id: model.id),
-              canonical == model else {
-            return nil
-        }
-        return canonical
-    }
-
-    @MainActor
-    private func localAIModelUnavailableIssue(
-        for model: LocalAIModel
-    ) -> QuillUserIssueRecord {
-        QuillUserIssueRecord(
-            code: .localAIModelUnavailable,
-            severity: .error,
-            context: QuillUserIssueContext(
-                modelID: model.id,
-                localBackend: "Local AI"
-            )
-        )
-    }
-
-    @MainActor
     func cancelPendingLocalAISelection(
         for feature: AIProcessingFeature
     ) {
@@ -3987,22 +3692,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func cancelLocalAIInstall(_ model: LocalAIModel) {
-        guard let canonicalModel = canonicalLocalAIModel(model),
-              let task = localAIInstallTasks[canonicalModel.id] else {
-            return
-        }
-        localAIProgressCoalescers.removeValue(forKey: canonicalModel.id)?.invalidate()
-        localAICancellingModelIDs.insert(canonicalModel.id)
-        localAIRestartAfterCancellationModelIDs.remove(canonicalModel.id)
-        clearPendingLocalAISelections(forModelID: canonicalModel.id)
-        task.cancel()
-        var state = localAIInstallState(for: canonicalModel)
-        state.progress = LocalAIDownloadProgress(
-            downloadedBytes: state.progress.downloadedBytes,
-            totalBytes: state.progress.totalBytes,
-            isCancelled: true
-        )
-        localAIInstallStates[canonicalModel.id] = state
+        guard localAIWorkflow.cancelInstall(model) else { return }
+        clearPendingLocalAISelections(forModelID: model.id)
     }
 
     @MainActor
@@ -4042,7 +3733,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func normalizeAIProcessingChoices() {
-        guard hasCompletedLocalAIStatusRefresh else { return }
+        guard localAIWorkflow.state.hasCompletedInitialStatusRefresh else { return }
         for feature in AIProcessingFeature.allCases {
             let current = currentAIProcessingChoice(for: feature)
             guard isAIProcessingChoiceCompatible(current, for: feature) else {
@@ -4077,93 +3768,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func deleteLocalAIModel(_ model: LocalAIModel) {
-        guard let canonicalModel = canonicalLocalAIModel(model),
-              !localAIDeletionRequestedModelIDs.contains(canonicalModel.id) else {
-            return
-        }
-        localAIDeletionRequestedModelIDs.insert(canonicalModel.id)
-        localAIDeferredInstallModelIDs.remove(canonicalModel.id)
-        localAIRestartAfterCancellationModelIDs.remove(canonicalModel.id)
-        clearPendingLocalAISelections(forModelID: canonicalModel.id)
-
-        if let task = localAIInstallTasks[canonicalModel.id] {
-            localAICancellingModelIDs.insert(canonicalModel.id)
-            task.cancel()
-            var state = localAIInstallState(for: canonicalModel)
-            state.progress = LocalAIDownloadProgress(
-                downloadedBytes: state.progress.downloadedBytes,
-                totalBytes: state.progress.totalBytes,
-                isCancelled: true
-            )
-            localAIInstallStates[canonicalModel.id] = state
-            return
-        }
-        beginLocalAIModelDeletion(canonicalModel)
-    }
-
-    @MainActor
-    private func beginLocalAIModelDeletion(_ model: LocalAIModel) {
-        guard localAIDeletionRequestedModelIDs.contains(model.id),
-              localAIInstallTasks[model.id] == nil else {
-            return
-        }
-        hasCompletedLocalAIStatusRefresh = false
-        localAIStatusRefreshPendingModelIDs.insert(model.id)
-        _ = nextLocalAIStatusRefreshGeneration(for: model)
-        let manager = localAIServerManager
-        let modelDelete = dependencies.localAI.deleteModel
-        let statusProvider = dependencies.localAI.installStatus
-        Task { [weak self] in
-            let outcome: LocalAIModelDeletionOutcome
-            do {
-                outcome = try await manager.withExclusiveMaintenance {
-                    do {
-                        try modelDelete(model)
-                        return LocalAIModelDeletionOutcome(
-                            status: statusProvider(model),
-                            errorDescription: nil
-                        )
-                    } catch {
-                        return LocalAIModelDeletionOutcome(
-                            status: statusProvider(model),
-                            errorDescription: error.localizedDescription
-                        )
-                    }
-                }
-            } catch {
-                guard let self else { return }
-                outcome = LocalAIModelDeletionOutcome(
-                    status: self.localAIInstallState(for: model).status,
-                    errorDescription: error.localizedDescription
-                )
-            }
-            guard let self else { return }
-            self.finishLocalAIModelDeletion(model, outcome: outcome)
-        }
-    }
-
-    @MainActor
-    private func finishLocalAIModelDeletion(
-        _ model: LocalAIModel,
-        outcome: LocalAIModelDeletionOutcome
-    ) {
-        guard localAIDeletionRequestedModelIDs.remove(model.id) != nil else {
-            return
-        }
-        if let errorDescription = outcome.errorDescription {
-            var state = localAIInstallState(for: model)
-            state.isInstalling = false
-            state.status = outcome.status
-            state.issue = localAIModelUnavailableIssue(for: model)
-            localAIInstallStates[model.id] = state
-            print("Local AI model deletion failed: \(errorDescription)")
-        } else {
-            localAIInstallStates[model.id] = .initial(
-                model: model,
-                status: outcome.status
-            )
-        }
-        completeLocalAIStatusOperation(outcome.status, for: model)
+        guard localAIWorkflow.deleteModel(model) else { return }
+        clearPendingLocalAISelections(forModelID: model.id)
     }
 
     private func removeAudioDeviceObservers() {
@@ -8139,7 +7745,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private var hasActiveModelDownload: Bool {
-        isInstallingNativeWhisper || !localAIInstallTasks.isEmpty
+        isInstallingNativeWhisper || localAIWorkflow.hasActiveInstalls
     }
 
     @MainActor
@@ -8150,11 +7756,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func cancelAllLocalAIInstalls() {
-        localAIDeferredInstallModelIDs.removeAll()
-        localAIRestartAfterCancellationModelIDs.removeAll()
         pendingLocalAISelections.removeAll()
-        let activeModelIDs = Set(localAIInstallTasks.keys)
-        for model in LocalAIModelCatalog.all where activeModelIDs.contains(model.id) {
+        for model in LocalAIModelCatalog.all {
             cancelLocalAIInstall(model)
         }
     }
