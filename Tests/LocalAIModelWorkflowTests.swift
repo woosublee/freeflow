@@ -112,6 +112,8 @@ struct LocalAIModelWorkflowTests {
             serverManager: LocalAIServerManager(store: LocalAIModelStore())
         )
         workflow.markInitialRefreshCompletedForTesting()
+        var events: [LocalAIModelWorkflowEvent] = []
+        workflow.onEvent = { events.append($0) }
 
         workflow.startInstall(model)
         try expect(workflow.cancelInstall(model), "cancel reports it found an active task")
@@ -123,6 +125,13 @@ struct LocalAIModelWorkflowTests {
         try expect(!workflow.installState(for: model).isInstalling, "isInstalling cleared after cancellation")
         try expect(workflow.installState(for: model).issue == nil, "issue cleared after cancellation")
         try expect(workflow.installState(for: model).progress.isCancelled, "progress still marked cancelled after completion")
+        try expect(
+            !events.contains {
+                if case .installOutcome(_, .cancelled) = $0 { return true }
+                return false
+            },
+            "tracked cancellation completion does not emit an installOutcome(.cancelled) event"
+        )
     }
 
     @MainActor
