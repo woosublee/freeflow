@@ -120,7 +120,7 @@ Functions that stay (feature-selection glue, settings interaction — not lifecy
 
 ### External call sites that must keep their exact name/signature on `AppState`
 
-```
+```text
 Sources/SetupView.swift:106      appState.refreshNativeWhisperInstallStatus()
 Sources/SettingsView.swift:4933  appState.installNativeWhisperModel()
 Sources/SettingsView.swift:4960  appState.cancelNativeWhisperInstall()
@@ -222,22 +222,30 @@ enum LocalAIModelWorkflowEvent {
     case stateChanged(LocalAIModelWorkflowState)
     case installOutcome(LocalAIModel, LocalAIModelWorkflowInstallOutcome)
     case deletionOutcome(LocalAIModel, errorDescription: String?)
-    case initialStatusRefreshCompleted
+    case initialStatusRefreshCompleted(deferredModelIDs: Set<String>)
 }
 
 @MainActor
-final class LocalAIModelWorkflow {
-    var onEvent: ((LocalAIModelWorkflowEvent) -> Void)?
+final class LocalAIModelWorkflow: @unchecked Sendable {
+    nonisolated(unsafe) var onEvent:
+        (@MainActor (LocalAIModelWorkflowEvent) -> Void)?
     private(set) var state: LocalAIModelWorkflowState
+    var hasActiveInstalls: Bool
 
+    func beginTerminationCleanup()
     func installState(for model: LocalAIModel) -> LocalAIModelInstallViewState
     func isModelAvailable(_ model: LocalAIModel) -> Bool
     func canonicalModel(for model: LocalAIModel) -> LocalAIModel?
+    func isDeletionRequested(_ modelID: String) -> Bool
+    @discardableResult
+    func markUnavailable(_ model: LocalAIModel) -> QuillUserIssueRecord
     func refreshAllInstallStates()
     func waitForInitialStatusRefresh() async
     func startInstall(_ model: LocalAIModel)
-    func cancelInstall(_ model: LocalAIModel)
-    func deleteModel(_ model: LocalAIModel)
+    @discardableResult
+    func cancelInstall(_ model: LocalAIModel) -> Bool
+    @discardableResult
+    func deleteModel(_ model: LocalAIModel) -> Bool
     func waitForInstallsToQuiesce() async
     func startIdleShutdownMonitoring()
     func stopIdleShutdownMonitoring()
@@ -266,7 +274,7 @@ wired with `onEvent` closures in `init` (before any code path that could fire an
 `SettingsView` → `appState.installNativeWhisperModel()` → AppState records `pendingNativeWhisperAutoSelectionModelID` → `nativeWhisperWorkflow.startInstall()` → workflow manages `Task`, emits `.stateChanged` during progress → on completion, workflow emits `.installCompleted(.succeeded)` → AppState's handler checks `pendingNativeWhisperAutoSelectionModelID`, calls `setNoteBrowserTranscriptionChoice(...)`, clears the pending ID.
 
 **Local AI install requested for a feature, status refresh not yet complete:**
-`LocalAIModelRowView` → `appState.installLocalAIModel(model, autoSelectFor: .postProcessing)` → AppState checks `localAIWorkflow.canonicalModel(for:)`/`isModelAvailable(for:)`, records `pendingLocalAISelections[.postProcessing] = model.id` → calls `localAIWorkflow.startInstall(model)` → workflow internally queues the model (deferred, since its own initial refresh isn't done) and no-ops for now → later, workflow's own initial catalog refresh completes → workflow replays the deferred install internally → workflow emits `.initialStatusRefreshCompleted` → AppState's handler calls `normalizeAIProcessingChoices()`, `initializeMeetingSummarySettingsIfNeeded()`, and `resumeDeferredLocalAIRequests()` (now only iterating `pendingLocalAISelections`) → the install proceeds through the workflow's normal `startInstall` path → on success, workflow emits `.installOutcome(model, .readyAndAvailable)` → AppState's handler calls its (retained) `applyReadyLocalAIModelToWaitingFeatures(model)`, which queries `localAIWorkflow.installState(for:)`/`isModelAvailable(for:)` and applies the choice for each waiting feature.
+`LocalAIModelRowView` → `appState.installLocalAIModel(model, autoSelectFor: .postProcessing)` → AppState checks `localAIWorkflow.canonicalModel(for:)`/`isModelAvailable(for:)`, records `pendingLocalAISelections[.postProcessing] = model.id` → calls `localAIWorkflow.startInstall(model)` → workflow internally queues the model (deferred, since its own initial refresh isn't done) and no-ops for now → later, workflow's own initial catalog refresh completes → workflow emits `.initialStatusRefreshCompleted(deferredModelIDs:)` → AppState's handler calls `normalizeAIProcessingChoices()`, `initializeMeetingSummarySettingsIfNeeded()`, and `resumeDeferredLocalAIRequests(deferredModelIDs:)` → AppState reapplies ready pending choices and explicitly restarts each deferred non-ready model through `localAIWorkflow.startInstall(_:)` → on success, workflow emits `.installOutcome(model, .readyAndAvailable)` → AppState's handler calls its retained `applyReadyLocalAIModelToWaitingFeatures(model)`, which queries `localAIWorkflow.installState(for:)`/`isModelAvailable(_:)` and applies the choice for each waiting feature.
 
 **App termination:**
 `requestTerminationAfterModelCleanup` → `nativeWhisperWorkflow.cancelInstall()` (if installing) → `localAIWorkflow.cancelInstall(model)` for each active model → `localAIWorkflow.stopIdleShutdownMonitoring()` → `await nativeWhisperWorkflow.waitUntilQuiesced()` → `await localAIWorkflow.waitForInstallsToQuiesce()` → `await localAIServerManager.stop()` → reply to termination. Unchanged in shape from today; only the receiver of each call changes.

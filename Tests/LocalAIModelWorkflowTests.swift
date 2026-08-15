@@ -15,7 +15,7 @@ struct LocalAIModelWorkflowTests {
         try await testFailedInstallEmitsFailedOutcomeWithIssue()
         try await testCancelInstallClearsInstallingStateWithoutEmittingOutcome()
         try await testCancelThenRestartResumesAfterCancellationCompletes()
-        try await testDeleteModelDuringInstallCancelsFirst()
+        try testDeleteModelDuringInstallCancelsFirst()
         try await testDeleteModelWhenIdleGoesStraightToDeletion()
         try await testDeleteFailurePreservesReadyStatusAndSetsIssue()
         try await testRefreshAllInstallStatesCompletesAndEmitsDeferredIDs()
@@ -287,7 +287,7 @@ struct LocalAIModelWorkflowTests {
     }
 
     @MainActor
-    private static func testDeleteModelDuringInstallCancelsFirst() async throws {
+    private static func testDeleteModelDuringInstallCancelsFirst() throws {
         let model = LocalAIModelCatalog.quality
         let harness = ControlledLocalAIInstallHarness(finalStatus: .notInstalled)
         let workflow = LocalAIModelWorkflow(
@@ -576,14 +576,14 @@ struct LocalAIModelWorkflowTests {
     @MainActor
     private static func testTerminationCleanupBlocksNewInstalls() throws {
         let model = LocalAIModelCatalog.quality
-        var startCount = 0
+        let startCalls = LocalAICallCounter()
         let workflow = LocalAIModelWorkflow(
             dependencies: AppStateLocalAIDependencies(
                 makeServerManager: { LocalAIServerManager(store: LocalAIModelStore()) },
                 idleShutdownSleep: { _ in try await Task.sleep(nanoseconds: UInt64.max) },
                 installStatus: { _ in .notInstalled },
                 startInstall: { _, _, completion in
-                    startCount += 1
+                    startCalls.increment()
                     completion(.failure(.alreadyInProgress))
                     return LocalAIInstallTask()
                 },
@@ -603,7 +603,11 @@ struct LocalAIModelWorkflowTests {
         workflow.markInitialRefreshCompletedForTesting()
         workflow.beginTerminationCleanup()
         workflow.startInstall(model)
-        try expectEqual(startCount, 0, "no install starts after termination cleanup begins")
+        try expectEqual(
+            startCalls.value,
+            0,
+            "no install starts after termination cleanup begins"
+        )
     }
 }
 

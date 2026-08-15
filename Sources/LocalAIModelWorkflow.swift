@@ -28,6 +28,10 @@ private struct LocalAIModelDeletionOutcome: Sendable {
 final class LocalAIModelWorkflow: @unchecked Sendable {
     private let dependencies: AppStateLocalAIDependencies
     private let serverManager: LocalAIServerManager
+
+    // AppState.init is nonisolated, so production assigns this callback during
+    // construction before workflow activity. Callback delivery remains
+    // MainActor-isolated.
     nonisolated(unsafe) var onEvent:
         (@MainActor (LocalAIModelWorkflowEvent) -> Void)?
     var onStatusRefreshDeliveryForTesting:

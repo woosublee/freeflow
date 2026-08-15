@@ -36,6 +36,10 @@ enum NativeWhisperModelWorkflowEvent {
 final class NativeWhisperModelWorkflow: @unchecked Sendable {
     private let dependencies: AppStateNativeWhisperDependencies
     private let model: NativeWhisperModel
+
+    // AppState.init is nonisolated, so it reads this immutable snapshot and
+    // assigns the callback before workflow activity. Callback delivery remains
+    // MainActor-isolated.
     nonisolated let initialState: NativeWhisperModelWorkflowState
     nonisolated(unsafe) var onEvent:
         (@MainActor (NativeWhisperModelWorkflowEvent) -> Void)?
@@ -97,6 +101,7 @@ final class NativeWhisperModelWorkflow: @unchecked Sendable {
     }
 
     func cancelInstall() {
+        guard installTask != nil else { return }
         cancellationMessage = nil
         progressCoalescer?.invalidate()
         progressCoalescer = nil

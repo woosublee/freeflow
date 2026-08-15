@@ -1284,11 +1284,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
     ) {
         switch event {
         case .stateChanged(let state):
-            nativeWhisperInstallStatus = state.installStatus
-            nativeWhisperInstallProgress = state.installProgress
-            isInstallingNativeWhisper = state.isInstalling
-            nativeWhisperInstallError = state.installError
-            nativeWhisperInstallIssue = state.installIssue
+            update(\AppState.nativeWhisperInstallStatus, to: state.installStatus)
+            update(\AppState.nativeWhisperInstallProgress, to: state.installProgress)
+            update(\AppState.isInstallingNativeWhisper, to: state.isInstalling)
+            update(\AppState.nativeWhisperInstallError, to: state.installError)
+            update(\AppState.nativeWhisperInstallIssue, to: state.installIssue)
 
         case .installCompleted(let outcome):
             scheduleNoteBrowserTranscriptionModeNormalizationForProviderConfiguration()
