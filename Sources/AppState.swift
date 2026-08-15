@@ -1009,16 +1009,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @Published private(set) var nativeWhisperInstallStatus: NativeWhisperInstallStatus
-    @Published private(set) var nativeWhisperInstallProgress = NativeWhisperDownloadProgress(downloadedBytes: 0, totalBytes: NativeWhisperModelCatalog.recommended.approximateBytes)
+    @Published private(set) var nativeWhisperInstallProgress: NativeWhisperDownloadProgress
     @Published private(set) var isInstallingNativeWhisper = false
     @Published private(set) var nativeWhisperInstallError: String?
     @Published private(set) var nativeWhisperInstallIssue: QuillUserIssueRecord?
     @Published private(set) var pendingNativeWhisperAutoSelectionModelID: String?
-    private var nativeWhisperInstallTask: NativeWhisperInstallTask?
-    private var nativeWhisperProgressCoalescer:
-        LatestValueProgressCoalescer<NativeWhisperDownloadProgress>?
-    private var nativeWhisperInstallQuiescenceWaiters: [CheckedContinuation<Void, Never>] = []
-    private var nativeWhisperInstallCancellationMessage: String?
 
     var willAutoSelectNativeWhisperWhenReady: Bool {
         pendingNativeWhisperAutoSelectionModelID != nil
@@ -1261,97 +1256,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     func refreshNativeWhisperInstallStatus() {
-        nativeWhisperInstallStatus = dependencies.nativeWhisper.installStatus(
-            .recommended
-        )
+        nativeWhisperWorkflow.refreshInstallStatus()
         scheduleNoteBrowserTranscriptionModeNormalizationForProviderConfiguration()
     }
 
     @MainActor
     func installNativeWhisperModel(autoSelectWhenReady: Bool = true) {
         guard !isModelTerminationCleanupPending else { return }
-        let model = NativeWhisperModelCatalog.recommended
         if autoSelectWhenReady {
-            pendingNativeWhisperAutoSelectionModelID = model.id
+            pendingNativeWhisperAutoSelectionModelID = NativeWhisperModelCatalog.recommended.id
         }
-        guard !isInstallingNativeWhisper else { return }
-        nativeWhisperInstallError = nil
-        nativeWhisperInstallIssue = nil
-        nativeWhisperInstallCancellationMessage = nil
-        isInstallingNativeWhisper = true
-        nativeWhisperInstallProgress = NativeWhisperDownloadProgress(downloadedBytes: 0, totalBytes: model.approximateBytes)
-        let progressCoalescer = LatestValueProgressCoalescer<NativeWhisperDownloadProgress>(
-            schedule: dependencies.nativeWhisper.progressSchedule
-        ) { [weak self] progress in
-            MainActor.assumeIsolated {
-                self?.nativeWhisperInstallProgress = progress
-            }
-        }
-        nativeWhisperProgressCoalescer = progressCoalescer
-        let startInstall = dependencies.nativeWhisper.startInstall
-        nativeWhisperInstallTask = startInstall(
-            model,
-            { progress in
-                progressCoalescer.submit(progress)
-            },
-            { [weak self] result in
-                DispatchQueue.main.async {
-                    self?.finishNativeWhisperInstall(model: model, result: result)
-                }
-            }
-        )
-    }
-
-    @MainActor
-    private func finishNativeWhisperInstall(
-        model: NativeWhisperModel,
-        result: Result<Void, NativeWhisperInstallerError>
-    ) {
-        nativeWhisperProgressCoalescer?.invalidate()
-        nativeWhisperProgressCoalescer = nil
-        nativeWhisperInstallTask = nil
-        defer { resumeNativeWhisperInstallQuiescenceWaitersIfNeeded() }
-        isInstallingNativeWhisper = false
-        refreshNativeWhisperInstallStatus()
-
-        switch result {
-        case .success:
-            if pendingNativeWhisperAutoSelectionModelID == model.id {
-                setNoteBrowserTranscriptionChoice(.nativeWhisper(modelID: model.id))
-            }
-            pendingNativeWhisperAutoSelectionModelID = nil
-        case .failure(.cancelled):
-            pendingNativeWhisperAutoSelectionModelID = nil
-            nativeWhisperInstallError = nativeWhisperInstallCancellationMessage
-            nativeWhisperInstallCancellationMessage = nil
-        case .failure:
-            pendingNativeWhisperAutoSelectionModelID = nil
-            nativeWhisperInstallIssue = QuillUserIssueRecord(
-                code: .localModelMissing,
-                context: QuillUserIssueContext(
-                    modelID: model.id,
-                    localBackend: "Native Whisper"
-                )
-            )
-        }
+        nativeWhisperWorkflow.startInstall()
     }
 
     @MainActor
     func waitForNativeWhisperInstallToQuiesce() async {
-        guard nativeWhisperInstallTask != nil else { return }
-        await withCheckedContinuation { continuation in
-            nativeWhisperInstallQuiescenceWaiters.append(continuation)
-        }
-    }
-
-    @MainActor
-    private func resumeNativeWhisperInstallQuiescenceWaitersIfNeeded() {
-        guard nativeWhisperInstallTask == nil else { return }
-        let waiters = nativeWhisperInstallQuiescenceWaiters
-        nativeWhisperInstallQuiescenceWaiters.removeAll()
-        for waiter in waiters {
-            waiter.resume()
-        }
+        await nativeWhisperWorkflow.waitUntilQuiesced()
     }
 
     @MainActor
@@ -1362,33 +1282,42 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @MainActor
     func cancelNativeWhisperInstall() {
         pendingNativeWhisperAutoSelectionModelID = nil
-        nativeWhisperInstallCancellationMessage = nil
-        nativeWhisperProgressCoalescer?.invalidate()
-        nativeWhisperProgressCoalescer = nil
-        nativeWhisperInstallTask?.cancel()
-        nativeWhisperInstallProgress = NativeWhisperDownloadProgress(
-            downloadedBytes: nativeWhisperInstallProgress.downloadedBytes,
-            totalBytes: nativeWhisperInstallProgress.totalBytes,
-            isCancelled: true
-        )
+        nativeWhisperWorkflow.cancelInstall()
     }
 
     @MainActor
     func deleteNativeWhisperModel() {
-        do {
-            try dependencies.nativeWhisper.deleteModel(.recommended)
-            nativeWhisperInstallError = nil
-            nativeWhisperInstallIssue = nil
-        } catch {
-            nativeWhisperInstallIssue = QuillUserIssueRecord(
-                code: .localModelMissing,
-                context: QuillUserIssueContext(
-                    modelID: NativeWhisperModelCatalog.recommended.id,
-                    localBackend: "Native Whisper"
-                )
-            )
+        nativeWhisperWorkflow.deleteModel()
+        scheduleNoteBrowserTranscriptionModeNormalizationForProviderConfiguration()
+    }
+
+    @MainActor
+    private func applyNativeWhisperModelWorkflowEvent(
+        _ event: NativeWhisperModelWorkflowEvent
+    ) {
+        switch event {
+        case .stateChanged(let state):
+            nativeWhisperInstallStatus = state.installStatus
+            nativeWhisperInstallProgress = state.installProgress
+            isInstallingNativeWhisper = state.isInstalling
+            nativeWhisperInstallError = state.installError
+            nativeWhisperInstallIssue = state.installIssue
+
+        case .installCompleted(let outcome):
+            scheduleNoteBrowserTranscriptionModeNormalizationForProviderConfiguration()
+            switch outcome {
+            case .succeeded:
+                if pendingNativeWhisperAutoSelectionModelID
+                    == NativeWhisperModelCatalog.recommended.id {
+                    setNoteBrowserTranscriptionChoice(
+                        .nativeWhisper(modelID: NativeWhisperModelCatalog.recommended.id)
+                    )
+                }
+                pendingNativeWhisperAutoSelectionModelID = nil
+            case .cancelled, .failed:
+                pendingNativeWhisperAutoSelectionModelID = nil
+            }
         }
-        refreshNativeWhisperInstallStatus()
     }
 
     @MainActor
@@ -2025,6 +1954,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published private(set) var meetingSummaryGeneratingNoteIDs: Set<UUID> = []
     private let meetingSummaryWorkflow: MeetingSummaryWorkflow
     private let transcriptionRetryWorkflow: TranscriptionRetryWorkflow
+    private let nativeWhisperWorkflow: NativeWhisperModelWorkflow
     @Published var debugStatusMessage = "Idle"
     @Published var debugShowsUpdateReminderAfterDictation = false
     @Published var lastRawTranscript = ""
@@ -2400,9 +2330,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     init(dependencies: AppStateDependencies = .live) {
         self.dependencies = dependencies
-        nativeWhisperInstallStatus = dependencies.nativeWhisper.installStatus(
-            .recommended
+        let nativeWhisperWorkflow = NativeWhisperModelWorkflow(
+            dependencies: dependencies.nativeWhisper
         )
+        self.nativeWhisperWorkflow = nativeWhisperWorkflow
+        nativeWhisperInstallStatus = nativeWhisperWorkflow.initialState.installStatus
+        nativeWhisperInstallProgress = nativeWhisperWorkflow.initialState.installProgress
         let storageLayout = dependencies.storageLayout
         let historyWorkflow = HistoryArchiveRecoveryWorkflow(
             storageLayout: storageLayout,
@@ -3031,6 +2964,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.precomputeMacros()
         transcriptionRetryWorkflow.onEvent = { [weak self] event in
             self?.applyTranscriptionRetryWorkflowEvent(event)
+        }
+        self.nativeWhisperWorkflow.onEvent = { [weak self] event in
+            self?.applyNativeWhisperModelWorkflowEvent(event)
         }
         if let cloudReconciliation {
             let cloudDependenciesFactory = dependencies
@@ -8203,7 +8139,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private var hasActiveModelDownload: Bool {
-        nativeWhisperInstallTask != nil || !localAIInstallTasks.isEmpty
+        isInstallingNativeWhisper || !localAIInstallTasks.isEmpty
     }
 
     @MainActor

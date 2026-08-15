@@ -36,7 +36,9 @@ enum NativeWhisperModelWorkflowEvent {
 final class NativeWhisperModelWorkflow: @unchecked Sendable {
     private let dependencies: AppStateNativeWhisperDependencies
     private let model: NativeWhisperModel
-    var onEvent: ((NativeWhisperModelWorkflowEvent) -> Void)?
+    nonisolated let initialState: NativeWhisperModelWorkflowState
+    nonisolated(unsafe) var onEvent:
+        (@MainActor (NativeWhisperModelWorkflowEvent) -> Void)?
     private(set) var state: NativeWhisperModelWorkflowState
 
     private var installTask: NativeWhisperInstallTask?
@@ -45,13 +47,16 @@ final class NativeWhisperModelWorkflow: @unchecked Sendable {
     private var cancellationMessage: String?
     private var isTerminationCleanupPending = false
 
-    init(
+    nonisolated init(
         dependencies: AppStateNativeWhisperDependencies,
         model: NativeWhisperModel = .recommended
     ) {
         self.dependencies = dependencies
         self.model = model
-        state = .initial(for: model)
+        var initialState = NativeWhisperModelWorkflowState.initial(for: model)
+        initialState.installStatus = dependencies.installStatus(model)
+        self.initialState = initialState
+        state = initialState
     }
 
     func refreshInstallStatus() {
