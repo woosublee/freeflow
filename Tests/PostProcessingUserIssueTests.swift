@@ -19,6 +19,7 @@ struct PostProcessingUserIssueTests {
         let cases: [(PostProcessingError, QuillUserIssueCode, QuillUserRecoveryAction)] = [
             (.requestFailed(statusCode: 401, providerCode: "invalid_api_key"), .authenticationFailed, .openProviderSettings),
             (.requestFailed(statusCode: 500, providerCode: nil), .postProcessingFailed, .retryTranscription),
+            (.requestFailed(statusCode: 413, providerCode: nil), .postProcessingPayloadTooLarge, .none),
             (.rateLimited(model: "provider/model", retryAfter: 10), .postProcessingRateLimited, .retryTranscription),
             (.invalidResponse("missing content"), .postProcessingFailed, .retryTranscription),
             (.emptyOutput, .postProcessingFailed, .retryTranscription),

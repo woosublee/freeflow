@@ -13,6 +13,8 @@ struct NoteTitleResolutionTests {
         testRecoveredRecordingTitlesNameAvailableSource()
         testStorageInterruptionReasonWinsRecoveredTitle()
         testAudioOnlyTitleUsesNormalPrecedence()
+        testSuggestedCalendarTitleHiddenWhenAlreadyEffectivelyApplied()
+        testSuggestedCalendarTitleShownWhenItWouldChangeTheTitle()
         print("NoteTitleResolutionTests passed")
     }
 
@@ -138,6 +140,30 @@ struct NoteTitleResolutionTests {
                 for: audioOnly.withCustomTitle("My recording")
             ) == "My recording"
         )
+    }
+
+    // Applying the suggestion would set the effective title to exactly what
+    // is already shown (the transcript-derived title happens to match), so
+    // the banner offering that suggestion must not appear.
+    private static func testSuggestedCalendarTitleHiddenWhenAlreadyEffectivelyApplied() {
+        let recordingStartedAt = Date(timeIntervalSince1970: 1)
+        let appliedTitle = NoteTitleResolver.calendarAppliedTitle(
+            suggestedTitle: "Team Standup",
+            recordingStartedAt: recordingStartedAt
+        )
+        let note = item(
+            transcript: appliedTitle,
+            calendarMatch: match(title: "Team Standup", titleState: .suggested)
+        )
+        assert(NoteTitleResolver.suggestedCalendarTitle(for: note) == nil)
+    }
+
+    private static func testSuggestedCalendarTitleShownWhenItWouldChangeTheTitle() {
+        let note = item(
+            transcript: "Unrelated transcript content",
+            calendarMatch: match(title: "Team Standup", titleState: .suggested)
+        )
+        assert(NoteTitleResolver.suggestedCalendarTitle(for: note) == "Team Standup")
     }
 
     private static func item(

@@ -59,6 +59,8 @@ enum PostProcessingError: LocalizedError {
                 return .requestTimedOut
             case 429:
                 return .postProcessingRateLimited
+            case 413:
+                return .postProcessingPayloadTooLarge
             default:
                 return .postProcessingFailed
             }

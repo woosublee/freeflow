@@ -50,6 +50,7 @@ struct QuillUserIssueTests {
             .postProcessingFailed,
             .postProcessingRateLimited,
             .postProcessingGuardFallback,
+            .postProcessingPayloadTooLarge,
             .localAIModelUnavailable,
             .localAIStartFailed,
             .localAIProcessExited,

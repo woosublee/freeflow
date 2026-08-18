@@ -1466,7 +1466,8 @@ private struct NoteDetailView: View {
         NoteBrowserActionState(
             hasStoredAudio: storedAudioURL != nil,
             transcript: displayContent,
-            retryAvailability: retryAvailability
+            retryAvailability: retryAvailability,
+            postProcessingEnabled: !appState.disablePostProcessing
         )
     }
     private var issuePresentation: QuillUserIssuePresentation? {
@@ -1492,11 +1493,7 @@ private struct NoteDetailView: View {
         return appState.isWarningBannerDismissed(noteID: item.id, code: warningBannerCode)
     }
     private var suggestedCalendarTitle: String? {
-        guard item.customTitle == nil,
-              item.calendarMatch?.titleState == .suggested else {
-            return nil
-        }
-        return item.calendarMatch?.suggestedTitle
+        NoteTitleResolver.suggestedCalendarTitle(for: item)
     }
 
     private var suggestedCalendarAppliedTitle: String? {
