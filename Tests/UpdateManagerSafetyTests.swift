@@ -113,7 +113,9 @@ struct UpdateManagerSafetyTests {
             $0.contains("UpdateManager.shared.startPeriodicChecks()")
         }.count
 
-        precondition(activeCallCount == 2, "Expected exactly 2 active periodic update check calls")
+        // Normal relaunch and finishing setup share one post-setup
+        // initializer, so this call now has a single active site.
+        precondition(activeCallCount == 1, "Expected exactly 1 active periodic update check call")
         precondition(
             !source.contains("Quill releases are not distributed through the in-app updater yet."),
             "Expected obsolete in-app updater disabled message to be removed"
