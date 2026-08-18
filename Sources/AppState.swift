@@ -10952,7 +10952,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     // error-severity issue was recorded while collecting it.
     private static func isUsableCapturedContext(_ context: AppContext) -> Bool {
         guard !isPlaceholderContextSummary(context.currentActivity) else { return false }
-        guard context.userIssueRecord?.severity != .error else { return false }
+        guard context.userIssueRecord == nil else { return false }
         return true
     }
 

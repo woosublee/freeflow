@@ -217,7 +217,13 @@ Return only two sentences, no labels, no markdown, no extra commentary.
             )
             contextPrompt = nil
             if backendExecutor.choice.isLocal {
-                userIssueRecord = nil
+                let issue = QuillUserIssueError.local(
+                    code: .localAIModelUnavailable,
+                    backend: "Local AI",
+                    modelID: backendExecutor.choice.modelID
+                )
+                issueSink(issue)
+                userIssueRecord = issue.record
             } else {
                 let issue = QuillUserIssueError.missingProviderAPIKey(
                     providerHost: URL(string: backendExecutor.cloudBaseURL)?.host,
@@ -309,10 +315,7 @@ Return only two sentences, no labels, no markdown, no extra commentary.
                 if let lastCloudError {
                     throw lastCloudError
                 }
-                if endpoint.kind == .local {
-                    throw AppContextBackendError.unusableResponse
-                }
-                return nil
+                throw AppContextBackendError.unusableResponse
             }
             guard !Task.isCancelled else {
                 return ContextInferenceOutcome(result: nil, userIssueRecord: nil)
