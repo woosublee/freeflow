@@ -9142,10 +9142,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    /// Await the realtime WebSocket's final transcript. If it errors out (or
-    /// was never started) fall back to the file-based POST so the user still
-    /// gets a transcript. Runs the realtime commit and file upload in that
-    /// strict order to avoid paying for both when realtime succeeds.
     private static let realtimeCommitTimeoutSeconds: TimeInterval = 10
 
     /// Race an async operation against a timeout. If the timeout wins, the
@@ -9171,6 +9167,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Await the realtime WebSocket's final transcript. If it errors out (or
+    /// was never started) fall back to the file-based POST so the user still
+    /// gets a transcript. Runs the realtime commit and file upload in that
+    /// strict order to avoid paying for both when realtime succeeds.
     private static func resolveRawTranscript(
         realtimeService: RealtimeTranscriptionService?,
         fileService: TranscriptionService,
