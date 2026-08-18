@@ -16916,6 +16916,54 @@
           }
         }
       }
+    },
+    "Transcript too long to clean up": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Transcript too long to clean up"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "정리하기엔 전사문이 너무 길어요"
+          }
+        }
+      }
+    },
+    "Quill kept the original transcript because it was too large for the selected provider to clean up in one request.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quill kept the original transcript because it was too large for the selected provider to clean up in one request."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "선택한 제공업체가 한 번에 정리할 수 없을 만큼 커서 Quill이 원본 전사문을 유지했습니다."
+          }
+        }
+      }
+    },
+    "Use the original transcript, or choose a different provider or model for cleanup.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use the original transcript, or choose a different provider or model for cleanup."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "원본 전사문을 사용하거나, 정리에 다른 제공업체나 모델을 선택해 보세요."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

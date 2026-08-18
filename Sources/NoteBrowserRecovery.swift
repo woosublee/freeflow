@@ -12,17 +12,20 @@ struct NoteBrowserActionState: Equatable {
     let hasStoredAudio: Bool
     let hasTranscriptText: Bool
     let retryAvailability: NoteBrowserRetryAvailability
+    let postProcessingEnabled: Bool
 
     init(
         hasStoredAudio: Bool,
         transcript: String,
-        retryAvailability: NoteBrowserRetryAvailability
+        retryAvailability: NoteBrowserRetryAvailability,
+        postProcessingEnabled: Bool = true
     ) {
         self.hasStoredAudio = hasStoredAudio
         self.hasTranscriptText = !transcript
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .isEmpty
         self.retryAvailability = retryAvailability
+        self.postProcessingEnabled = postProcessingEnabled
     }
 
     var showsRetryButton: Bool { hasStoredAudio }
@@ -31,6 +34,13 @@ struct NoteBrowserActionState: Equatable {
 }
 
 enum NoteBrowserRecoveryPresentation {
+    private static let postProcessingIssueCodes: Set<QuillUserIssueCode> = [
+        .postProcessingFailed,
+        .postProcessingRateLimited,
+        .postProcessingGuardFallback,
+        .postProcessingPayloadTooLarge
+    ]
+
     static func presentation(
         for record: QuillUserIssueRecord,
         actionState: NoteBrowserActionState,
@@ -38,6 +48,22 @@ enum NoteBrowserRecoveryPresentation {
         bundle: Bundle = .main
     ) -> QuillUserIssuePresentation {
         let original = record.presentation(language: language, bundle: bundle)
+
+        // A historical post-processing warning no longer matches the current
+        // configuration once post-processing is disabled: retrying will
+        // intentionally skip cleanup, so offering that action is misleading.
+        // Keep the warning informational instead of dropping it entirely.
+        if postProcessingIssueCodes.contains(record.code), !actionState.postProcessingEnabled {
+            return QuillUserIssuePresentation(
+                title: original.title,
+                body: original.body,
+                suggestion: original.suggestion,
+                compactMessage: original.compactMessage,
+                detailsRows: original.detailsRows,
+                recoveryAction: .none,
+                severity: original.severity
+            )
+        }
 
         // Local backend/model IDs are debugging detail, not something a
         // typical user acts on for a plain transcription-process failure.

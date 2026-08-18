@@ -13,6 +13,28 @@ enum NoteTitleResolver {
         "\(calendarTitleDateFormatter.string(from: recordingStartedAt)) \(suggestedTitle)"
     }
 
+    /// The calendar title to suggest applying, or nil when there is nothing
+    /// to suggest or applying it would not change the note's current
+    /// effective title. Returns both the raw suggestion and the value
+    /// Apply would set so callers don't recompute the applied form.
+    static func suggestedCalendarTitle(
+        for item: PipelineHistoryItem
+    ) -> (suggested: String, applied: String)? {
+        guard item.customTitle == nil,
+              item.calendarMatch?.titleState == .suggested,
+              let suggestedTitle = item.calendarMatch?.suggestedTitle else {
+            return nil
+        }
+        let appliedTitle = calendarAppliedTitle(
+            suggestedTitle: suggestedTitle,
+            recordingStartedAt: item.timestamp
+        )
+        guard displayTitle(for: item) != appliedTitle else {
+            return nil
+        }
+        return (suggested: suggestedTitle, applied: appliedTitle)
+    }
+
     static func displayTitle(
         for item: PipelineHistoryItem,
         isTranscribing: Bool = false,

@@ -1466,7 +1466,8 @@ private struct NoteDetailView: View {
         NoteBrowserActionState(
             hasStoredAudio: storedAudioURL != nil,
             transcript: displayContent,
-            retryAvailability: retryAvailability
+            retryAvailability: retryAvailability,
+            postProcessingEnabled: !appState.disablePostProcessing
         )
     }
     private var issuePresentation: QuillUserIssuePresentation? {
@@ -1491,20 +1492,8 @@ private struct NoteDetailView: View {
         guard let warningBannerCode else { return false }
         return appState.isWarningBannerDismissed(noteID: item.id, code: warningBannerCode)
     }
-    private var suggestedCalendarTitle: String? {
-        guard item.customTitle == nil,
-              item.calendarMatch?.titleState == .suggested else {
-            return nil
-        }
-        return item.calendarMatch?.suggestedTitle
-    }
-
-    private var suggestedCalendarAppliedTitle: String? {
-        guard let suggestedCalendarTitle else { return nil }
-        return NoteTitleResolver.calendarAppliedTitle(
-            suggestedTitle: suggestedCalendarTitle,
-            recordingStartedAt: item.timestamp
-        )
+    private var suggestedCalendarTitleInfo: (suggested: String, applied: String)? {
+        NoteTitleResolver.suggestedCalendarTitle(for: item)
     }
 
     var body: some View {
@@ -1622,7 +1611,7 @@ private struct NoteDetailView: View {
             }
             .overrideCursor(.iBeam)
 
-            if let suggestedCalendarTitle, let suggestedCalendarAppliedTitle {
+            if let suggestedCalendarTitleInfo {
                 HStack(spacing: 10) {
                     Image(systemName: "calendar")
                         .font(.system(size: 12, weight: .semibold))
@@ -1635,7 +1624,7 @@ private struct NoteDetailView: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                             .fixedSize()
-                        Text(suggestedCalendarTitle)
+                        Text(suggestedCalendarTitleInfo.suggested)
                             .font(.caption.weight(.medium))
                             .foregroundStyle(.primary)
                             .lineLimit(1)
@@ -1643,8 +1632,8 @@ private struct NoteDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     Button("Apply") {
-                        titleDraft = suggestedCalendarAppliedTitle
-                        appState.updateHistoryItemTitle(id: item.id, title: suggestedCalendarAppliedTitle)
+                        titleDraft = suggestedCalendarTitleInfo.applied
+                        appState.updateHistoryItemTitle(id: item.id, title: suggestedCalendarTitleInfo.applied)
                     }
                     .font(.caption.weight(.semibold))
                     .buttonStyle(.bordered)

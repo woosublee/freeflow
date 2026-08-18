@@ -23,6 +23,7 @@ enum QuillUserIssueCode: String, Codable, CaseIterable, Sendable {
     case postProcessingFailed = "post-processing-failed"
     case postProcessingRateLimited = "post-processing-rate-limited"
     case postProcessingGuardFallback = "post-processing-guard-fallback"
+    case postProcessingPayloadTooLarge = "post-processing-payload-too-large"
     case localAIModelUnavailable = "local-ai-model-unavailable"
     case localAIStartFailed = "local-ai-start-failed"
     case localAIProcessExited = "local-ai-process-exited"
@@ -275,9 +276,10 @@ struct QuillUserIssueRecord: Codable, Equatable, Sendable {
             return .openSpeechRecognitionSettings
         case .screenRecordingPermissionDenied:
             return .openScreenRecordingSettings
-        case .postProcessingGuardFallback, .contextUnavailable,
-             .meetingSummaryUnavailable, .meetingSummaryInvalidResponse,
-             .historyPersistenceUnavailable, .historyRecovered:
+        case .postProcessingGuardFallback, .postProcessingPayloadTooLarge,
+             .contextUnavailable, .meetingSummaryUnavailable,
+             .meetingSummaryInvalidResponse, .historyPersistenceUnavailable,
+             .historyRecovered:
             return .none
         case .networkUnavailable, .requestTimedOut, .rateLimited,
              .providerUnavailable, .audioFileTooLarge,
@@ -544,7 +546,8 @@ private extension QuillUserIssueCode {
     var defaultSeverity: QuillUserIssueSeverity {
         switch self {
         case .postProcessingFailed, .postProcessingRateLimited,
-             .postProcessingGuardFallback, .localAIModelUnavailable,
+             .postProcessingGuardFallback, .postProcessingPayloadTooLarge,
+             .localAIModelUnavailable,
              .localAIStartFailed, .localAIProcessExited,
              .contextUnavailable, .meetingSummaryUnavailable,
              .meetingSummaryInvalidResponse, .historyPersistenceUnavailable,
@@ -757,6 +760,12 @@ private extension QuillUserIssueCode {
                 titleKey: "Original transcript kept",
                 bodyKey: "Post-processing was not applied; the original transcript was kept.",
                 suggestionKey: "Review the original transcript before using it."
+            )
+        case .postProcessingPayloadTooLarge:
+            return QuillUserIssueCopy(
+                titleKey: "Transcript too long to clean up",
+                bodyKey: "Quill kept the original transcript because it was too large for the selected provider to clean up in one request.",
+                suggestionKey: "Use the original transcript, or choose a different provider or model for cleanup."
             )
         case .contextUnavailable:
             return QuillUserIssueCopy(

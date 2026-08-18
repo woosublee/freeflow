@@ -10,6 +10,9 @@ struct NoteBrowserRecoveryTests {
         testReadyMissingModelSwitchesToRetry()
         testMissingAudioKeepsGenericIssuePresentation()
         testLocalTranscriptionFailedHidesDebugDetails()
+        testPostProcessingDisabledHidesRetryGuidance()
+        testPostProcessingEnabledKeepsRetryGuidance()
+        testPostProcessingDisabledDoesNotAffectUnrelatedIssues()
         print("NoteBrowserRecoveryTests passed")
     }
 
@@ -170,5 +173,87 @@ struct NoteBrowserRecoveryTests {
         precondition(presentation.suggestion == original.suggestion)
         precondition(presentation.detailsRows.isEmpty)
         precondition(presentation.recoveryAction == original.recoveryAction)
+    }
+
+    // A historical post-processing warning must stop offering retry/cleanup
+    // guidance once the user has disabled post-processing, since retrying
+    // will intentionally skip cleanup. The warning stays informational.
+    private static func testPostProcessingDisabledHidesRetryGuidance() {
+        for code: QuillUserIssueCode in [
+            .postProcessingFailed,
+            .postProcessingRateLimited,
+            .postProcessingGuardFallback,
+            .postProcessingPayloadTooLarge
+        ] {
+            let record = QuillUserIssueRecord(code: code)
+            let original = record.presentation(language: "en")
+            let state = NoteBrowserActionState(
+                hasStoredAudio: true,
+                transcript: "kept transcript",
+                retryAvailability: .ready,
+                postProcessingEnabled: false
+            )
+            let presentation = NoteBrowserRecoveryPresentation.presentation(
+                for: record,
+                actionState: state,
+                language: "en",
+                bundle: .main
+            )
+
+            precondition(
+                presentation.recoveryAction == .none,
+                "\(code.rawValue) hides its action once post-processing is disabled"
+            )
+            precondition(
+                presentation.title == original.title,
+                "\(code.rawValue) keeps its informational title"
+            )
+            precondition(
+                presentation.body == original.body,
+                "\(code.rawValue) keeps its informational body"
+            )
+        }
+    }
+
+    private static func testPostProcessingEnabledKeepsRetryGuidance() {
+        let record = QuillUserIssueRecord(code: .postProcessingFailed)
+        let state = NoteBrowserActionState(
+            hasStoredAudio: true,
+            transcript: "",
+            retryAvailability: .ready,
+            postProcessingEnabled: true
+        )
+        let presentation = NoteBrowserRecoveryPresentation.presentation(
+            for: record,
+            actionState: state,
+            language: "en",
+            bundle: .main
+        )
+
+        precondition(
+            presentation.recoveryAction == .retryTranscription,
+            "retry guidance remains while post-processing is still enabled"
+        )
+    }
+
+    private static func testPostProcessingDisabledDoesNotAffectUnrelatedIssues() {
+        let record = QuillUserIssueRecord(code: .networkUnavailable)
+        let state = NoteBrowserActionState(
+            hasStoredAudio: true,
+            transcript: "",
+            retryAvailability: .ready,
+            postProcessingEnabled: false
+        )
+        let presentation = NoteBrowserRecoveryPresentation.presentation(
+            for: record,
+            actionState: state,
+            language: "en",
+            bundle: .main
+        )
+
+        precondition(
+            presentation.recoveryAction == .retryTranscription,
+            "disabling post-processing does not suppress unrelated recovery actions"
+        )
     }
 }
