@@ -15,8 +15,11 @@ enum NoteTitleResolver {
 
     /// The calendar title to suggest applying, or nil when there is nothing
     /// to suggest or applying it would not change the note's current
-    /// effective title.
-    static func suggestedCalendarTitle(for item: PipelineHistoryItem) -> String? {
+    /// effective title. Returns both the raw suggestion and the value
+    /// Apply would set so callers don't recompute the applied form.
+    static func suggestedCalendarTitle(
+        for item: PipelineHistoryItem
+    ) -> (suggested: String, applied: String)? {
         guard item.customTitle == nil,
               item.calendarMatch?.titleState == .suggested,
               let suggestedTitle = item.calendarMatch?.suggestedTitle else {
@@ -29,7 +32,7 @@ enum NoteTitleResolver {
         guard displayTitle(for: item) != appliedTitle else {
             return nil
         }
-        return suggestedTitle
+        return (suggested: suggestedTitle, applied: appliedTitle)
     }
 
     static func displayTitle(

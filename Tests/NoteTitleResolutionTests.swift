@@ -14,6 +14,7 @@ struct NoteTitleResolutionTests {
         testStorageInterruptionReasonWinsRecoveredTitle()
         testAudioOnlyTitleUsesNormalPrecedence()
         testSuggestedCalendarTitleHiddenWhenAlreadyEffectivelyApplied()
+        testSuggestedCalendarTitleHiddenWhenOnlyWhitespaceDiffers()
         testSuggestedCalendarTitleShownWhenItWouldChangeTheTitle()
         print("NoteTitleResolutionTests passed")
     }
@@ -158,12 +159,28 @@ struct NoteTitleResolutionTests {
         assert(NoteTitleResolver.suggestedCalendarTitle(for: note) == nil)
     }
 
+    // displayTitle(for:) trims the transcript-derived title, so a match that
+    // is only different by leading/trailing whitespace must still count as
+    // already applied and hide the banner.
+    private static func testSuggestedCalendarTitleHiddenWhenOnlyWhitespaceDiffers() {
+        let recordingStartedAt = Date(timeIntervalSince1970: 1)
+        let appliedTitle = NoteTitleResolver.calendarAppliedTitle(
+            suggestedTitle: "Team Standup",
+            recordingStartedAt: recordingStartedAt
+        )
+        let note = item(
+            transcript: "  \(appliedTitle)  ",
+            calendarMatch: match(title: "Team Standup", titleState: .suggested)
+        )
+        assert(NoteTitleResolver.suggestedCalendarTitle(for: note) == nil)
+    }
+
     private static func testSuggestedCalendarTitleShownWhenItWouldChangeTheTitle() {
         let note = item(
             transcript: "Unrelated transcript content",
             calendarMatch: match(title: "Team Standup", titleState: .suggested)
         )
-        assert(NoteTitleResolver.suggestedCalendarTitle(for: note) == "Team Standup")
+        assert(NoteTitleResolver.suggestedCalendarTitle(for: note)?.suggested == "Team Standup")
     }
 
     private static func item(
