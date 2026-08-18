@@ -13,6 +13,7 @@ struct SetupFlowTests {
         testNotificationActionTitles()
         try testSetupContainsExactlyFiveScrollableSteps()
         try testSetupWindowIsResizable()
+        try testSetupCompletionSharesPostSetupInitializationWithLaunch()
         try testNativeWhisperDownloadDoesNotLockProcessing()
         try testShortcutStepConfiguresHoldAndToggle()
         print("SetupFlowTests passed")
@@ -162,6 +163,55 @@ struct SetupFlowTests {
         assert(!setupWindow.contains("window.delegate = setupWindowDelegate"))
         assert(!source.contains("private final class SetupWindowDelegate"))
         assert(!source.contains("cancelNativeWhisperInstallForSetupClose()"))
+    }
+
+    // Finishing setup must start the same named services as a normal
+    // relaunch (MCP, hotkey monitoring, accessibility polling, update
+    // checks, Calendar scheduling and health checks, and an enabled Note
+    // Browser) instead of a narrower, hand-duplicated subset.
+    private static func testSetupCompletionSharesPostSetupInitializationWithLaunch() throws {
+        let source = try String(contentsOfFile: "Sources/AppDelegate.swift", encoding: .utf8)
+
+        let launchBody = sourceBlock(
+            in: source,
+            from: "func applicationDidFinishLaunching(",
+            to: "func applicationShouldTerminate("
+        )
+        assert(launchBody.contains("startPostSetupServices()"))
+        assert(!launchBody.contains("appState.startHotkeyMonitoring()"))
+        assert(!launchBody.contains("startMCPServer()"))
+
+        let completeSetupBody = sourceBlock(
+            in: source,
+            from: "func completeSetup()",
+            to: "private func startPostSetupServices("
+        )
+        assert(completeSetupBody.contains("startPostSetupServices()"))
+        assert(!completeSetupBody.contains("appState.startHotkeyMonitoring()"))
+        assert(!completeSetupBody.contains("appState.startCalendarRecordingReminderScheduling()"))
+
+        let sharedBody = sourceBlock(
+            in: source,
+            from: "private func startPostSetupServices()",
+            to: "private func startMCPServer("
+        )
+        assert(sharedBody.contains("updateActivationPolicy()"))
+        assert(sharedBody.contains("if appState.noteBrowserEnabled"))
+        assert(sharedBody.contains("showNoteBrowserWindow()"))
+        assert(sharedBody.contains("appState.startHotkeyMonitoring()"))
+        assert(sharedBody.contains("appState.startAccessibilityPolling()"))
+        assert(sharedBody.contains("UpdateManager.shared.startPeriodicChecks()"))
+        assert(sharedBody.contains("appState.promptForAccessibilityAccess()"))
+        assert(sharedBody.contains("startMCPServer()"))
+        assert(sharedBody.contains("appState.startCalendarRecordingReminderScheduling()"))
+        assert(sharedBody.contains("appState.startGoogleCalendarHealthCheck()"))
+
+        let mcpBody = sourceBlock(
+            in: source,
+            from: "private func startMCPServer() {",
+            to: "\n}"
+        )
+        assert(mcpBody.contains("guard mcpServer == nil else { return }"))
     }
 
     private static func testNativeWhisperDownloadDoesNotLockProcessing() throws {

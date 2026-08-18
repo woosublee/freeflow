@@ -94,24 +94,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if !appState.hasCompletedSetup {
             showSetupWindow()
         } else {
-            updateActivationPolicy()
-            // 노트 브라우저 활성화 시 앱 시작과 함께 자동 오픈
-            if appState.noteBrowserEnabled {
-                showNoteBrowserWindow()
-            }
-            appState.startHotkeyMonitoring()
-            appState.startAccessibilityPolling()
-            Task { @MainActor in
-                UpdateManager.shared.startPeriodicChecks()
-            }
-
-            if appState.requiresAccessibility, !AXIsProcessTrusted() {
-                appState.promptForAccessibilityAccess()
-            }
-
-            startMCPServer()
-            appState.startCalendarRecordingReminderScheduling()
-            appState.startGoogleCalendarHealthCheck()
+            startPostSetupServices()
         }
 
     }
@@ -319,23 +302,36 @@ private func showNoteBrowserWindow() {
         appState.hasCompletedSetup = true
         setupWindow?.close()
         setupWindow = nil
+        startPostSetupServices()
+    }
+
+    /// Every service a normal relaunch starts once setup is already
+    /// complete. Finishing the setup wizard must start the same set, so
+    /// this is the single shared entry point for both.
+    @MainActor
+    private func startPostSetupServices() {
         updateActivationPolicy()
+        // 노트 브라우저 활성화 시 앱 시작과 함께 자동 오픈
+        if appState.noteBrowserEnabled {
+            showNoteBrowserWindow()
+        }
         appState.startHotkeyMonitoring()
         appState.startAccessibilityPolling()
-        appState.startCalendarRecordingReminderScheduling()
-        appState.startGoogleCalendarHealthCheck()
         Task { @MainActor in
             UpdateManager.shared.startPeriodicChecks()
         }
 
         if appState.requiresAccessibility, !AXIsProcessTrusted() {
-            Task { @MainActor in
-                appState.promptForAccessibilityAccess()
-            }
+            appState.promptForAccessibilityAccess()
         }
+
+        startMCPServer()
+        appState.startCalendarRecordingReminderScheduling()
+        appState.startGoogleCalendarHealthCheck()
     }
 
     private func startMCPServer() {
+        guard mcpServer == nil else { return }
         let server = MCPServer(appState: appState)
         appState.onTranscriptionCompleted = { [weak server] transcript, context in
             server?.notifyRecordingCompleted(transcript: transcript, context: context)
