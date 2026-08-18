@@ -8,6 +8,7 @@ enum RealtimeTranscriptionError: LocalizedError {
     case notConnected
     case serverError(code: String, message: String)
     case closedBeforeFinal
+    case commitTimedOut
 
     var errorDescription: String? {
         switch self {
@@ -15,6 +16,7 @@ enum RealtimeTranscriptionError: LocalizedError {
         case .notConnected: return "Realtime transcription socket is not connected"
         case .serverError(let code, let message): return "Realtime server error [\(code)]: \(message)"
         case .closedBeforeFinal: return "Realtime socket closed before emitting the final transcript"
+        case .commitTimedOut: return "Realtime transcript commit did not complete in time"
         }
     }
 }

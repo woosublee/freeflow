@@ -9,6 +9,8 @@ struct TranscriptionServiceCloudChunkingTests {
             try await missingAPIKeyStopsBeforeCloudUpload()
             try await normalizedAPIKeyUsesTrimmedAuthorizationHeader()
             try realtimeMissingAPIKeyStopsBeforeWebSocketCreation()
+            try await realtimeCommitRaceTimesOutWithoutHanging()
+            try await realtimeCommitRaceReturnsResultBeforeTimeout()
             try await smallWAVUsesExistingSingleRequestPath()
             try await smallMP3UsesExistingSingleRequestPath()
             try await cloudVerboseJSONLanguageFlowsIntoResult()
@@ -119,6 +121,39 @@ struct TranscriptionServiceCloudChunkingTests {
             )
         }
         try expectEqual(creations.value, 0, "missing realtime WebSocket count")
+    }
+
+    // A Realtime server that keeps the socket open but never emits the final
+    // committed transcript must not hang the recording-stop flow forever.
+    // The race must finish close to its own timeout, not the operation's.
+    private static func realtimeCommitRaceTimesOutWithoutHanging() async throws {
+        let start = Date()
+        do {
+            _ = try await AppState.raceRealtimeCommitAgainstTimeout(
+                timeoutSeconds: 0.05
+            ) {
+                try await Task.sleep(for: .seconds(999))
+                return "never reached"
+            }
+            throw TestFailure("expected the commit race to time out")
+        } catch let error as RealtimeTranscriptionError {
+            guard case .commitTimedOut = error else {
+                throw TestFailure("expected commitTimedOut, got \(error)")
+            }
+        }
+        let elapsed = Date().timeIntervalSince(start)
+        guard elapsed < 5 else {
+            throw TestFailure("commit race took \(elapsed)s, expected it to time out near 0.05s")
+        }
+    }
+
+    private static func realtimeCommitRaceReturnsResultBeforeTimeout() async throws {
+        let text = try await AppState.raceRealtimeCommitAgainstTimeout(
+            timeoutSeconds: 5
+        ) {
+            "fast result"
+        }
+        try expectEqual(text, "fast result", "commit race result when it finishes first")
     }
 
     private static func smallWAVUsesExistingSingleRequestPath() async throws {
