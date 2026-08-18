@@ -785,11 +785,11 @@ struct MeetingSummaryAppStateTests {
             meetingSummaryJSON: try JSONEncoder().encode(envelope(completed: false))
         )
         let originalMetadata = try transcriptEditPreservedMetadata(item)
-        let store = PipelineHistoryStore(inMemory: true)
-        _ = try store.append(item, maxCount: 10)
         let directoryURL = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
         let layout = AppStateStorageLayout(rootDirectory: directoryURL)
+        let store = PipelineHistoryStore(storeURL: layout.historyStoreURL)
+        _ = try store.upsert(item, maxCount: 10, requiresDurableStore: true)
         let appState = await configuredPersistedAppState(
             store: store,
             storageLayout: layout
@@ -823,8 +823,9 @@ struct MeetingSummaryAppStateTests {
             "Transcript editing must preserve every non-edited history field"
         )
 
-        guard let persisted = store.loadAllHistory().first else {
-            throw MeetingSummaryAppStateTestFailure("Missing persisted note")
+        let reloaded = PipelineHistoryStore(storeURL: layout.historyStoreURL)
+        guard let persisted = reloaded.loadAllHistory().first else {
+            throw MeetingSummaryAppStateTestFailure("Missing reloaded persisted note")
         }
         precondition(
             persisted.postProcessedTranscript == "Edited transcript.",
