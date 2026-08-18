@@ -9142,6 +9142,31 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    private static let realtimeCommitTimeoutSeconds: TimeInterval = 10
+
+    /// Race an async operation against a timeout. If the timeout wins, the
+    /// operation is cancelled (so its own cancellation handler can clean up)
+    /// and `RealtimeTranscriptionError.commitTimedOut` is thrown.
+    static func raceRealtimeCommitAgainstTimeout(
+        timeoutSeconds: TimeInterval,
+        operation: @escaping @Sendable () async throws -> String
+    ) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(timeoutSeconds))
+                throw RealtimeTranscriptionError.commitTimedOut
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw RealtimeTranscriptionError.commitTimedOut
+            }
+            return result
+        }
+    }
+
     /// Await the realtime WebSocket's final transcript. If it errors out (or
     /// was never started) fall back to the file-based POST so the user still
     /// gets a transcript. Runs the realtime commit and file upload in that
@@ -9155,10 +9180,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
         if let realtimeService {
             do {
                 try Task.checkCancellation()
-                let text = try await withTaskCancellationHandler {
-                    try await realtimeService.commitAndAwaitFinal()
-                } onCancel: {
-                    realtimeService.cancel()
+                let text = try await Self.raceRealtimeCommitAgainstTimeout(
+                    timeoutSeconds: realtimeCommitTimeoutSeconds
+                ) {
+                    try await withTaskCancellationHandler {
+                        try await realtimeService.commitAndAwaitFinal()
+                    } onCancel: {
+                        realtimeService.cancel()
+                    }
                 }
                 return TranscriptionResult(
                     text: text,

@@ -14,6 +14,7 @@ struct AppStateUserIssueLifecycleSourceTests {
         try testPostProcessingFallbackPersistsWarningRecord(source)
         try testCorePreparationAndSaveFailuresUseSafePresentation(source)
         try testAudioInputSwitchFailureUsesSafePresentation(source)
+        try testResolveRawTranscriptBoundsRealtimeCommitWait(source)
         try testScopedFlowsDoNotPersistRawLocalizedDescriptions(source)
         print("AppStateUserIssueLifecycleSourceTests passed")
     }
@@ -185,6 +186,35 @@ struct AppStateUserIssueLifecycleSourceTests {
         try expect(
             !inputSwitchFailure.contains("formattedRecordingStartError"),
             "audio input switch failures do not use removed raw formatter"
+        )
+    }
+
+    // A Realtime server that accepts the commit but never emits the final
+    // transcript must not hang the stop flow forever: resolveRawTranscript
+    // must bound the wait and still fall back to file transcription.
+    private static func testResolveRawTranscriptBoundsRealtimeCommitWait(
+        _ source: String
+    ) throws {
+        let resolveBody = block(
+            source,
+            from: "private static func resolveRawTranscript(",
+            to: "private func resolveStoppedRecordingContext("
+        )
+        try expect(
+            resolveBody.contains("Self.raceRealtimeCommitAgainstTimeout("),
+            "resolveRawTranscript bounds the Realtime commit wait with a timeout race"
+        )
+        try expect(
+            !resolveBody.contains("try await realtimeService.commitAndAwaitFinal()\n                } onCancel:"),
+            "resolveRawTranscript no longer awaits the Realtime commit unbounded"
+        )
+        try expect(
+            resolveBody.contains("catch is CancellationError {\n                throw CancellationError()\n            } catch {"),
+            "a timed-out commit still falls through to the existing catch block"
+        )
+        try expect(
+            resolveBody.contains("return try await fileService.transcribe(fileURL: fileURL)"),
+            "a timed-out commit still falls back to file transcription"
         )
     }
 
