@@ -217,7 +217,13 @@ Return only two sentences, no labels, no markdown, no extra commentary.
             )
             contextPrompt = nil
             if backendExecutor.choice.isLocal {
-                userIssueRecord = nil
+                let issue = QuillUserIssueError.local(
+                    code: .localAIModelUnavailable,
+                    backend: "Local AI",
+                    modelID: backendExecutor.choice.modelID
+                )
+                issueSink(issue)
+                userIssueRecord = issue.record
             } else {
                 let issue = QuillUserIssueError.missingProviderAPIKey(
                     providerHost: URL(string: backendExecutor.cloudBaseURL)?.host,
@@ -309,10 +315,7 @@ Return only two sentences, no labels, no markdown, no extra commentary.
                 if let lastCloudError {
                     throw lastCloudError
                 }
-                if endpoint.kind == .local {
-                    throw AppContextBackendError.unusableResponse
-                }
-                return nil
+                throw AppContextBackendError.unusableResponse
             }
             guard !Task.isCancelled else {
                 return ContextInferenceOutcome(result: nil, userIssueRecord: nil)
@@ -409,7 +412,7 @@ Selected text: \(selectedText ?? "None")
             return nil
         }
         guard httpResponse.statusCode == 200 else {
-            return nil
+            throw AppContextBackendError.httpStatus(httpResponse.statusCode)
         }
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
@@ -435,6 +438,7 @@ Selected text: \(selectedText ?? "None")
     }
 
     private enum AppContextBackendError: Error {
+        case httpStatus(Int)
         case unusableResponse
     }
 
@@ -443,6 +447,25 @@ Selected text: \(selectedText ?? "None")
             return issue
         }
         guard backendExecutor.choice.isLocal else {
+            if case .httpStatus(let status) = error as? AppContextBackendError {
+                return .cloudHTTP(
+                    status: status,
+                    providerHost: URL(string: backendExecutor.cloudBaseURL)?.host,
+                    modelID: backendExecutor.choice.modelID
+                )
+            }
+            if error is AppContextBackendError {
+                return QuillUserIssueError(
+                    record: QuillUserIssueRecord(
+                        code: .invalidProviderResponse,
+                        context: QuillUserIssueContext(
+                            providerHost: URL(string: backendExecutor.cloudBaseURL)?.host,
+                            modelID: backendExecutor.choice.modelID
+                        )
+                    ),
+                    privateDiagnostic: "Unusable Context inference response"
+                )
+            }
             return .cloudTransport(
                 error,
                 providerHost: URL(string: backendExecutor.cloudBaseURL)?.host,

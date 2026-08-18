@@ -9,9 +9,12 @@ struct AppContextBackendTests {
         try await testCloudContextRetriesWithoutScreenshot()
         try await testCloudThrownTransportRetriesWithoutScreenshot()
         try await testCloudRepeatedTransportFailureRecordsStructuredIssue()
+        try await testCloudUnusableResponseRecordsStructuredIssue()
+        try await testCloudHTTPStatusPreservesSpecificClassification()
         try await testCloudMissingKeySkipsTransportAndRecordsProviderIssue()
         try testContextFallbackCarriesProviderIssue()
         try testConfiguredContextCollectionPreservesInferenceIssue()
+        try testUnconfiguredLocalContextRecordsModelUnavailableIssue()
         try await testCancellationStopsRetryAndDoesNotRecordIssue()
         try await testLocalRequestUsesEndpointRequestAndSelectedModelIDs()
         try testAppStateContextCaptureGuardsCancelledPublication()
@@ -179,6 +182,91 @@ struct AppContextBackendTests {
         )
     }
 
+    // A cloud response that returns HTTP 200 with unusable content (no
+    // network/transport error) must still be classified as a Context failure
+    // instead of silently falling through with no issue at all — otherwise
+    // the fallback metadata summary would look like real captured context.
+    private static func testCloudUnusableResponseRecordsStructuredIssue() async throws {
+        let recorder = ContextRequestRecorder()
+        let issues = ContextIssueRecorder()
+        let service = AppContextService(
+            backendExecutor: AIProcessingBackendExecutor(
+                choice: .cloud(modelID: "qwen/qwen3.6-27b"),
+                cloudBaseURL: "https://api.example.com/openai/v1",
+                cloudAPIKey: "cloud-key"
+            ),
+            customContextPrompt: "",
+            contextModel: "qwen/qwen3.6-27b",
+            transport: { request in
+                recorder.record(request)
+                return try successResponse(request, "")
+            },
+            issueSink: { issue in issues.record(issue) }
+        )
+
+        let result = await service.inferActivityWithLLM(
+            appName: "Editor",
+            bundleIdentifier: "test.editor",
+            windowTitle: "Document",
+            selectedText: nil,
+            screenshotDataURL: "data:image/jpeg;base64,IMAGE",
+            contextSystemPrompt: AppContextService.defaultContextPrompt
+        )
+
+        try expect(result == nil, "unusable cloud content returns fallback signal")
+        try expect(recorder.count() == 2, "unusable cloud content exhausts text retry")
+        try expect(
+            issues.last()?.record.code == .invalidProviderResponse,
+            "unusable cloud content is reported as an unusable response, not a down provider"
+        )
+    }
+
+    // A non-200 HTTP response carries a specific, actionable classification
+    // (auth failure, rate limit, provider outage). It must not collapse into
+    // the generic "unusable response" bucket used for a 200 with bad content,
+    // or the user loses the correct recovery guidance.
+    private static func testCloudHTTPStatusPreservesSpecificClassification() async throws {
+        let recorder = ContextRequestRecorder()
+        let issues = ContextIssueRecorder()
+        let service = AppContextService(
+            backendExecutor: AIProcessingBackendExecutor(
+                choice: .cloud(modelID: "qwen/qwen3.6-27b"),
+                cloudBaseURL: "https://api.example.com/openai/v1",
+                cloudAPIKey: "cloud-key"
+            ),
+            customContextPrompt: "",
+            contextModel: "qwen/qwen3.6-27b",
+            transport: { request in
+                recorder.record(request)
+                return (
+                    Data(),
+                    HTTPURLResponse(
+                        url: request.url!,
+                        statusCode: 401,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!
+                )
+            },
+            issueSink: { issue in issues.record(issue) }
+        )
+
+        let result = await service.inferActivityWithLLM(
+            appName: "Editor",
+            bundleIdentifier: "test.editor",
+            windowTitle: "Document",
+            selectedText: nil,
+            screenshotDataURL: "data:image/jpeg;base64,IMAGE",
+            contextSystemPrompt: AppContextService.defaultContextPrompt
+        )
+
+        try expect(result == nil, "HTTP 401 returns fallback signal")
+        try expect(
+            issues.last()?.record.code == .authenticationFailed,
+            "HTTP 401 keeps its specific classification instead of collapsing into invalidProviderResponse"
+        )
+    }
+
     private static func testCloudMissingKeySkipsTransportAndRecordsProviderIssue() async throws {
         let recorder = ContextRequestRecorder()
         let issues = ContextIssueRecorder()
@@ -276,6 +364,34 @@ struct AppContextBackendTests {
         try expect(
             source.contains("userIssueRecord: issue.record"),
             "Context inference returns the classified issue"
+        )
+    }
+
+    // Local Context inference that never even attempts a request (the
+    // selected model or hardware isn't configured) must still attach a typed
+    // issue, matching every other Context failure branch, instead of
+    // silently reporting the fallback metadata summary as usable.
+    private static func testUnconfiguredLocalContextRecordsModelUnavailableIssue() throws {
+        let source = try String(
+            contentsOfFile: "Sources/AppContextService.swift",
+            encoding: .utf8
+        )
+        guard let start = source.range(of: "if backendExecutor.choice.isLocal {"),
+              let end = source.range(
+                of: "return AppContext(",
+                range: start.upperBound..<source.endIndex
+              ) else {
+            throw AppContextBackendTestFailure("Context not-configured branch source")
+        }
+        let body = String(source[start.lowerBound..<end.lowerBound])
+
+        try expect(
+            !body.contains("userIssueRecord = nil"),
+            "unconfigured local Context capture must record a typed issue, not silently succeed"
+        )
+        try expect(
+            body.contains(".localAIModelUnavailable"),
+            "unconfigured local Context capture reports the model-unavailable issue"
         )
     }
 
@@ -520,8 +636,8 @@ struct AppContextBackendTests {
             "usability requires non-placeholder activity"
         )
         try expect(
-            usableBody.contains(".severity != .error") || usableBody.contains(".severity == .error"),
-            "usability excludes error-severity capture issues"
+            usableBody.contains("context.userIssueRecord == nil"),
+            "usability requires no captured issue, regardless of severity"
         )
 
         guard let sanitizeStart = source.range(of: "private static func sanitizedCapturedContext("),
@@ -541,8 +657,10 @@ struct AppContextBackendTests {
         )
         try expect(sanitizeBody.contains("currentActivity: \"\""), "unusable capture is not injected")
         try expect(
-            sanitizeBody.contains("QuillUserIssueRecord(code: .contextUnavailable)"),
-            "unusable capture attaches the context-unavailable warning"
+            sanitizeBody.contains(
+                "context.userIssueRecord ?? QuillUserIssueRecord(code: .contextUnavailable)"
+            ),
+            "unusable capture preserves its original issue, falling back to a generic warning only when none was recorded"
         )
     }
 
