@@ -446,6 +446,18 @@ Selected text: \(selectedText ?? "None")
             return issue
         }
         guard backendExecutor.choice.isLocal else {
+            if error is AppContextBackendError {
+                return QuillUserIssueError(
+                    record: QuillUserIssueRecord(
+                        code: .invalidProviderResponse,
+                        context: QuillUserIssueContext(
+                            providerHost: URL(string: backendExecutor.cloudBaseURL)?.host,
+                            modelID: backendExecutor.choice.modelID
+                        )
+                    ),
+                    privateDiagnostic: "Unusable Context inference response"
+                )
+            }
             return .cloudTransport(
                 error,
                 providerHost: URL(string: backendExecutor.cloudBaseURL)?.host,

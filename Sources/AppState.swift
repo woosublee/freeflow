@@ -10949,7 +10949,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     // Context is only worth injecting into post-processing when it was
     // successfully captured: real (non-placeholder) activity text, and no
-    // error-severity issue was recorded while collecting it.
+    // issue of any severity was recorded while collecting it. A recorded
+    // issue means the capture failed, even when it is only ever shown to
+    // the user as a warning.
     private static func isUsableCapturedContext(_ context: AppContext) -> Bool {
         guard !isPlaceholderContextSummary(context.currentActivity) else { return false }
         guard context.userIssueRecord == nil else { return false }

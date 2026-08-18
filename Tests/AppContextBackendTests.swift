@@ -215,8 +215,8 @@ struct AppContextBackendTests {
         try expect(result == nil, "unusable cloud content returns fallback signal")
         try expect(recorder.count() == 2, "unusable cloud content exhausts text retry")
         try expect(
-            issues.last() != nil,
-            "unusable cloud content records a structured issue instead of failing silently"
+            issues.last()?.record.code == .invalidProviderResponse,
+            "unusable cloud content is reported as an unusable response, not a down provider"
         )
     }
 
