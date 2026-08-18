@@ -21,7 +21,7 @@ struct MeetingSummaryAppStateTests {
         try await testDeleteDuringGenerationDoesNotRestoreSummary()
         try await testTranscriptReplacementReinfersDerivedSpokenLanguage()
         try await testTranscriptReplacementPreservesEngineDetectedLanguage()
-        try await testTranscriptEditingPreservesSummaryMetadata()
+        try await testTranscriptEditingPreservesNonEditedMetadata()
         try await testActionCompletionPersists()
         try await testPostProcessingDisabledDoesNotBlockSummary()
         try await testDeleteMeetingSummaryRemovesEntireSummaryState()
@@ -713,7 +713,7 @@ struct MeetingSummaryAppStateTests {
         precondition(persisted.meetingSummaryAttempt?.language?.appliedLanguageCode == "en")
     }
 
-    private static func testTranscriptEditingPreservesSummaryMetadata() async throws {
+    private static func testTranscriptEditingPreservesNonEditedMetadata() async throws {
         let attempt = MeetingSummaryAttempt(
             occurredAt: Date(timeIntervalSince1970: 2_100),
             outcome: .failed,
@@ -727,14 +727,64 @@ struct MeetingSummaryAppStateTests {
             ),
             issue: QuillUserIssueRecord(code: .meetingSummaryUnavailable)
         )
-        let item = makeItem()
-            .withSpokenLanguage(
-                SpokenLanguageResolution(
-                    languageCode: "ko",
-                    source: .engineDetected
+        let calendarMatch = CalendarEventMatch(
+            accountID: "account-id",
+            calendarID: "calendar-id",
+            eventID: "event-id",
+            title: "Design Review",
+            start: Date(timeIntervalSince1970: 900),
+            end: Date(timeIntervalSince1970: 1_800),
+            attendees: [
+                CalendarEventAttendee(
+                    displayName: "Ada",
+                    email: "ada@example.com"
                 )
-            )
-            .withMeetingSummaryAttempt(attempt)
+            ],
+            matchSource: .overlapSuggestion,
+            titleState: .applied
+        )
+        let item = PipelineHistoryItem(
+            intent: .commandManual,
+            selectedText: "command selection",
+            capturedSelection: "captured context selection",
+            id: UUID(),
+            timestamp: Date(timeIntervalSince1970: 1_000),
+            recordingStartedAt: Date(timeIntervalSince1970: 950),
+            recordingEndedAt: Date(timeIntervalSince1970: 1_050),
+            calendarMatch: calendarMatch,
+            rawTranscript: "Original raw transcript.",
+            postProcessedTranscript: "Original processed transcript.",
+            postProcessingPrompt: "post-processing prompt",
+            systemPrompt: "resolved system prompt",
+            contextSummary: "captured context summary",
+            contextSystemPrompt: "context system prompt",
+            contextPrompt: "context prompt",
+            contextScreenshotDataURL: "data:image/png;base64,c2NyZWVuc2hvdA==",
+            contextScreenshotStatus: "available (image/png)",
+            postProcessingStatus: QuillUserIssueRecord(
+                code: .postProcessingFailed
+            ).persistedStatus,
+            aiProcessingOutcome: "raw-fallback:languageMismatch",
+            debugStatus: "post-processing fallback",
+            customVocabulary: "Quill",
+            customSystemPrompt: "custom system prompt",
+            audioFileName: "meeting.wav",
+            usedLocalTranscription: true,
+            usedContextCapture: true,
+            usedPostProcessing: true,
+            transcriptionLanguageCode: "ko",
+            spokenLanguageCode: "ko",
+            spokenLanguageResolution: .engineDetected,
+            meetingSummaryAttempt: attempt,
+            localTranscriptionModelID: "local/model",
+            transcriptFileName: "meeting.txt",
+            contextAppName: "Example App",
+            contextBundleIdentifier: "com.example.app",
+            contextWindowTitle: "Example Window",
+            customTitle: "Edited Note",
+            meetingSummaryJSON: try JSONEncoder().encode(envelope(completed: false))
+        )
+        let originalMetadata = try transcriptEditPreservedMetadata(item)
         let store = PipelineHistoryStore(inMemory: true)
         _ = try store.append(item, maxCount: 10)
         let directoryURL = try temporaryDirectory()
@@ -745,20 +795,46 @@ struct MeetingSummaryAppStateTests {
             storageLayout: layout
         )
 
-        await MainActor.run {
+        let updated = await MainActor.run {
             appState.updateTranscript(id: item.id, text: "Edited transcript.")
-
-            let updated = appState.pipelineHistory[0]
-            precondition(updated.postProcessedTranscript == "Edited transcript.")
-            precondition(updated.spokenLanguage == item.spokenLanguage)
-            precondition(updated.meetingSummaryAttempt == attempt)
+            return appState.pipelineHistory[0]
         }
+
+        precondition(updated.postProcessedTranscript == "Edited transcript.")
+        precondition(
+            updated.capturedSelection == "captured context selection",
+            "Transcript editing must preserve captured selection"
+        )
+        precondition(
+            updated.systemPrompt == "resolved system prompt",
+            "Transcript editing must preserve the resolved system prompt"
+        )
+        precondition(
+            updated.contextSystemPrompt == "context system prompt",
+            "Transcript editing must preserve the Context system prompt"
+        )
+        precondition(
+            updated.aiProcessingOutcome == "raw-fallback:languageMismatch",
+            "Transcript editing must preserve the AI processing outcome"
+        )
+        let updatedMetadata = try transcriptEditPreservedMetadata(updated)
+        precondition(
+            updatedMetadata == originalMetadata,
+            "Transcript editing must preserve every non-edited history field"
+        )
 
         guard let persisted = store.loadAllHistory().first else {
             throw MeetingSummaryAppStateTestFailure("Missing persisted note")
         }
-        precondition(persisted.spokenLanguage == item.spokenLanguage)
-        precondition(persisted.meetingSummaryAttempt == attempt)
+        precondition(
+            persisted.postProcessedTranscript == "Edited transcript.",
+            "Transcript editing must persist the edited transcript"
+        )
+        let persistedMetadata = try transcriptEditPreservedMetadata(persisted)
+        precondition(
+            persistedMetadata == originalMetadata,
+            "Persisted transcript edits must preserve every non-edited history field"
+        )
     }
 
     private static func testTranscriptChangeDiscardsInflightResult() async throws {
@@ -1333,6 +1409,24 @@ struct MeetingSummaryAppStateTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         throw MeetingSummaryAppStateTestFailure("Timed out waiting for retry")
+    }
+
+    private static func transcriptEditPreservedMetadata(
+        _ item: PipelineHistoryItem
+    ) throws -> Data {
+        let encoded = try JSONEncoder().encode(item)
+        guard var object = try JSONSerialization.jsonObject(
+            with: encoded
+        ) as? [String: Any] else {
+            throw MeetingSummaryAppStateTestFailure(
+                "Unable to encode transcript-edit metadata snapshot"
+            )
+        }
+        object.removeValue(forKey: "postProcessedTranscript")
+        return try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys]
+        )
     }
 
     private static func makeItem(
