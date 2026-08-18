@@ -412,7 +412,7 @@ Selected text: \(selectedText ?? "None")
             return nil
         }
         guard httpResponse.statusCode == 200 else {
-            return nil
+            throw AppContextBackendError.httpStatus(httpResponse.statusCode)
         }
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
@@ -438,6 +438,7 @@ Selected text: \(selectedText ?? "None")
     }
 
     private enum AppContextBackendError: Error {
+        case httpStatus(Int)
         case unusableResponse
     }
 
@@ -446,6 +447,13 @@ Selected text: \(selectedText ?? "None")
             return issue
         }
         guard backendExecutor.choice.isLocal else {
+            if case .httpStatus(let status) = error as? AppContextBackendError {
+                return .cloudHTTP(
+                    status: status,
+                    providerHost: URL(string: backendExecutor.cloudBaseURL)?.host,
+                    modelID: backendExecutor.choice.modelID
+                )
+            }
             if error is AppContextBackendError {
                 return QuillUserIssueError(
                     record: QuillUserIssueRecord(

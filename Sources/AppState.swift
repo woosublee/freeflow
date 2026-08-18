@@ -10980,7 +10980,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             screenshotDataURL: context.screenshotDataURL,
             screenshotMimeType: context.screenshotMimeType,
             screenshotError: context.screenshotError,
-            userIssueRecord: QuillUserIssueRecord(code: .contextUnavailable)
+            userIssueRecord: context.userIssueRecord ?? QuillUserIssueRecord(code: .contextUnavailable)
         )
     }
 

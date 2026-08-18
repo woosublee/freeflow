@@ -10,6 +10,7 @@ struct AppContextBackendTests {
         try await testCloudThrownTransportRetriesWithoutScreenshot()
         try await testCloudRepeatedTransportFailureRecordsStructuredIssue()
         try await testCloudUnusableResponseRecordsStructuredIssue()
+        try await testCloudHTTPStatusPreservesSpecificClassification()
         try await testCloudMissingKeySkipsTransportAndRecordsProviderIssue()
         try testContextFallbackCarriesProviderIssue()
         try testConfiguredContextCollectionPreservesInferenceIssue()
@@ -217,6 +218,52 @@ struct AppContextBackendTests {
         try expect(
             issues.last()?.record.code == .invalidProviderResponse,
             "unusable cloud content is reported as an unusable response, not a down provider"
+        )
+    }
+
+    // A non-200 HTTP response carries a specific, actionable classification
+    // (auth failure, rate limit, provider outage). It must not collapse into
+    // the generic "unusable response" bucket used for a 200 with bad content,
+    // or the user loses the correct recovery guidance.
+    private static func testCloudHTTPStatusPreservesSpecificClassification() async throws {
+        let recorder = ContextRequestRecorder()
+        let issues = ContextIssueRecorder()
+        let service = AppContextService(
+            backendExecutor: AIProcessingBackendExecutor(
+                choice: .cloud(modelID: "qwen/qwen3.6-27b"),
+                cloudBaseURL: "https://api.example.com/openai/v1",
+                cloudAPIKey: "cloud-key"
+            ),
+            customContextPrompt: "",
+            contextModel: "qwen/qwen3.6-27b",
+            transport: { request in
+                recorder.record(request)
+                return (
+                    Data(),
+                    HTTPURLResponse(
+                        url: request.url!,
+                        statusCode: 401,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!
+                )
+            },
+            issueSink: { issue in issues.record(issue) }
+        )
+
+        let result = await service.inferActivityWithLLM(
+            appName: "Editor",
+            bundleIdentifier: "test.editor",
+            windowTitle: "Document",
+            selectedText: nil,
+            screenshotDataURL: "data:image/jpeg;base64,IMAGE",
+            contextSystemPrompt: AppContextService.defaultContextPrompt
+        )
+
+        try expect(result == nil, "HTTP 401 returns fallback signal")
+        try expect(
+            issues.last()?.record.code == .authenticationFailed,
+            "HTTP 401 keeps its specific classification instead of collapsing into invalidProviderResponse"
         )
     }
 
@@ -610,8 +657,10 @@ struct AppContextBackendTests {
         )
         try expect(sanitizeBody.contains("currentActivity: \"\""), "unusable capture is not injected")
         try expect(
-            sanitizeBody.contains("QuillUserIssueRecord(code: .contextUnavailable)"),
-            "unusable capture attaches the context-unavailable warning"
+            sanitizeBody.contains(
+                "context.userIssueRecord ?? QuillUserIssueRecord(code: .contextUnavailable)"
+            ),
+            "unusable capture preserves its original issue, falling back to a generic warning only when none was recorded"
         )
     }
 
