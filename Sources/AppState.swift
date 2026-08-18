@@ -6322,40 +6322,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case nil:
             replacementSpokenLanguage = nil
         }
-        let updated = PipelineHistoryItem(
-            intent: item.intent,
-            selectedText: item.selectedText,
-            id: item.id,
-            timestamp: item.timestamp,
-            recordingStartedAt: item.recordingStartedAt,
-            recordingEndedAt: item.recordingEndedAt,
-            calendarMatch: item.calendarMatch,
-            rawTranscript: item.rawTranscript,
-            postProcessedTranscript: text,
-            postProcessingPrompt: item.postProcessingPrompt,
-            contextSummary: item.contextSummary,
-            contextPrompt: item.contextPrompt,
-            contextScreenshotDataURL: item.contextScreenshotDataURL,
-            contextScreenshotStatus: item.contextScreenshotStatus,
-            postProcessingStatus: item.postProcessingStatus,
-            debugStatus: item.debugStatus,
-            customVocabulary: item.customVocabulary,
-            customSystemPrompt: item.customSystemPrompt,
-            audioFileName: item.audioFileName,
-            usedLocalTranscription: item.usedLocalTranscription,
-            usedContextCapture: item.usedContextCapture,
-            usedPostProcessing: item.usedPostProcessing,
-            transcriptionLanguageCode: item.transcriptionLanguageCode,
+        let updated = item.copying(
+            meetingSummaryJSON: item.meetingSummaryJSON,
             spokenLanguageCode: replacementSpokenLanguage?.languageCode,
             spokenLanguageResolution: replacementSpokenLanguage?.source,
             meetingSummaryAttempt: item.meetingSummaryAttempt,
-            localTranscriptionModelID: item.localTranscriptionModelID,
-            transcriptFileName: item.transcriptFileName,
-            contextAppName: item.contextAppName,
-            contextBundleIdentifier: item.contextBundleIdentifier,
-            contextWindowTitle: item.contextWindowTitle,
             customTitle: item.customTitle,
-            meetingSummaryJSON: item.meetingSummaryJSON
+            postProcessedTranscript: text
         )
         do {
             try pipelineHistoryStore.update(updated)
