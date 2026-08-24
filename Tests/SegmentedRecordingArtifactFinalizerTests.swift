@@ -9,6 +9,7 @@ struct SegmentedRecordingArtifactFinalizerTests {
             try damagedSourcesProduceDeterministicPartialRecovery()
             try unavailableCompanionSourceProducesCompleteArtifact()
             try runtimeUnavailableSourceProducesPartialArtifact()
+            try runtimeUnavailableBeforeFirstFrameProducesPartialArtifact()
             try expectedZeroByteSourceProducesPartialArtifact()
             try emptySwitchedSourceProducesPartialArtifact()
             try noUsableAudioPreservesInflightRecording()
@@ -282,6 +283,44 @@ struct SegmentedRecordingArtifactFinalizerTests {
                     reason: .sourceUnavailableDuringRecording
                 )],
                 "runtime source loss remains visible in recovery metadata"
+            )
+        }
+    }
+
+    private static func runtimeUnavailableBeforeFirstFrameProducesPartialArtifact() throws {
+        try withFixture { fixture in
+            let controller = try fixture.makeController()
+            controller.activeSegment.microphoneSink?.enqueue(pcmData([1, 2]))
+            let combined = try controller.switchSegment(
+                segmentID: UUID(),
+                sources: [
+                    RecordingJournalSegmentSourceRequest(
+                        id: UUID(),
+                        kind: .microphone
+                    ),
+                    RecordingJournalSegmentSourceRequest(
+                        id: UUID(),
+                        kind: .systemAudio
+                    )
+                ]
+            )
+            combined.microphoneSink?.enqueue(pcmData([3, 4]))
+            try controller.markActiveSourceUnavailableDuringRecording(.systemAudio)
+            try controller.stopAndClose()
+
+            let result = try fixture.finalizer.finalizeAndPromote(
+                recordingID: fixture.recordingID
+            )
+
+            try expectEqual(result.mode, .partial, "zero-frame runtime degraded mode")
+            try expectEqual(
+                result.promotion.resolvedRecoveryIssues,
+                [RecordingRecoveryIssue(
+                    segmentSequence: 1,
+                    sourceKind: .systemAudio,
+                    reason: .sourceUnavailableDuringRecording
+                )],
+                "zero-frame runtime loss preserves its reason"
             )
         }
     }

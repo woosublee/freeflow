@@ -95,7 +95,9 @@ struct SegmentedRecordingArtifactFinalizer {
                         segmentIssues.append(RecordingRecoveryIssue(
                             segmentSequence: segment.sequence,
                             sourceKind: source.kind,
-                            reason: .noCommittedAudio
+                            reason: source.unavailableDuringRecording == true
+                                ? .sourceUnavailableDuringRecording
+                                : .noCommittedAudio
                         ))
                     }
                 case .unavailable(let reason):
