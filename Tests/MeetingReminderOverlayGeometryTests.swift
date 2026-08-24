@@ -18,6 +18,7 @@ struct MeetingReminderOverlayGeometryTests {
         testCenterRecordingMatchesIdleHeight()
         testFrameUsesSharedScreenGeometryForUpdatedFrames()
         testFrameUsesSharedNotchSideGeometryWidth()
+        testNoticeAnchorUsesTargetFrameWhileReminderResizes()
         try testMeetingReminderUsesSharedScreenGeometry()
         try testMeetingReminderObservesScreenParameterChanges()
         try testMeetingReminderKeepsPersistentAnimationHost()
@@ -187,6 +188,34 @@ struct MeetingReminderOverlayGeometryTests {
         assert(frame.origin.y == 890)
     }
 
+    private static func testNoticeAnchorUsesTargetFrameWhileReminderResizes() {
+        let idlePresentationFrame = NSRect(
+            x: 576,
+            y: 902,
+            width: 360,
+            height: 80
+        )
+        let recordingTargetFrame = NSRect(
+            x: 576,
+            y: 870,
+            width: 360,
+            height: 112
+        )
+        let anchor = MeetingReminderOverlayGeometry.noticeAnchorFrame(
+            visibleFrame: idlePresentationFrame,
+            targetFrame: recordingTargetFrame
+        )
+        let notice = RecordingNoticeStackGeometry.anchoredFrame(
+            below: anchor,
+            width: 360,
+            height: 34,
+            gap: 6
+        )
+
+        assert(anchor == recordingTargetFrame)
+        assert(notice.maxY <= recordingTargetFrame.minY - 6)
+    }
+
     private static func testMeetingReminderUsesSharedScreenGeometry() throws {
         let source = try String(contentsOfFile: "Sources/MeetingReminderOverlay.swift", encoding: .utf8)
         assert(source.contains("OverlayScreenGeometry(screen: screen)"))
@@ -207,6 +236,13 @@ struct MeetingReminderOverlayGeometryTests {
     private static func testMeetingReminderKeepsPersistentAnimationHost() throws {
         let source = try String(contentsOfFile: "Sources/MeetingReminderOverlay.swift", encoding: .utf8)
         assert(source.contains("private var contentContainer: FixedHostingContainer<AnyView>?"))
+        assert(source.contains("private var targetFrame: NSRect?"))
+        assert(source.contains("var onVisibleOverlayFrameChange:"))
+        assert(source.contains("targetFrame = frame"))
+        assert(source.contains("onVisibleOverlayFrameChange?(frame)"))
+        assert(source.contains("targetFrame = nil"))
+        assert(source.contains("onVisibleOverlayFrameChange?(nil)"))
+        assert(source.contains("MeetingReminderOverlayGeometry.noticeAnchorFrame("))
         assert(source.contains("if let panel, let viewModel, let contentContainer"))
         assert(source.contains("viewModel.update(displayData: displayData, frameSize: frame.size, animated: animated)"))
         assert(source.contains("contentContainer.setFixedContentSize(frame.size)"))

@@ -116,6 +116,13 @@ struct MeetingReminderOverlayGeometry {
         }
     }
 
+    static func noticeAnchorFrame(
+        visibleFrame: NSRect,
+        targetFrame: NSRect?
+    ) -> NSRect {
+        targetFrame ?? visibleFrame
+    }
+
     static func frame(for screen: NSScreen, context: MeetingReminderOverlayContext) -> NSRect {
         frame(for: OverlayScreenGeometry(screen: screen), context: context)
     }
@@ -193,6 +200,7 @@ final class MeetingReminderOverlayManager: CalendarRecordingReminderInAppPresent
     private var panel: NSPanel?
     private var viewModel: MeetingReminderOverlayViewModel?
     private var contentContainer: FixedHostingContainer<AnyView>?
+    private var targetFrame: NSRect?
     private var isHidingVisibleReminder = false
     private var visibleReminder: QueuedReminder?
     private var queue: [QueuedReminder] = []
@@ -204,12 +212,20 @@ final class MeetingReminderOverlayManager: CalendarRecordingReminderInAppPresent
 
     var onStart: (@MainActor (CalendarRecordingReminderSchedule) -> Void)?
     var onDismiss: (@MainActor (CalendarRecordingReminderSchedule) -> Void)?
+    var onVisibleOverlayFrameChange: (@MainActor (NSRect?) -> Void)?
 
-    /// Frame of the reminder panel while a reminder is actually visible, else
-    /// nil. Lets the recording overlay anchor a notice toast below the card.
+    /// Final frame of the reminder panel while a reminder is visible. During a
+    /// resize animation this returns the target instead of the current
+    /// presentation frame, so recording notices stay below the expanded card.
     var visibleOverlayFrame: NSRect? {
-        guard visibleReminder != nil, let panel, panel.isVisible, panel.alphaValue > 0 else { return nil }
-        return panel.frame
+        guard visibleReminder != nil,
+              let panel,
+              panel.isVisible,
+              panel.alphaValue > 0 else { return nil }
+        return MeetingReminderOverlayGeometry.noticeAnchorFrame(
+            visibleFrame: panel.frame,
+            targetFrame: targetFrame
+        )
     }
 
     init(
@@ -287,6 +303,7 @@ final class MeetingReminderOverlayManager: CalendarRecordingReminderInAppPresent
         let context = contextProvider()
         let geometry = OverlayScreenGeometry(screen: screen)
         let frame = MeetingReminderOverlayGeometry.frame(for: geometry, context: context)
+        targetFrame = frame
         let variant = MeetingReminderOverlayGeometry.variant(
             for: context,
             hasNotchGeometry: MeetingReminderOverlayGeometry.hasNotchGeometry(for: geometry)
@@ -321,6 +338,7 @@ final class MeetingReminderOverlayManager: CalendarRecordingReminderInAppPresent
 
         panel?.ignoresMouseEvents = false
         panel?.level = variant.isRecordingContext ? Self.recordingContextLevel : .screenSaver
+        onVisibleOverlayFrameChange?(frame)
 
         if markPresented {
             reminder.onPresented(schedule)
@@ -482,6 +500,8 @@ final class MeetingReminderOverlayManager: CalendarRecordingReminderInAppPresent
         panel = nil
         viewModel = nil
         contentContainer = nil
+        targetFrame = nil
+        onVisibleOverlayFrameChange?(nil)
     }
 
     private func displayData(

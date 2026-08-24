@@ -161,6 +161,165 @@ private func makeTransparentContent<V: View>(
     return hosting
 }
 
+struct DegradedCombinedCaptureNoticeLifecycle {
+    struct Request: Equatable {
+        let sessionID: UUID
+        let token: UUID
+        let message: String
+        let reminderFrame: NSRect?
+    }
+
+    enum Effect: Equatable {
+        case none
+        case present(Request)
+        case hide(UUID)
+    }
+
+    private(set) var activeSessionID: UUID?
+    private(set) var isPresentationReady = false
+    private(set) var pendingRequest: Request?
+    private(set) var visibleRequest: Request?
+
+    mutating func beginSession(_ sessionID: UUID) -> Effect {
+        let effect = visibleRequest.map { Effect.hide($0.token) } ?? .none
+        activeSessionID = sessionID
+        isPresentationReady = false
+        pendingRequest = nil
+        visibleRequest = nil
+        return effect
+    }
+
+    mutating func reconcile(_ request: Request?, sessionID: UUID) -> Effect {
+        guard activeSessionID == sessionID else { return .none }
+        guard let request else {
+            pendingRequest = nil
+            guard let visibleRequest else { return .none }
+            self.visibleRequest = nil
+            return .hide(visibleRequest.token)
+        }
+        guard request.sessionID == sessionID else { return .none }
+
+        if isPresentationReady {
+            pendingRequest = nil
+            visibleRequest = request
+            return .present(request)
+        }
+        pendingRequest = request
+        return .none
+    }
+
+    mutating func markPresentationReady(sessionID: UUID) -> Effect {
+        guard activeSessionID == sessionID else { return .none }
+        guard !isPresentationReady else { return .none }
+        isPresentationReady = true
+        guard let pendingRequest else { return .none }
+        self.pendingRequest = nil
+        visibleRequest = pendingRequest
+        return .present(pendingRequest)
+    }
+
+    mutating func updateReminderFrame(_ reminderFrame: NSRect?) -> Effect {
+        if let pendingRequest {
+            self.pendingRequest = Request(
+                sessionID: pendingRequest.sessionID,
+                token: pendingRequest.token,
+                message: pendingRequest.message,
+                reminderFrame: reminderFrame
+            )
+        }
+        guard let visibleRequest else { return .none }
+        let updatedRequest = Request(
+            sessionID: visibleRequest.sessionID,
+            token: visibleRequest.token,
+            message: visibleRequest.message,
+            reminderFrame: reminderFrame
+        )
+        guard updatedRequest != visibleRequest else { return .none }
+        self.visibleRequest = updatedRequest
+        return .present(updatedRequest)
+    }
+
+    mutating func dismiss(sessionID: UUID, token: UUID) -> Effect {
+        guard activeSessionID == sessionID,
+              visibleRequest?.token == token else {
+            return .none
+        }
+        visibleRequest = nil
+        return .hide(token)
+    }
+
+    mutating func endSession(_ sessionID: UUID? = nil) -> Effect {
+        guard let activeSessionID,
+              sessionID == nil || sessionID == activeSessionID else {
+            return .none
+        }
+        let effect = visibleRequest.map { Effect.hide($0.token) } ?? .none
+        self.activeSessionID = nil
+        isPresentationReady = false
+        pendingRequest = nil
+        visibleRequest = nil
+        return effect
+    }
+}
+
+struct RecordingNoticeStackGeometry {
+    static func lowestVisibleFrame(_ frames: [NSRect]) -> NSRect? {
+        frames.min(by: { $0.minY < $1.minY })
+    }
+
+    static func overlayAnchorFrame(
+        visibleFrame: NSRect?,
+        targetFrame: NSRect
+    ) -> NSRect? {
+        guard let visibleFrame else { return nil }
+        return targetFrame.isEmpty ? visibleFrame : targetFrame
+    }
+
+    static func fittedNoticeWidth(
+        message: String,
+        horizontalChromeWidth: CGFloat,
+        minimumWidth: CGFloat,
+        maximumWidth: CGFloat
+    ) -> CGFloat {
+        let textWidth = (message as NSString).size(
+            withAttributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .medium)
+            ]
+        ).width
+        return min(
+            maximumWidth,
+            max(minimumWidth, ceil(textWidth + horizontalChromeWidth))
+        )
+    }
+
+    static func degradedCaptureNoticeWidth(
+        message: String,
+        anchorWidth: CGFloat,
+        maximumWidth: CGFloat
+    ) -> CGFloat {
+        fittedNoticeWidth(
+            message: message,
+            horizontalChromeWidth: 88,
+            minimumWidth: max(200, anchorWidth),
+            maximumWidth: maximumWidth
+        )
+    }
+
+    static func anchoredFrame(
+        below anchor: NSRect,
+        width: CGFloat,
+        height: CGFloat,
+        gap: CGFloat
+    ) -> NSRect {
+        NSRect(
+            x: anchor.midX - width / 2,
+            y: anchor.minY - gap - height,
+            width: width,
+            height: height
+        )
+    }
+}
+
 struct RecordingOverlayGeometry {
     static func lockedTranscribingWidth(
         existingLockedWidth: CGFloat?,
@@ -205,12 +364,14 @@ final class RecordingOverlayManager {
     /// Identifies the in-flight notice so its scheduled dismissal only fires if
     /// that same notice is still showing.
     private var noticeToken: UUID?
+    private var recordingNoticeReminderFrame: NSRect?
     /// Separate panel for the degraded combined-capture notice, kept apart from
     /// `noticeWindow` so an unrelated transient notice (which reuses and
     /// auto-dismisses `noticeWindow`) can never silently overwrite or expire
     /// this persistent, user-dismissed-only notice.
     private var degradedCaptureNoticeWindow: NSPanel?
-    private var degradedCaptureNoticeToken: UUID?
+    private var degradedCaptureNoticePresentationToken: UUID?
+    private var degradedCaptureNoticeLifecycle = DegradedCombinedCaptureNoticeLifecycle()
     private let notchSideRegionWidth: CGFloat = 92
     private let notchSidePanelHeight: CGFloat = 38
     private let notchSideHorizontalInset: CGFloat = 8
@@ -329,7 +490,11 @@ final class RecordingOverlayManager {
         }
     }
 
-    func showRecording(mode: RecordingTriggerMode = .hold, isCommandMode: Bool = false) {
+    func showRecording(
+        mode: RecordingTriggerMode = .hold,
+        isCommandMode: Bool = false,
+        noticeSessionID: UUID? = nil
+    ) {
         DispatchQueue.main.async {
             self.lockedOverlayWidth = nil
             self.overlayState.recordingTriggerMode = mode
@@ -337,16 +502,22 @@ final class RecordingOverlayManager {
             self.overlayState.phase = .recording
             self.overlayState.audioLevel = 0
             self.showOverlayPanel(animatedResize: true)
+            self.markDegradedCaptureNoticePresentationReady(sessionID: noticeSessionID)
         }
     }
 
-    func transitionToRecording(mode: RecordingTriggerMode = .hold, isCommandMode: Bool = false) {
+    func transitionToRecording(
+        mode: RecordingTriggerMode = .hold,
+        isCommandMode: Bool = false,
+        noticeSessionID: UUID? = nil
+    ) {
         DispatchQueue.main.async {
             self.lockedOverlayWidth = nil
             self.overlayState.recordingTriggerMode = mode
             self.overlayState.isCommandMode = isCommandMode
             self.overlayState.phase = .recording
             self.updateOverlayLayout(animated: true)
+            self.markDegradedCaptureNoticePresentationReady(sessionID: noticeSessionID)
         }
     }
 
@@ -410,7 +581,7 @@ final class RecordingOverlayManager {
                 }
                 self.overlayState.errorMessage = nil
                 self.overlayState.toastID = nil
-                self.dismissAll()
+                self.dismissAll(endingDegradedCaptureSession: false)
             }
         }
     }
@@ -431,23 +602,45 @@ final class RecordingOverlayManager {
         let truncated = Self.truncatedToastMessage(message)
         DispatchQueue.main.async {
             guard self.overlayState.phase == .recording,
-                  let anchor = self.noticeAnchorFrame(reminderFrame: reminderFrame) else {
+                  let anchor = self.recordingNoticeAnchorFrame(reminderFrame: reminderFrame) else {
                 // No recording overlay on screen — fall back to the standard toast.
+                self.recordingNoticeReminderFrame = nil
                 self.showError(message)
                 return
             }
+            self.recordingNoticeReminderFrame = reminderFrame
             self.showAnchoredRecordingNotice(truncated, anchor: anchor)
         }
     }
 
     /// Bottom-most visible overlay frame (recording pill vs. the taller reminder
-    /// card), used as the anchor for the toast. Smaller minY = lower on screen.
-    private func noticeAnchorFrame(reminderFrame: NSRect?) -> NSRect? {
-        // Only anchor to actually-visible frames so the toast never attaches to
-        // a stale/hidden overlay position.
-        [visibleOverlayFrame, reminderFrame]
-            .compactMap { $0 }
-            .min(by: { $0.minY < $1.minY })
+    /// card), used as the base anchor for persistent recording notices.
+    private func baseNoticeAnchorFrame(reminderFrame: NSRect?) -> NSRect? {
+        let recordingOverlayFrame = RecordingNoticeStackGeometry.overlayAnchorFrame(
+                visibleFrame: visibleOverlayFrame,
+                targetFrame: overlayFrame
+            )
+        return RecordingNoticeStackGeometry.lowestVisibleFrame(
+            [recordingOverlayFrame, reminderFrame].compactMap { $0 }
+        )
+    }
+
+    private var visibleDegradedCaptureNoticeFrame: NSRect? {
+        guard degradedCaptureNoticeLifecycle.visibleRequest != nil,
+              let panel = degradedCaptureNoticeWindow,
+              panel.isVisible else { return nil }
+        return panel.frame
+    }
+
+    /// Transient notices stack below the persistent degraded-capture notice
+    /// instead of competing for the same position and obscuring its dismiss UI.
+    private func recordingNoticeAnchorFrame(reminderFrame: NSRect?) -> NSRect? {
+        RecordingNoticeStackGeometry.lowestVisibleFrame(
+            [
+                baseNoticeAnchorFrame(reminderFrame: reminderFrame),
+                visibleDegradedCaptureNoticeFrame
+            ].compactMap { $0 }
+        )
     }
 
     /// Show a standalone toast panel just below `anchor`, matching its width but
@@ -464,11 +657,11 @@ final class RecordingOverlayManager {
         if let screenWidth = screenGeometry?.screenFrame.width {
             width = min(width, screenWidth - 32)
         }
-        let frame = NSRect(
-            x: anchor.midX - width / 2,
-            y: anchor.minY - gap - height,
+        let frame = RecordingNoticeStackGeometry.anchoredFrame(
+            below: anchor,
             width: width,
-            height: height
+            height: height,
+            gap: gap
         )
 
         let panel = noticeWindow ?? makeOverlayPanel(width: frame.width, height: frame.height)
@@ -501,42 +694,132 @@ final class RecordingOverlayManager {
         }
     }
 
-    /// Surface that a combined recording started with only one source: the
-    /// pill above keeps showing the surviving source's waveform untouched
-    /// (the phase stays `.recording`); this is a separate informational
-    /// panel below it, like `showRecordingNotice`. Unlike that notice, it
-    /// does not auto-dismiss — nothing about it changes what gets recorded,
-    /// so there is no decision to time out, but it must stay long enough
-    /// that a user who missed it while joining the meeting still sees it
-    /// later. It is dismissed only by the user (hover-reveal ×) or when the
-    /// recording session ends.
-    func showDegradedCombinedCaptureNotice(_ message: String, reminderFrame: NSRect?) {
+    /// Start a recording-scoped lifecycle for the persistent degraded-capture
+    /// notice. A session ID prevents late recorder results from an older start
+    /// from affecting a newer recording.
+    func beginDegradedCombinedCaptureNoticeSession(_ sessionID: UUID) {
         DispatchQueue.main.async {
-            guard self.overlayState.phase == .recording,
-                  let anchor = self.noticeAnchorFrame(reminderFrame: reminderFrame) else {
-                return
-            }
-            self.showAnchoredDegradedCaptureNotice(message, anchor: anchor)
+            self.applyDegradedCaptureNoticeEffect(
+                self.degradedCaptureNoticeLifecycle.beginSession(sessionID)
+            )
         }
     }
 
-    private func showAnchoredDegradedCaptureNotice(_ message: String, anchor: NSRect) {
-        let token = UUID()
-        degradedCaptureNoticeToken = token
+    /// Reconcile the current capture state. A message presents or updates the
+    /// dedicated persistent panel; nil clears a stale notice after a healthy or
+    /// intentional single-source input switch.
+    func reconcileDegradedCombinedCaptureNotice(
+        message: String?,
+        sessionID: UUID,
+        reminderFrame: NSRect?
+    ) {
+        DispatchQueue.main.async {
+            let request = message.map {
+                DegradedCombinedCaptureNoticeLifecycle.Request(
+                    sessionID: sessionID,
+                    token: UUID(),
+                    message: $0,
+                    reminderFrame: reminderFrame
+                )
+            }
+            self.applyDegradedCaptureNoticeEffect(
+                self.degradedCaptureNoticeLifecycle.reconcile(
+                    request,
+                    sessionID: sessionID
+                )
+            )
+        }
+    }
 
+    func recordingReminderFrameDidChange(_ reminderFrame: NSRect?) {
+        DispatchQueue.main.async {
+            self.recordingNoticeReminderFrame = reminderFrame
+            self.applyDegradedCaptureNoticeEffect(
+                self.degradedCaptureNoticeLifecycle.updateReminderFrame(
+                    reminderFrame
+                )
+            )
+            self.repositionVisibleRecordingNotice()
+        }
+    }
+
+    func endDegradedCombinedCaptureNoticeSession(_ sessionID: UUID? = nil) {
+        DispatchQueue.main.async {
+            self.endDegradedCombinedCaptureNoticeSessionNow(sessionID)
+        }
+    }
+
+    private func endDegradedCombinedCaptureNoticeSessionNow(_ sessionID: UUID? = nil) {
+        applyDegradedCaptureNoticeEffect(
+            degradedCaptureNoticeLifecycle.endSession(sessionID)
+        )
+    }
+
+    private func markDegradedCaptureNoticePresentationReady(sessionID: UUID?) {
+        guard overlayState.phase == .recording,
+              let sessionID,
+              degradedCaptureNoticeLifecycle.activeSessionID == sessionID,
+              degradedCaptureNoticeAnchor(
+                  reminderFrame: degradedCaptureNoticeLifecycle.pendingRequest?.reminderFrame
+              ) != nil else {
+            return
+        }
+        applyDegradedCaptureNoticeEffect(
+            degradedCaptureNoticeLifecycle.markPresentationReady(sessionID: sessionID)
+        )
+    }
+
+    private func degradedCaptureNoticeAnchor(reminderFrame: NSRect?) -> NSRect? {
+        if let anchor = baseNoticeAnchorFrame(reminderFrame: reminderFrame) {
+            return anchor
+        }
+        if let frame = overlayWindow?.frame, !frame.isEmpty {
+            return frame
+        }
+        let fallback = overlayFrame
+        return fallback.isEmpty ? nil : fallback
+    }
+
+    private func applyDegradedCaptureNoticeEffect(
+        _ effect: DegradedCombinedCaptureNoticeLifecycle.Effect
+    ) {
+        switch effect {
+        case .none:
+            break
+        case .present(let request):
+            guard degradedCaptureNoticeLifecycle.activeSessionID == request.sessionID,
+                  let anchor = degradedCaptureNoticeAnchor(
+                      reminderFrame: request.reminderFrame
+                  ) else {
+                return
+            }
+            showAnchoredDegradedCaptureNotice(request, anchor: anchor)
+        case .hide(let token):
+            dismissDegradedCaptureNotice(expectedToken: token)
+        }
+    }
+
+    private func showAnchoredDegradedCaptureNotice(
+        _ request: DegradedCombinedCaptureNoticeLifecycle.Request,
+        anchor: NSRect
+    ) {
+        degradedCaptureNoticePresentationToken = request.token
         let height: CGFloat = 34
         let gap: CGFloat = 6
-        let estimatedFit = CGFloat(message.count) * 6.8 + 66
-        let minFit = min(360, max(200, estimatedFit))
-        var width = minFit
-        if let screenWidth = screenGeometry?.screenFrame.width {
-            width = min(width, screenWidth - 32)
-        }
-        let frame = NSRect(
-            x: anchor.midX - width / 2,
-            y: anchor.minY - gap - height,
+        let maximumWidth = max(
+            200,
+            (screenGeometry?.screenFrame.width ?? 520) - 32
+        )
+        let width = RecordingNoticeStackGeometry.degradedCaptureNoticeWidth(
+            message: request.message,
+            anchorWidth: anchor.width,
+            maximumWidth: maximumWidth
+        )
+        let frame = RecordingNoticeStackGeometry.anchoredFrame(
+            below: anchor,
             width: width,
-            height: height
+            height: height,
+            gap: gap
         )
 
         let panel = degradedCaptureNoticeWindow ?? makeOverlayPanel(width: frame.width, height: frame.height)
@@ -545,10 +828,14 @@ final class RecordingOverlayManager {
         panel.contentView = makeTransparentContent(
             width: frame.width,
             height: frame.height,
-            rootView: DegradedCaptureNoticeView(message: message) { [weak self] in
-                guard let self, self.degradedCaptureNoticeToken == token else { return }
-                self.degradedCaptureNoticeToken = nil
-                self.dismissDegradedCaptureNotice()
+            rootView: DegradedCaptureNoticeView(message: request.message) { [weak self] in
+                guard let self else { return }
+                self.applyDegradedCaptureNoticeEffect(
+                    self.degradedCaptureNoticeLifecycle.dismiss(
+                        sessionID: request.sessionID,
+                        token: request.token
+                    )
+                )
             }
         )
         let isAlreadyVisible = panel.isVisible && panel.alphaValue > 0
@@ -558,6 +845,7 @@ final class RecordingOverlayManager {
         }
         panel.orderFrontRegardless()
         degradedCaptureNoticeWindow = panel
+        repositionVisibleRecordingNotice(below: panel.frame)
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.16
@@ -565,14 +853,53 @@ final class RecordingOverlayManager {
         }
     }
 
-    private func dismissDegradedCaptureNotice() {
-        guard let panel = degradedCaptureNoticeWindow else { return }
+    private func repositionVisibleDegradedCaptureNotice() {
+        guard let request = degradedCaptureNoticeLifecycle.visibleRequest,
+              let anchor = degradedCaptureNoticeAnchor(
+                  reminderFrame: request.reminderFrame
+              ) else { return }
+        showAnchoredDegradedCaptureNotice(request, anchor: anchor)
+    }
+
+    private func repositionVisibleRecordingNotice() {
+        guard let anchor = recordingNoticeAnchorFrame(
+            reminderFrame: recordingNoticeReminderFrame
+        ) else {
+            return
+        }
+        repositionVisibleRecordingNotice(below: anchor)
+    }
+
+    private func repositionVisibleRecordingNotice(below anchor: NSRect) {
+        guard let panel = noticeWindow,
+              panel.isVisible,
+              panel.alphaValue > 0 else { return }
+        let frame = RecordingNoticeStackGeometry.anchoredFrame(
+            below: anchor,
+            width: panel.frame.width,
+            height: panel.frame.height,
+            gap: 6
+        )
+        panel.setFrame(frame, display: true)
+    }
+
+    private func dismissDegradedCaptureNotice(expectedToken: UUID) {
+        guard degradedCaptureNoticePresentationToken == expectedToken,
+              let panel = degradedCaptureNoticeWindow else {
+            return
+        }
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.16
             panel.animator().alphaValue = 0
         }, completionHandler: { [weak self, weak panel] in
-            guard let self, self.degradedCaptureNoticeToken == nil else { return }
+            guard let self else { return }
+            if self.degradedCaptureNoticePresentationToken != expectedToken {
+                panel?.alphaValue = 1
+                return
+            }
+            self.degradedCaptureNoticePresentationToken = nil
             panel?.orderOut(nil)
+            self.repositionVisibleRecordingNotice()
         })
     }
 
@@ -585,6 +912,7 @@ final class RecordingOverlayManager {
             // A newer notice may have been scheduled mid-fade; only hide the
             // panel if nothing is showing now.
             guard let self, self.noticeToken == nil else { return }
+            self.recordingNoticeReminderFrame = nil
             panel?.orderOut(nil)
         })
     }
@@ -644,13 +972,19 @@ final class RecordingOverlayManager {
         panel.ignoresMouseEvents = !overlayAcceptsMouseEvents
         panel.contentView = makeOverlayContent(frame: frame)
         resize(panel: panel, to: frame, animated: animated)
+        repositionVisibleDegradedCaptureNotice()
+        repositionVisibleRecordingNotice()
     }
 
     private func handleScreenParametersChanged() {
         updateOverlayLayout(animated: false)
+        markDegradedCaptureNoticePresentationReady(
+            sessionID: degradedCaptureNoticeLifecycle.activeSessionID
+        )
     }
 
     private func setTranscribingPhase() {
+        endDegradedCombinedCaptureNoticeSessionNow()
         let wasNotchSideRecordingLayout = overlayState.phase == .recording && usesNotchSideLayout
         lockedOverlayWidth = RecordingOverlayGeometry.lockedTranscribingWidth(
             existingLockedWidth: lockedOverlayWidth,
@@ -795,7 +1129,7 @@ final class RecordingOverlayManager {
         showOverlayPanel(animatedResize: true)
     }
 
-    private func dismissAll() {
+    private func dismissAll(endingDegradedCaptureSession: Bool = true) {
         lockedOverlayWidth = nil
         overlayState.isCommandMode = false
         overlayState.updateVersion = ""
@@ -811,9 +1145,12 @@ final class RecordingOverlayManager {
         // Tear down any transient notice toast alongside the overlay so it
         // doesn't linger after the session ends.
         noticeToken = nil
+        recordingNoticeReminderFrame = nil
         noticeWindow?.orderOut(nil)
-        degradedCaptureNoticeToken = nil
-        degradedCaptureNoticeWindow?.orderOut(nil)
+        if endingDegradedCaptureSession {
+            endDegradedCombinedCaptureNoticeSessionNow()
+            degradedCaptureNoticeWindow?.orderOut(nil)
+        }
     }
 }
 
@@ -1518,43 +1855,47 @@ struct DegradedCaptureNoticeView: View {
     @State private var isHovering = false
 
     var body: some View {
-        ZStack {
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.circle.fill")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(Color.red.opacity(0.92))
-                Text(message)
-                    .font(.system(size: 12, weight: .medium))
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(Color.red.opacity(0.92))
+            Text(message)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 14)
+        .padding(.trailing, 28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.black)
+        )
+        .overlay(alignment: .trailing) {
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                if isHovering {
-                    Button(action: onDismiss) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 18, height: 18)
-                            .background(Circle().fill(Color.white.opacity(0.14)))
-                    }
-                    .buttonStyle(.plain)
-                    .transition(.opacity)
-                }
+                    .frame(width: 18, height: 18)
+                    .background(Circle().fill(Color.white.opacity(0.14)))
             }
-            .padding(.horizontal, 14)
-            // SwiftUI's own hover tracking (see InputSwitchMenu above) is not
-            // reliable inside this borderless, non-activating panel, so hover
-            // is reported through an NSTrackingArea catcher instead.
+            .buttonStyle(.plain)
+            .padding(.trailing, 10)
+            .opacity(isHovering ? 1 : 0)
+            .allowsHitTesting(isHovering)
+            .accessibilityHidden(!isHovering)
+        }
+        // SwiftUI's own hover tracking (see InputSwitchMenu above) is not
+        // reliable inside this borderless, non-activating panel, so hover
+        // is reported through an NSTrackingArea catcher instead.
+        .overlay {
             DegradedCaptureNoticeHoverCatcher { hovering in
                 withAnimation(.easeOut(duration: 0.14)) {
                     isHovering = hovering
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.black)
-        )
     }
 }
 

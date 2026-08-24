@@ -78,6 +78,7 @@ FULL_SOURCE_APP_STATE_TESTS = \
 	Tests/NativeWhisperModelWorkflowTests.swift \
 	Tests/LocalAIModelWorkflowTests.swift \
 	Tests/AppStateStorageSafetyTests.swift \
+	Tests/CombinedCaptureDegradationTests.swift \
 	Tests/AppStateHistoryProtectionSourceTests.swift \
 	Tests/AppStateTranscriptionConfigurationTests.swift \
 	Tests/AppStateAIProcessingBackendTests.swift \

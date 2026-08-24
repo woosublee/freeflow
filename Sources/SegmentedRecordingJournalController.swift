@@ -196,6 +196,76 @@ final class SegmentedRecordingJournalController {
         }
     }
 
+    func markActiveSourceUnavailableAtStart(
+        _ sourceKind: RecordingJournalSourceKind
+    ) throws {
+        guard claimedTerminalFailure() == nil else {
+            throw SegmentedRecordingJournalControllerError.controllerClosed
+        }
+        try lifecycleQueue.sync {
+            guard claimedTerminalFailure() == nil,
+                  case .recording = state,
+                  let segment else {
+                throw SegmentedRecordingJournalControllerError.controllerClosed
+            }
+            guard let source = segment.sourcesByKind[sourceKind] else {
+                throw RecordingJournalStoreError.invalidSegmentSourceShape
+            }
+            do {
+                var commits: [UUID: RecordingJournalSourceCommit] = [:]
+                for activeSource in segment.sourcesByKind.values {
+                    commits[activeSource.id] = try activeSource.writer.checkpointSnapshot()
+                }
+                _ = try store.recordCheckpointsMarkingSourceUnavailableAtStart(
+                    recordingID: recordingID,
+                    commitsBySourceID: commits,
+                    sourceID: source.id
+                )
+            } catch {
+                handlePersistenceFailureIfNeeded(
+                    error,
+                    segmentSequence: segment.sequence
+                )
+                throw error
+            }
+        }
+    }
+
+    func markActiveSourceUnavailableDuringRecording(
+        _ sourceKind: RecordingJournalSourceKind
+    ) throws {
+        guard claimedTerminalFailure() == nil else {
+            throw SegmentedRecordingJournalControllerError.controllerClosed
+        }
+        try lifecycleQueue.sync {
+            guard claimedTerminalFailure() == nil,
+                  case .recording = state,
+                  let segment else {
+                throw SegmentedRecordingJournalControllerError.controllerClosed
+            }
+            guard let source = segment.sourcesByKind[sourceKind] else {
+                throw RecordingJournalStoreError.invalidSegmentSourceShape
+            }
+            do {
+                var commits: [UUID: RecordingJournalSourceCommit] = [:]
+                for activeSource in segment.sourcesByKind.values {
+                    commits[activeSource.id] = try activeSource.writer.checkpointSnapshot()
+                }
+                _ = try store.recordCheckpointsMarkingSourceUnavailableDuringRecording(
+                    recordingID: recordingID,
+                    commitsBySourceID: commits,
+                    sourceID: source.id
+                )
+            } catch {
+                handlePersistenceFailureIfNeeded(
+                    error,
+                    segmentSequence: segment.sequence
+                )
+                throw error
+            }
+        }
+    }
+
     func switchSegment(
         segmentID: UUID,
         sources: [RecordingJournalSegmentSourceRequest]

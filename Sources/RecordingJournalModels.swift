@@ -59,6 +59,7 @@ enum RecordingRecoveryIssueReason: String, Codable, Equatable {
     case sourceMissing
     case sourceTooShort
     case committedPayloadUnavailable
+    case sourceUnavailableDuringRecording
 }
 
 struct RecordingRecoveryIssue: Codable, Equatable {
@@ -76,6 +77,8 @@ struct RecordingJournalSource: Codable, Equatable {
     var committedFrameCount: UInt64
     var firstCommittedFrameOffset: UInt64?
     let segmentID: UUID
+    var unavailableAtStart: Bool? = nil
+    var unavailableDuringRecording: Bool? = nil
 }
 
 struct RecordingJournalSegment: Codable, Equatable {

@@ -321,6 +321,40 @@ enum MeetingSummaryAvailability: Equatable {
     case generationInProgress
 }
 
+struct RecordingStartLifecycle {
+    private(set) var activeID: UUID?
+    private var cleanupID: UUID?
+
+    var isIdle: Bool { activeID == nil }
+
+    mutating func begin(_ id: UUID) -> Bool {
+        guard activeID == nil else { return false }
+        activeID = id
+        cleanupID = nil
+        return true
+    }
+
+    mutating func beginCleanup(for id: UUID) -> Bool {
+        guard activeID == id, cleanupID == nil else { return false }
+        cleanupID = id
+        return true
+    }
+
+    mutating func beginOrAdoptCleanup(fallbackID: UUID) -> UUID {
+        let id = activeID ?? fallbackID
+        activeID = id
+        cleanupID = id
+        return id
+    }
+
+    mutating func finish(_ id: UUID) -> Bool {
+        guard activeID == id else { return false }
+        activeID = nil
+        cleanupID = nil
+        return true
+    }
+}
+
 final class AppState: ObservableObject, @unchecked Sendable {
     static var audioImportCloudTranscriptionDependenciesFactory:
         () -> CloudTranscriptionDependencies = {
@@ -378,9 +412,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private struct PendingRecordingPermissionContext {
+        let startRequestID: UUID
         let triggerMode: RecordingTriggerMode
         let selectionSnapshot: AppSelectionSnapshot?
         let manualCommandRequested: Bool?
+        let onStarted: (@MainActor () -> Void)?
     }
 
     private let apiKeyStorageKey = "groq_api_key"
@@ -1996,22 +2032,38 @@ final class AppState: ObservableObject, @unchecked Sendable {
     let hotkeyManager = HotkeyManager()
     let overlayManager = RecordingOverlayManager()
     @MainActor
-    private lazy var meetingReminderOverlayManager = MeetingReminderOverlayManager { [weak self] in
-        guard let self else {
-            return MeetingReminderOverlayContext(phase: .idle, layout: .centerDropdownFill)
+    private lazy var meetingReminderOverlayManager: MeetingReminderOverlayManager = {
+        let manager = MeetingReminderOverlayManager { [weak self] in
+            guard let self else {
+                return MeetingReminderOverlayContext(
+                    phase: .idle,
+                    layout: .centerDropdownFill
+                )
+            }
+            let phase: MeetingReminderOverlayContext.Phase =
+                if self.isRecording || self.isDebugOverlayActive {
+                    // Treat the debug overlay as recording so the reminder shows
+                    // its recording (wrapping) variant for visual testing.
+                    .recording
+                } else if self.isTranscribing {
+                    .processing
+                } else {
+                    .idle
+                }
+            let layout: MeetingReminderOverlayContext.Layout =
+                self.recordingOverlayLayout == .notchSides
+                    ? .notchSides
+                    : .centerDropdownFill
+            return MeetingReminderOverlayContext(
+                phase: phase,
+                layout: layout
+            )
         }
-        let phase: MeetingReminderOverlayContext.Phase = if self.isRecording || self.isDebugOverlayActive {
-            // Treat the debug overlay as recording so the reminder shows its
-            // recording (wrapping) variant for visual testing in dev builds.
-            .recording
-        } else if self.isTranscribing {
-            .processing
-        } else {
-            .idle
+        manager.onVisibleOverlayFrameChange = { [weak self] frame in
+            self?.overlayManager.recordingReminderFrameDidChange(frame)
         }
-        let layout: MeetingReminderOverlayContext.Layout = self.recordingOverlayLayout == .notchSides ? .notchSides : .centerDropdownFill
-        return MeetingReminderOverlayContext(phase: phase, layout: layout)
-    }
+        return manager
+    }()
     private var accessibilityTimer: Timer?
     private var audioLevelCancellable: AnyCancellable?
     private var debugOverlayTimer: Timer?
@@ -2139,10 +2191,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func accessibleCurrentRecordingAudioSelection() async -> RecordingAudioSelection? {
+    private func accessibleCurrentRecordingAudioSelection(
+        startRequestID: UUID,
+        onStarted: (@MainActor () -> Void)?
+    ) async -> RecordingAudioSelection? {
         while true {
             let selection = currentRecordingAudioSelection()
-            guard await ensureRecordingInputAccess(for: selection) else {
+            guard await ensureRecordingInputAccess(
+                for: selection,
+                startRequestID: startRequestID,
+                onStarted: onStarted
+            ) else {
                 return nil
             }
             if selection == currentRecordingAudioSelection() {
@@ -2153,6 +2212,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private var activeAudioInputID: String?
     private var activeInputSwitchToken: UUID?
+    private var recordingStartAdmissionLifecycle = RecordingStartLifecycle()
+    private var pendingRecordingStartTask: Task<Void, Never>?
+    private var physicalAudioStartLifecycle = RecordingStartLifecycle()
     private var isActiveInputSwitchPhysicalStopInProgress = false
     private var isCancelConfirmationShowing = false
     private var overlayTranscriptionID: UUID = UUID()
@@ -3018,7 +3080,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         Task { @MainActor [weak self] in
             self?.meetingReminderOverlayManager.onStart = { [weak self] schedule in
-                guard let self else { return }
+                guard let self,
+                      !self.isRecording,
+                      self.recordingStartAdmissionLifecycle.isIdle,
+                      self.physicalAudioStartLifecycle.isIdle else {
+                    return
+                }
                 self.activeRecordingCalendarSnapshot = RecordingCalendarSnapshot(
                     eventID: schedule.event.id,
                     calendarID: schedule.event.calendarID,
@@ -5064,18 +5131,21 @@ final class AppState: ObservableObject, @unchecked Sendable {
         systemAudioRecorder.onPCM16Samples = nil
         systemDefaultAndSystemAudioRecorder.onRecordingReady = nil
         systemDefaultAndSystemAudioRecorder.onRecordingFailure = nil
+        systemDefaultAndSystemAudioRecorder.onRecordingDegraded = nil
     }
 
     @MainActor
     private func configureSelectedAudioRecorderCallbacks(
         inputID: String,
         onReady: @escaping () -> Void,
-        onFailure: @escaping (Error) -> Void
+        onFailure: @escaping (Error) -> Void,
+        onDegraded: ((DegradedCombinedCaptureSource) -> Void)? = nil
     ) {
         clearAudioRecorderCallbacks()
         if AudioInputDevice.isSystemDefaultAndSystemAudio(inputID) {
             systemDefaultAndSystemAudioRecorder.onRecordingReady = onReady
             systemDefaultAndSystemAudioRecorder.onRecordingFailure = onFailure
+            systemDefaultAndSystemAudioRecorder.onRecordingDegraded = onDegraded
         } else if AudioInputDevice.isSystemAudio(inputID) {
             systemAudioRecorder.onRecordingReady = onReady
             systemAudioRecorder.onRecordingFailure = onFailure
@@ -5111,13 +5181,24 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func startSelectedAudioRecorder(
-        selection: RecordingAudioSelection
+        selection: RecordingAudioSelection,
+        sessionID: UUID
     ) async throws -> DegradedCombinedCaptureSource? {
         let inputID = selection.inputID
         let controller = try makeActiveSegmentedJournalController(inputID: inputID)
         attachSegmentedJournalSinks(controller.activeSegment, inputID: inputID)
         do {
             let degradedSource = try await startPhysicalAudioRecorder(selection: selection)
+            guard isCurrentRecordingSession(sessionID),
+                  activeSegmentedJournalController?.recordingID == sessionID else {
+                return degradedSource
+            }
+            if let degradedSource {
+                try markDegradedJournalSourceUnavailableAtStart(
+                    controller: controller,
+                    degradedSource: degradedSource
+                )
+            }
             controller.startCheckpointing { [weak self] error in
                 DispatchQueue.main.async {
                     self?.reportRecordingJournalCheckpointFailure(error)
@@ -5125,12 +5206,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
             return degradedSource
         } catch {
+            guard isCurrentRecordingSession(sessionID),
+                  activeSegmentedJournalController?.recordingID == sessionID else {
+                throw error
+            }
+            if let sourceFailure = controller.terminalPersistenceFailure {
+                handleRecordingJournalPersistenceFailure(sourceFailure)
+                throw error
+            }
             detachSegmentedJournalSinks()
             activeSegmentedJournalController = nil
-            activeRecordingID = nil
-            cancelPhysicalAudioRecorder(inputID: inputID) { [weak self] in
-                self?.discardSegmentedJournal(controller)
-            }
+            await cancelPhysicalAudioRecorder(inputID: inputID)
+            discardSegmentedJournal(controller)
             throw error
         }
     }
@@ -5174,6 +5261,46 @@ final class AppState: ObservableObject, @unchecked Sendable {
         refreshOverlayInputOptions()
     }
 
+    @MainActor
+    private func isCurrentRecordingSession(_ sessionID: UUID) -> Bool {
+        isRecording
+            && activeRecordingTriggerMode != nil
+            && activeRecordingID == sessionID
+    }
+
+    @MainActor
+    private func finishPhysicalAudioStart(_ operationID: UUID) {
+        _ = physicalAudioStartLifecycle.finish(operationID)
+    }
+
+    @MainActor
+    private func takeLiveTranscriberIfOwned(
+        _ transcriber: any LiveTranscriber
+    ) -> (any LiveTranscriber)? {
+        guard let current = liveTranscriber, current === transcriber else {
+            return nil
+        }
+        liveTranscriber = nil
+        return current
+    }
+
+    @MainActor
+    private func rollbackStalePhysicalAudioStart(
+        operationID: UUID,
+        inputID: String,
+        liveTranscriber: (any LiveTranscriber)? = nil
+    ) {
+        liveTranscriber?.cancel()
+        guard physicalAudioStartLifecycle.beginCleanup(for: operationID) else {
+            return
+        }
+        cancelPhysicalAudioRecorder(inputID: inputID) { [weak self] in
+            Task { @MainActor [weak self] in
+                _ = self?.physicalAudioStartLifecycle.finish(operationID)
+            }
+        }
+    }
+
     /// The message a partial combined start surfaces, naming which source
     /// is missing and which one recording continues with.
     static func degradedCombinedCaptureMessage(missing: DegradedCombinedCaptureSource) -> String {
@@ -5186,12 +5313,60 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func showDegradedCombinedCaptureNoticeIfNeeded(_ degradedSource: DegradedCombinedCaptureSource?) {
-        guard let degradedSource else { return }
-        overlayManager.showDegradedCombinedCaptureNotice(
-            Self.degradedCombinedCaptureMessage(missing: degradedSource),
+    private func reconcileDegradedCombinedCaptureNotice(
+        _ degradedSource: DegradedCombinedCaptureSource?,
+        sessionID: UUID
+    ) {
+        let message = degradedSource.map {
+            Self.degradedCombinedCaptureMessage(missing: $0)
+        }
+        overlayManager.reconcileDegradedCombinedCaptureNotice(
+            message: message,
+            sessionID: sessionID,
             reminderFrame: meetingReminderOverlayManager.visibleOverlayFrame
         )
+    }
+
+    @MainActor
+    private func checkpointCombinedRecordingJournalAfterFirstReady(
+        inputID: String,
+        sessionID: UUID
+    ) {
+        guard AudioInputDevice.isSystemDefaultAndSystemAudio(inputID) else {
+            return
+        }
+        guard isCurrentRecordingSession(sessionID),
+              let controller = activeSegmentedJournalController,
+              controller.recordingID == sessionID else {
+            return
+        }
+        do {
+            try controller.checkpoint()
+        } catch {
+            reportRecordingJournalCheckpointFailure(error)
+        }
+    }
+
+    private func markDegradedJournalSourceUnavailableAtStart(
+        controller: SegmentedRecordingJournalController,
+        degradedSource: DegradedCombinedCaptureSource
+    ) throws {
+        let sourceKind: RecordingJournalSourceKind = switch degradedSource {
+        case .microphone: .microphone
+        case .systemAudio: .systemAudio
+        }
+        try controller.markActiveSourceUnavailableAtStart(sourceKind)
+    }
+
+    private func markDegradedJournalSourceUnavailableDuringRecording(
+        controller: SegmentedRecordingJournalController,
+        degradedSource: DegradedCombinedCaptureSource
+    ) throws {
+        let sourceKind: RecordingJournalSourceKind = switch degradedSource {
+        case .microphone: .microphone
+        case .systemAudio: .systemAudio
+        }
+        try controller.markActiveSourceUnavailableDuringRecording(sourceKind)
     }
 
     private func journalSourceRequests(
@@ -5273,12 +5448,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
         prepareForRecordingJournalPersistenceFailure(sourceFailure)
         if physicalStopInProgress { return }
 
+        let cleanupID = beginPhysicalAudioCleanup()
         let inputID = activeAudioInputID ?? selectedMicrophoneID
         stopPhysicalAudioRecorder(inputID: inputID) { [weak self] temporaryURLs in
             guard let self else {
                 for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
                 return
             }
+            _ = self.physicalAudioStartLifecycle.finish(cleanupID)
             self.finishRecordingAfterJournalPersistenceFailure(
                 controller: controller,
                 sourceFailure: sourceFailure,
@@ -5312,6 +5489,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func prepareForRecordingJournalPersistenceFailure(
         _ sourceFailure: RecordingJournalSourcePersistenceFailure
     ) {
+        overlayManager.endDegradedCombinedCaptureNoticeSession()
         activeRecordingStorageFailureID = sourceFailure.recordingID
         detachSegmentedJournalSinks()
         activeInputSwitchToken = nil
@@ -5514,9 +5692,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    private func cancelPhysicalAudioRecorder(inputID: String) async {
+        await withCheckedContinuation { continuation in
+            cancelPhysicalAudioRecorder(inputID: inputID) {
+                continuation.resume()
+            }
+        }
+    }
+
+    private func beginPhysicalAudioCleanup() -> UUID {
+        physicalAudioStartLifecycle.beginOrAdoptCleanup(fallbackID: UUID())
+    }
+
     private func stopActiveAudioRecorder(
         completion: @escaping (StoppedAudioRecording) -> Void
     ) {
+        let cleanupID = beginPhysicalAudioCleanup()
         let inputID = activeAudioInputID ?? selectedMicrophoneID
         stopPhysicalAudioRecorder(inputID: inputID) { [weak self] temporaryURLs in
             guard let self else {
@@ -5529,6 +5720,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 temporaryURLs: temporaryURLs,
                 completion: completion
             )
+            _ = self.physicalAudioStartLifecycle.finish(cleanupID)
         }
     }
 
@@ -5619,12 +5811,17 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private func cancelActiveAudioRecorder() {
+        let cleanupID = beginPhysicalAudioCleanup()
         let inputID = activeAudioInputID ?? selectedMicrophoneID
         activeInputSwitchToken = nil
         isActiveInputSwitchPhysicalStopInProgress = false
         detachSegmentedJournalSinks()
         cancelPhysicalAudioRecorder(inputID: inputID) { [weak self] in
-            self?.discardActiveSegmentedJournal()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                _ = self.physicalAudioStartLifecycle.finish(cleanupID)
+                self.discardActiveSegmentedJournal()
+            }
         }
     }
 
@@ -5795,6 +5992,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     /// durable recording manifest.
     @MainActor
     func switchActiveRecordingInput(to newInputID: String) {
+        guard physicalAudioStartLifecycle.isIdle else { return }
         guard isRecording,
               activeInputSwitchToken == nil,
               let controller = activeSegmentedJournalController else {
@@ -5824,6 +6022,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             microphoneDeviceID: selectedMicrophoneDeviceID
         )
         let switchToken = UUID()
+        guard physicalAudioStartLifecycle.begin(switchToken) else { return }
         activeInputSwitchToken = switchToken
         isActiveInputSwitchPhysicalStopInProgress = true
         tearDownLiveTranscriberOffMainThread()
@@ -5840,6 +6039,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             self.isActiveInputSwitchPhysicalStopInProgress = false
             guard self.activeInputSwitchToken == switchToken,
                   self.isRecording else {
+                self.finishPhysicalAudioStart(switchToken)
                 if self.activeRecordingStorageFailureID == controller.recordingID,
                    let sourceFailure = controller.terminalPersistenceFailure {
                     self.finishRecordingAfterJournalPersistenceFailure(
@@ -5870,45 +6070,113 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 self.refreshOverlayInputOptions()
                 self.configureSelectedAudioRecorderCallbacks(
                     inputID: newInputID,
-                    onReady: {},
+                    onReady: { [weak self] in
+                        DispatchQueue.main.async {
+                            guard let self,
+                                  self.isCurrentRecordingSession(controller.recordingID),
+                                  AudioInputDevice.isSameInput(
+                                      self.activeAudioInputID ?? self.selectedMicrophoneID,
+                                      newInputID
+                                  ) else { return }
+                            self.checkpointCombinedRecordingJournalAfterFirstReady(
+                                inputID: newInputID,
+                                sessionID: controller.recordingID
+                            )
+                        }
+                    },
                     onFailure: { [weak self] error in
                         DispatchQueue.main.async {
-                            self?.finishAfterInputSwitchStartFailure(
-                                error,
-                                switchToken: switchToken
+                            guard let self else { return }
+                            if self.activeInputSwitchToken == switchToken {
+                                self.finishAfterInputSwitchStartFailure(
+                                    error,
+                                    switchToken: switchToken
+                                )
+                            } else if self.isCurrentRecordingSession(controller.recordingID),
+                                      AudioInputDevice.isSameInput(
+                                          self.activeAudioInputID ?? self.selectedMicrophoneID,
+                                          newInputID
+                                      ) {
+                                self.handleRecordingFailure(error)
+                            }
+                        }
+                    },
+                    onDegraded: { [weak self] degradedSource in
+                        DispatchQueue.main.async {
+                            guard let self,
+                                  self.isCurrentRecordingSession(controller.recordingID),
+                                  AudioInputDevice.isSameInput(
+                                      self.activeAudioInputID ?? self.selectedMicrophoneID,
+                                      newInputID
+                                  ) else { return }
+                            do {
+                                try self.markDegradedJournalSourceUnavailableDuringRecording(
+                                    controller: controller,
+                                    degradedSource: degradedSource
+                                )
+                            } catch {
+                                self.reportRecordingJournalCheckpointFailure(error)
+                            }
+                            self.reconcileDegradedCombinedCaptureNotice(
+                                degradedSource,
+                                sessionID: controller.recordingID
                             )
                         }
                     }
                 )
-                Task { [weak self] in
+                Task { @MainActor [weak self] in
                     guard let self else { return }
                     do {
                         let degradedSource = try await self.startPhysicalAudioRecorder(selection: newSelection)
-                        await MainActor.run {
-                            guard self.activeInputSwitchToken == switchToken,
-                                  self.isRecording else { return }
-                            self.activeInputSwitchToken = nil
-                            self.isActiveInputSwitchPhysicalStopInProgress = false
-                            self.audioLevelCancellable = self.activeRecorderAudioLevelPublisher(
+                        guard self.activeInputSwitchToken == switchToken,
+                              self.isCurrentRecordingSession(controller.recordingID) else {
+                            self.rollbackStalePhysicalAudioStart(
+                                operationID: switchToken,
                                 inputID: newInputID
                             )
-                            .receive(on: DispatchQueue.main)
-                            .sink { [weak self] level in
-                                self?.overlayManager.updateAudioLevel(level)
-                            }
-                            self.showDegradedCombinedCaptureNoticeIfNeeded(degradedSource)
+                            return
                         }
-                    } catch {
-                        await MainActor.run {
-                            self.finishAfterInputSwitchStartFailure(
-                                error,
-                                switchToken: switchToken
+                        if let degradedSource {
+                            try self.markDegradedJournalSourceUnavailableAtStart(
+                                controller: controller,
+                                degradedSource: degradedSource
                             )
                         }
+                        self.finishPhysicalAudioStart(switchToken)
+                        self.activeInputSwitchToken = nil
+                        self.isActiveInputSwitchPhysicalStopInProgress = false
+                        self.audioLevelCancellable = self.activeRecorderAudioLevelPublisher(
+                            inputID: newInputID
+                        )
+                        .receive(on: DispatchQueue.main)
+                        .sink { [weak self] level in
+                            guard let self,
+                                  self.isCurrentRecordingSession(controller.recordingID) else { return }
+                            self.overlayManager.updateAudioLevel(level)
+                        }
+                        self.reconcileDegradedCombinedCaptureNotice(
+                            degradedSource,
+                            sessionID: controller.recordingID
+                        )
+                    } catch {
+                        guard self.activeInputSwitchToken == switchToken,
+                              self.isCurrentRecordingSession(controller.recordingID) else {
+                            self.rollbackStalePhysicalAudioStart(
+                                operationID: switchToken,
+                                inputID: newInputID
+                            )
+                            return
+                        }
+                        self.finishPhysicalAudioStart(switchToken)
+                        self.finishAfterInputSwitchStartFailure(
+                            error,
+                            switchToken: switchToken
+                        )
                     }
                 }
             } catch {
                 if let sourceFailure = controller.terminalPersistenceFailure {
+                    self.finishPhysicalAudioStart(switchToken)
                     self.handleRecordingJournalPersistenceFailure(
                         sourceFailure,
                         alreadyStoppedTemporaryURLs: temporaryURLs
@@ -5916,6 +6184,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     return
                 }
                 for url in temporaryURLs { try? FileManager.default.removeItem(at: url) }
+                self.finishPhysicalAudioStart(switchToken)
                 self.activeInputSwitchToken = nil
                 self.isActiveInputSwitchPhysicalStopInProgress = false
                 self.preserveActiveSegmentedJournalForRecovery()
@@ -7647,8 +7916,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
         if isRecording {
             stopAndTranscribe()
         } else {
+            if cancelPendingRecordingStart() {
+                shortcutSessionController.reset()
+                return
+            }
             shortcutSessionController.beginManual(mode: .toggle)
-            startRecording(triggerMode: .toggle)
+            if !startRecording(triggerMode: .toggle) {
+                shortcutSessionController.reset()
+            }
         }
     }
 
@@ -7662,7 +7937,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         mcpLastRecordingFailed = false
         shortcutSessionController.beginManual(mode: .toggle)
-        startRecording(triggerMode: .toggle)
+        guard startRecording(triggerMode: .toggle) else {
+            shortcutSessionController.reset()
+            return false
+        }
         return true
     }
 
@@ -7683,15 +7961,19 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func beginCalendarReminderRecording(onStarted: (@MainActor () -> Void)? = nil) {
-        guard !isRecording else {
-            activeRecordingCalendarSnapshot = nil
+        guard !isRecording,
+              recordingStartAdmissionLifecycle.isIdle,
+              physicalAudioStartLifecycle.isIdle else {
             return
         }
         if transcriptionEnabled {
             lastTranscript = ""
         }
         shortcutSessionController.beginManual(mode: .toggle)
-        startRecording(triggerMode: .toggle, onStarted: onStarted)
+        if !startRecording(triggerMode: .toggle, onStarted: onStarted) {
+            activeRecordingCalendarSnapshot = nil
+            shortcutSessionController.reset()
+        }
     }
 
     @MainActor
@@ -7853,6 +8135,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         guard pendingShortcutStartMode == .toggle || activeRecordingTriggerMode == .toggle else { return }
 
         cancelPendingShortcutStart()
+        _ = cancelPendingRecordingStart()
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
         clearAudioRecorderCallbacks()
@@ -7947,7 +8230,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         guard delay > 0 else {
             pendingShortcutStartMode = nil
-            startRecording(triggerMode: mode)
+            if !startRecording(triggerMode: mode) {
+                shortcutSessionController.reset()
+            }
             return
         }
 
@@ -7966,7 +8251,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 guard let self, let pendingMode = self.pendingShortcutStartMode else { return }
                 self.pendingShortcutStartTask = nil
                 self.pendingShortcutStartMode = nil
-                self.startRecording(triggerMode: pendingMode)
+                if !self.startRecording(triggerMode: pendingMode) {
+                    self.shortcutSessionController.reset()
+                }
             }
         }
     }
@@ -8058,9 +8345,55 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func startRecording(triggerMode: RecordingTriggerMode, onStarted: (@MainActor () -> Void)? = nil) {
-        guard requireAvailableHistoryForMutation() else { return }
-        guard !isRecording else { return }
+    private func completePendingRecordingStartTask(_ startRequestID: UUID) {
+        pendingRecordingStartCount -= 1
+        let permissionRequestOwnsAdmission =
+            pendingMicrophonePermissionContext?.startRequestID == startRequestID
+            || pendingSpeechPermissionContext?.startRequestID == startRequestID
+        if permissionRequestOwnsAdmission {
+            if recordingStartAdmissionLifecycle.activeID == startRequestID {
+                pendingRecordingStartTask = nil
+            }
+            return
+        }
+        if recordingStartAdmissionLifecycle.finish(startRequestID) {
+            pendingRecordingStartTask = nil
+        }
+    }
+
+    @MainActor
+    @discardableResult
+    private func cancelPendingRecordingStart() -> Bool {
+        guard let startRequestID = recordingStartAdmissionLifecycle.activeID else {
+            return false
+        }
+        pendingRecordingStartTask?.cancel()
+        pendingRecordingStartTask = nil
+        _ = recordingStartAdmissionLifecycle.finish(startRequestID)
+        activeRecordingCalendarSnapshot = nil
+        activeRecordingTriggerMode = nil
+        currentSessionIntent = .dictation
+        restoreAudioInterruptionIfNeeded()
+        return true
+    }
+
+    @MainActor
+    @discardableResult
+    private func startRecording(
+        triggerMode: RecordingTriggerMode,
+        onStarted: (@MainActor () -> Void)? = nil
+    ) -> Bool {
+        guard requireAvailableHistoryForMutation() else { return false }
+        guard !isRecording else { return false }
+        guard !isAwaitingMicrophonePermission,
+              !isAwaitingSpeechRecognitionPermission else {
+            return false
+        }
+        guard physicalAudioStartLifecycle.isIdle else { return false }
+        let startRequestID = UUID()
+        guard recordingStartAdmissionLifecycle.begin(startRequestID) else {
+            return false
+        }
         commitSettingsDraftsBeforeRecordingStart()
         let t0 = CFAbsoluteTimeGetCurrent()
         os_log(.info, log: recordingLog, "startRecording() entered")
@@ -8077,19 +8410,30 @@ final class AppState: ObservableObject, @unchecked Sendable {
         cancelPendingShortcutStart()
 
         pendingRecordingStartCount += 1
-        Task { [weak self] in
+        let startTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.pendingRecordingStartCount -= 1 }
+            defer {
+                self.completePendingRecordingStartTask(startRequestID)
+            }
+            guard !Task.isCancelled else { return }
+            guard recordingStartAdmissionLifecycle.activeID == startRequestID else {
+                return
+            }
             let manualCommandRequested = scheduledSelectionSnapshot != nil
                 ? scheduledManualCommandInvocation
                 : hotkeyManager.currentPressedModifiers.contains(commandModeManualModifier.shortcutModifier)
-            guard await prepareRecordingStart(
+            let preparationSucceeded = await prepareRecordingStart(
                 triggerMode: triggerMode,
                 selectionSnapshot: scheduledSelectionSnapshot,
                 selectionSnapshotTask: scheduledSelectionSnapshotTask,
                 manualCommandRequested: manualCommandRequested,
                 startedAt: t0
-            ) else {
+            )
+            guard !Task.isCancelled else { return }
+            guard recordingStartAdmissionLifecycle.activeID == startRequestID else {
+                return
+            }
+            guard preparationSucceeded else {
                 activeRecordingCalendarSnapshot = nil
                 return
             }
@@ -8097,7 +8441,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 activeRecordingCalendarSnapshot = nil
                 return
             }
-            guard let audioSelection = await accessibleCurrentRecordingAudioSelection() else {
+            let accessibleAudioSelection = await accessibleCurrentRecordingAudioSelection(
+                startRequestID: startRequestID,
+                onStarted: onStarted
+            )
+            guard !Task.isCancelled else { return }
+            guard recordingStartAdmissionLifecycle.activeID == startRequestID else {
+                return
+            }
+            guard let audioSelection = accessibleAudioSelection else {
                 if !isAwaitingMicrophonePermission {
                     activeRecordingCalendarSnapshot = nil
                 }
@@ -8112,12 +8464,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 applyAudioInterruptionIfNeeded()
             }
             beginRecording(
+                startRequestID: startRequestID,
                 triggerMode: triggerMode,
                 audioSelection: audioSelection,
                 onStarted: onStarted
             )
             os_log(.info, log: recordingLog, "startRecording() finished: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
         }
+        pendingRecordingStartTask = startTask
+        return true
     }
 
     /// Whether the configured recording flow will actually exercise Accessibility.
@@ -8262,15 +8617,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func prepareForSpeechRecognitionPermissionPrompt(
+        startRequestID: UUID,
         triggerMode: RecordingTriggerMode,
         selectionSnapshot: AppSelectionSnapshot?,
-        manualCommandRequested: Bool?
+        manualCommandRequested: Bool?,
+        onStarted: (@MainActor () -> Void)?
     ) {
+        pendingRecordingStartCount += 1
         isAwaitingSpeechRecognitionPermission = true
         pendingSpeechPermissionContext = PendingRecordingPermissionContext(
+            startRequestID: startRequestID,
             triggerMode: triggerMode,
             selectionSnapshot: selectionSnapshot,
-            manualCommandRequested: manualCommandRequested
+            manualCommandRequested: manualCommandRequested,
+            onStarted: onStarted
         )
         hotkeyManager.stop()
         shortcutSessionController.reset()
@@ -8304,23 +8664,37 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func ensureRecordingInputAccess(
-        for selection: RecordingAudioSelection
+        for selection: RecordingAudioSelection,
+        startRequestID: UUID,
+        onStarted: (@MainActor () -> Void)?
     ) async -> Bool {
         switch AudioRecordingSource(inputID: selection.inputID) {
         case .microphone:
-            return ensureMicrophoneAccess()
+            return ensureMicrophoneAccess(
+                startRequestID: startRequestID,
+                onStarted: onStarted
+            )
         case .systemAudio:
             return await ensureSystemAudioAccess()
         case .microphoneAndSystemAudio:
-            return await ensureSystemDefaultAndSystemAudioAccess()
+            return await ensureSystemDefaultAndSystemAudioAccess(
+                startRequestID: startRequestID,
+                onStarted: onStarted
+            )
         }
     }
 
     @MainActor
-    private func ensureSystemDefaultAndSystemAudioAccess() async -> Bool {
+    private func ensureSystemDefaultAndSystemAudioAccess(
+        startRequestID: UUID,
+        onStarted: (@MainActor () -> Void)?
+    ) async -> Bool {
         let microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         if microphoneStatus == .notDetermined {
-            _ = ensureMicrophoneAccess()
+            _ = ensureMicrophoneAccess(
+                startRequestID: startRequestID,
+                onStarted: onStarted
+            )
             return false
         }
 
@@ -8371,7 +8745,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func ensureMicrophoneAccess() -> Bool {
+    private func ensureMicrophoneAccess(
+        startRequestID: UUID,
+        onStarted: (@MainActor () -> Void)?
+    ) -> Bool {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         switch status {
         case .authorized:
@@ -8382,9 +8759,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
 
             prepareForMicrophonePermissionPrompt(
+                startRequestID: startRequestID,
                 triggerMode: triggerMode,
                 selectionSnapshot: pendingSelectionSnapshot ?? contextService.collectSelectionSnapshot(),
-                manualCommandRequested: currentSessionIntent.isManualCommand
+                manualCommandRequested: currentSessionIntent.isManualCommand,
+                onStarted: onStarted
             )
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
@@ -8395,25 +8774,58 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     strongSelf.restartHotkeyMonitoring()
 
                     guard let pendingContext else {
-                        strongSelf.pendingRecordingStartCount -= 1
+                        if strongSelf.pendingRecordingStartCount > 0 {
+                            strongSelf.pendingRecordingStartCount -= 1
+                        }
+                        return
+                    }
+                    guard strongSelf.recordingStartAdmissionLifecycle.activeID
+                            == pendingContext.startRequestID else {
+                        strongSelf.completePendingRecordingStartTask(
+                            pendingContext.startRequestID
+                        )
                         return
                     }
                     if granted {
                         strongSelf.errorMessage = nil
                         if pendingContext.triggerMode == .toggle {
-                            Task { @MainActor [weak strongSelf] in
+                            let resumeTask = Task { @MainActor [weak strongSelf] in
                                 guard let strongSelf else { return }
-                                defer { strongSelf.pendingRecordingStartCount -= 1 }
-                                guard await strongSelf.prepareRecordingStart(
+                                defer {
+                                    strongSelf.completePendingRecordingStartTask(
+                                        pendingContext.startRequestID
+                                    )
+                                }
+                                guard strongSelf.recordingStartAdmissionLifecycle.activeID
+                                        == pendingContext.startRequestID else {
+                                    return
+                                }
+                                let preparationSucceeded = await strongSelf.prepareRecordingStart(
                                     triggerMode: .toggle,
                                     selectionSnapshot: pendingContext.selectionSnapshot,
                                     manualCommandRequested: pendingContext.manualCommandRequested
-                                ) else { return }
+                                )
+                                guard strongSelf.recordingStartAdmissionLifecycle.activeID
+                                        == pendingContext.startRequestID else {
+                                    return
+                                }
+                                guard preparationSucceeded else { return }
                                 guard strongSelf.requireAvailableHistoryForMutation() else {
                                     strongSelf.activeRecordingCalendarSnapshot = nil
                                     return
                                 }
-                                guard let audioSelection = await strongSelf.accessibleCurrentRecordingAudioSelection() else { return }
+                                let accessibleAudioSelection = await strongSelf
+                                    .accessibleCurrentRecordingAudioSelection(
+                                        startRequestID: pendingContext.startRequestID,
+                                        onStarted: pendingContext.onStarted
+                                    )
+                                guard strongSelf.recordingStartAdmissionLifecycle.activeID
+                                        == pendingContext.startRequestID else {
+                                    return
+                                }
+                                guard let audioSelection = accessibleAudioSelection else {
+                                    return
+                                }
                                 guard strongSelf.requireAvailableHistoryForMutation() else {
                                     strongSelf.activeRecordingCalendarSnapshot = nil
                                     return
@@ -8423,21 +8835,25 @@ final class AppState: ObservableObject, @unchecked Sendable {
                                     strongSelf.applyAudioInterruptionIfNeeded()
                                 }
                                 strongSelf.beginRecording(
+                                    startRequestID: pendingContext.startRequestID,
                                     triggerMode: .toggle,
-                                    audioSelection: audioSelection
+                                    audioSelection: audioSelection,
+                                    onStarted: pendingContext.onStarted
                                 )
                             }
+                            strongSelf.pendingRecordingStartTask = resumeTask
                         } else {
-                            strongSelf.pendingRecordingStartCount -= 1
                             strongSelf.currentSessionIntent = .dictation
                             strongSelf.statusText = localizedCatalogString("Microphone access granted. Press and hold again to record.")
                             strongSelf.scheduleReadyStatusReset(
                                 after: 2,
                                 matching: [localizedCatalogString("Microphone access granted. Press and hold again to record.")]
                             )
+                            strongSelf.completePendingRecordingStartTask(
+                                pendingContext.startRequestID
+                            )
                         }
                     } else {
-                        strongSelf.pendingRecordingStartCount -= 1
                         strongSelf.activeRecordingCalendarSnapshot = nil
                         strongSelf.errorMessage = localizedCatalogString("Microphone permission denied. Grant access in System Settings > Privacy & Security > Microphone.")
                         strongSelf.statusText = localizedCatalogString("No Microphone")
@@ -8445,6 +8861,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         strongSelf.currentSessionIntent = .dictation
                         strongSelf.shortcutSessionController.reset()
                         strongSelf.showMicrophonePermissionAlert()
+                        strongSelf.completePendingRecordingStartTask(
+                            pendingContext.startRequestID
+                        )
                     }
                 }
             }
@@ -8462,16 +8881,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func prepareForMicrophonePermissionPrompt(
+        startRequestID: UUID,
         triggerMode: RecordingTriggerMode,
         selectionSnapshot: AppSelectionSnapshot?,
-        manualCommandRequested: Bool?
+        manualCommandRequested: Bool?,
+        onStarted: (@MainActor () -> Void)?
     ) {
         pendingRecordingStartCount += 1
         isAwaitingMicrophonePermission = true
         pendingMicrophonePermissionContext = PendingRecordingPermissionContext(
+            startRequestID: startRequestID,
             triggerMode: triggerMode,
             selectionSnapshot: selectionSnapshot,
-            manualCommandRequested: manualCommandRequested
+            manualCommandRequested: manualCommandRequested,
+            onStarted: onStarted
         )
         hotkeyManager.stop()
         shortcutSessionController.reset()
@@ -8517,16 +8940,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @MainActor
     private func beginRecording(
+        startRequestID: UUID,
         triggerMode: RecordingTriggerMode,
         audioSelection: RecordingAudioSelection,
         onStarted: (@MainActor () -> Void)? = nil
     ) {
+        guard recordingStartAdmissionLifecycle.activeID == startRequestID,
+              physicalAudioStartLifecycle.isIdle else {
+            return
+        }
         os_log(.info, log: recordingLog, "beginRecording() entered")
         clearPendingOverlayDismissToken()
         overlayTranscriptionID = UUID()
         errorMessage = nil
         let audioInputID = audioSelection.inputID
-        activeRecordingID = UUID()
+        let recordingSessionID = UUID()
+        activeRecordingID = recordingSessionID
         let supportsLiveTranscription = AudioRecordingSource(
             inputID: audioInputID
         ).supportsLiveTranscription
@@ -8548,9 +8977,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     return
                 }
                 prepareForSpeechRecognitionPermissionPrompt(
+                    startRequestID: startRequestID,
                     triggerMode: triggerMode,
                     selectionSnapshot: pendingSelectionSnapshot,
-                    manualCommandRequested: currentSessionIntent.isManualCommand
+                    manualCommandRequested: currentSessionIntent.isManualCommand,
+                    onStarted: onStarted
                 )
                 requestSpeechRecognitionAccess { [weak self] granted in
                     guard let self else { return }
@@ -8560,30 +8991,74 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     self.restartHotkeyMonitoring()
 
                     guard let pendingContext else {
-                        self.activeRecordingID = nil
+                        if self.pendingRecordingStartCount > 0 {
+                            self.pendingRecordingStartCount -= 1
+                        }
+                        return
+                    }
+                    guard self.recordingStartAdmissionLifecycle.activeID
+                            == pendingContext.startRequestID else {
+                        self.completePendingRecordingStartTask(
+                            pendingContext.startRequestID
+                        )
                         return
                     }
                     if granted {
                         self.errorMessage = nil
                         if pendingContext.triggerMode == .toggle {
-                            Task { @MainActor [weak self] in
+                            let resumeTask = Task { @MainActor [weak self] in
                                 guard let self else { return }
-                                guard await self.prepareRecordingStart(
+                                defer {
+                                    self.completePendingRecordingStartTask(
+                                        pendingContext.startRequestID
+                                    )
+                                }
+                                guard self.recordingStartAdmissionLifecycle.activeID
+                                        == pendingContext.startRequestID else {
+                                    return
+                                }
+                                let preparationSucceeded = await self.prepareRecordingStart(
                                     triggerMode: .toggle,
                                     selectionSnapshot: pendingContext.selectionSnapshot,
                                     manualCommandRequested: pendingContext.manualCommandRequested
-                                ) else { return }
-                                guard let audioSelection = await self.accessibleCurrentRecordingAudioSelection() else { return }
+                                )
+                                guard self.recordingStartAdmissionLifecycle.activeID
+                                        == pendingContext.startRequestID else {
+                                    return
+                                }
+                                guard preparationSucceeded else { return }
+                                guard self.requireAvailableHistoryForMutation() else {
+                                    self.activeRecordingCalendarSnapshot = nil
+                                    return
+                                }
+                                let accessibleAudioSelection = await self
+                                    .accessibleCurrentRecordingAudioSelection(
+                                        startRequestID: pendingContext.startRequestID,
+                                        onStarted: pendingContext.onStarted
+                                    )
+                                guard self.recordingStartAdmissionLifecycle.activeID
+                                        == pendingContext.startRequestID else {
+                                    return
+                                }
+                                guard let audioSelection = accessibleAudioSelection else {
+                                    return
+                                }
+                                guard self.requireAvailableHistoryForMutation() else {
+                                    self.activeRecordingCalendarSnapshot = nil
+                                    return
+                                }
                                 self.shortcutSessionController.beginManual(mode: .toggle)
                                 if AudioInputDevice.isMicrophoneOnly(audioSelection.inputID) {
                                     self.applyAudioInterruptionIfNeeded()
                                 }
                                 self.beginRecording(
+                                    startRequestID: pendingContext.startRequestID,
                                     triggerMode: .toggle,
                                     audioSelection: audioSelection,
-                                    onStarted: onStarted
+                                    onStarted: pendingContext.onStarted
                                 )
                             }
+                            self.pendingRecordingStartTask = resumeTask
                         } else {
                             self.currentSessionIntent = .dictation
                             self.restoreAudioInterruptionIfNeeded()
@@ -8591,6 +9066,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             self.scheduleReadyStatusReset(
                                 after: 2,
                                 matching: [localizedCatalogString("Speech Recognition access granted. Press and hold again to record.")]
+                            )
+                            self.completePendingRecordingStartTask(
+                                pendingContext.startRequestID
                             )
                         }
                     } else {
@@ -8603,6 +9081,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         self.currentSessionIntent = .dictation
                         self.shortcutSessionController.reset()
                         self.showSpeechRecognitionPermissionAlert()
+                        self.completePendingRecordingStartTask(
+                            pendingContext.startRequestID
+                        )
                     }
                 }
                 return
@@ -8623,7 +9104,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         }
 
+        guard physicalAudioStartLifecycle.begin(recordingSessionID) else {
+            activeRecordingID = nil
+            activeRecordingTranscriptionEnabled = nil
+            return
+        }
         isRecording = true
+        overlayManager.beginDegradedCombinedCaptureNoticeSession(recordingSessionID)
         syncCriticalDictationActivity()
         meetingReminderOverlayManager.refreshVisibleReminder()
         statusText = localizedCatalogString("Starting...")
@@ -8636,7 +9123,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         recordingInitializationTimer = initTimer
         initTimer.schedule(deadline: .now() + 0.2)
         initTimer.setEventHandler { [weak self] in
-            guard let self, !overlayShown else { return }
+            guard let self,
+                  !overlayShown,
+                  self.isCurrentRecordingSession(recordingSessionID) else { return }
             overlayShown = true
             os_log(.info, log: recordingLog, "engine slow — showing initializing overlay")
             self.clearPendingOverlayDismissToken()
@@ -8655,7 +9144,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
             inputID: audioInputID,
             onReady: { [weak self] in
                 DispatchQueue.main.async {
-                    guard let self else { return }
+                    guard let self,
+                          self.isCurrentRecordingSession(recordingSessionID) else { return }
+                    self.checkpointCombinedRecordingJournalAfterFirstReady(
+                        inputID: audioInputID,
+                        sessionID: recordingSessionID
+                    )
                     self.cancelRecordingInitializationTimer()
                     os_log(.info, log: recordingLog, "first real audio — transitioning to waveform")
                     self.statusText = localizedCatalogString("Recording...")
@@ -8663,12 +9157,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     if overlayShown {
                         self.overlayManager.transitionToRecording(
                             mode: self.activeRecordingTriggerMode ?? triggerMode,
-                            isCommandMode: self.currentSessionIntent.isCommandMode
+                            isCommandMode: self.currentSessionIntent.isCommandMode,
+                            noticeSessionID: recordingSessionID
                         )
                     } else {
                         self.overlayManager.showRecording(
                             mode: self.activeRecordingTriggerMode ?? triggerMode,
-                            isCommandMode: self.currentSessionIntent.isCommandMode
+                            isCommandMode: self.currentSessionIntent.isCommandMode,
+                            noticeSessionID: recordingSessionID
                         )
                     }
                     self.meetingReminderOverlayManager.refreshVisibleReminder()
@@ -8678,9 +9174,31 @@ final class AppState: ObservableObject, @unchecked Sendable {
             },
             onFailure: { [weak self] error in
                 DispatchQueue.main.async {
-                    guard let self else { return }
+                    guard let self,
+                          self.isCurrentRecordingSession(recordingSessionID) else { return }
                     self.cancelRecordingInitializationTimer()
                     self.handleRecordingFailure(error)
+                }
+            },
+            onDegraded: { [weak self] degradedSource in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.isCurrentRecordingSession(recordingSessionID) else { return }
+                    if let controller = self.activeSegmentedJournalController,
+                       controller.recordingID == recordingSessionID {
+                        do {
+                            try self.markDegradedJournalSourceUnavailableDuringRecording(
+                                controller: controller,
+                                degradedSource: degradedSource
+                            )
+                        } catch {
+                            self.reportRecordingJournalCheckpointFailure(error)
+                        }
+                    }
+                    self.reconcileDegradedCombinedCaptureNotice(
+                        degradedSource,
+                        sessionID: recordingSessionID
+                    )
                 }
             }
         )
@@ -8696,11 +9214,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
            let transcriber = localTranscriptionModel.makeLiveTranscriber() {
             // Live transcription: initialize before recording starts so the request is ready
             // to receive buffers from the very first sample
-            Task { [weak self] in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
+                var didPublishLiveTranscriber = false
                 do {
                     try await transcriber.start(locale: transcriptionLanguage.sfSpeechLocale)
+                    guard self.isCurrentRecordingSession(recordingSessionID) else {
+                        transcriber.cancel()
+                        self.finishPhysicalAudioStart(recordingSessionID)
+                        return
+                    }
                     self.liveTranscriber = transcriber
+                    didPublishLiveTranscriber = true
                     if !transcriber.handlesRecording {
                         self.setActiveRecorderPCMHandler { [weak transcriber] data in
                             transcriber?.appendPCM16(data)
@@ -8709,95 +9234,137 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
                     transcriber.onAudioLevel = { [weak self] level in
                         Task { @MainActor [weak self] in
-                            self?.overlayManager.updateAudioLevel(level)
+                            guard let self,
+                                  self.isCurrentRecordingSession(recordingSessionID) else { return }
+                            self.overlayManager.updateAudioLevel(level)
                         }
                     }
 
                     // 녹음 시작 전 예비 노트를 생성해 Note Browser에 즉시 표시
-                    let liveID = self.activeRecordingID ?? UUID()
-                    self.activeRecordingID = liveID
+                    let liveID = recordingSessionID
                     self.currentRecordingLiveNoteID = liveID
                     transcriber.onPartialResult = { [weak self] text in
                         Task { @MainActor [weak self] in
-                            self?.updateLiveNoteTranscript(noteID: liveID, text)
+                            guard let self,
+                                  self.isCurrentRecordingSession(recordingSessionID) else { return }
+                            self.updateLiveNoteTranscript(noteID: liveID, text)
                         }
                     }
-                    await MainActor.run {
-                        self.createLiveNote(jobID: liveID, noteID: liveID)
-                    }
+                    self.createLiveNote(jobID: liveID, noteID: liveID)
 
                     let t0 = CFAbsoluteTimeGetCurrent()
                     if transcriber.handlesRecording {
                         // AVAudioEngine이 transcriber.start()에서 이미 시작됨 — 녹음 UI만 트리거
                         let actualRecordingStartedAt = Date()
-                        await MainActor.run {
-                            self.markRecordingStarted(actualRecordingStartedAt)
-                            if self.isRecording, self.activeRecordingTriggerMode != nil {
-                                onStarted?()
-                            }
+                        guard self.isCurrentRecordingSession(recordingSessionID) else {
+                            self.takeLiveTranscriberIfOwned(transcriber)?.cancel()
+                            self.finishPhysicalAudioStart(recordingSessionID)
+                            return
                         }
+                        self.markRecordingStarted(actualRecordingStartedAt)
+                        onStarted?()
+                        self.finishPhysicalAudioStart(recordingSessionID)
                         self.audioRecorder.onRecordingReady?()
                     } else {
-                        let degradedSource = try await self.startSelectedAudioRecorder(selection: audioSelection)
+                        let degradedSource = try await self.startSelectedAudioRecorder(
+                            selection: audioSelection,
+                            sessionID: recordingSessionID
+                        )
                         let actualRecordingStartedAt = Date()
-                        await MainActor.run {
-                            self.markRecordingStarted(actualRecordingStartedAt)
-                            if self.isRecording, self.activeRecordingTriggerMode != nil {
-                                onStarted?()
-                            }
-                            self.showDegradedCombinedCaptureNoticeIfNeeded(degradedSource)
+                        guard self.isCurrentRecordingSession(recordingSessionID) else {
+                            self.rollbackStalePhysicalAudioStart(
+                                operationID: recordingSessionID,
+                                inputID: audioInputID,
+                                liveTranscriber: self.takeLiveTranscriberIfOwned(transcriber)
+                            )
+                            return
                         }
+                        self.finishPhysicalAudioStart(recordingSessionID)
+                        self.markRecordingStarted(actualRecordingStartedAt)
+                        onStarted?()
+                        self.reconcileDegradedCombinedCaptureNotice(
+                            degradedSource,
+                            sessionID: recordingSessionID
+                        )
                         os_log(.info, log: recordingLog, "selected audio recorder start done: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
                     }
-                    await MainActor.run {
-                        guard self.isRecording, self.activeRecordingTriggerMode != nil else { return }
-                        if shouldTranscribe {
-                            self.startContextCapture()
-                        }
-                        if !transcriber.handlesRecording {
-                            self.audioLevelCancellable = self.activeRecorderAudioLevelPublisher(inputID: audioInputID)
-                                .receive(on: DispatchQueue.main)
-                                .sink { [weak self] level in
-                                    self?.overlayManager.updateAudioLevel(level)
-                                }
-                        }
+                    guard self.isCurrentRecordingSession(recordingSessionID) else { return }
+                    if shouldTranscribe {
+                        self.startContextCapture()
                     }
-                } catch {
-                    await MainActor.run {
-                        self.cancelRecordingInitializationTimer()
-                        guard self.isRecording || self.activeRecordingTriggerMode != nil else { return }
-                        self.handleRecordingFailure(error)
-                    }
-                }
-            }
-        } else {
-            Task { [weak self] in
-                guard let self else { return }
-                let t0 = CFAbsoluteTimeGetCurrent()
-                do {
-                    let degradedSource = try await self.startSelectedAudioRecorder(selection: audioSelection)
-                    let actualRecordingStartedAt = Date()
-                    os_log(.info, log: recordingLog, "selected audio recorder start done: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
-                    await MainActor.run {
-                        self.markRecordingStarted(actualRecordingStartedAt)
-                        guard self.isRecording, self.activeRecordingTriggerMode != nil else { return }
-                        onStarted?()
-                        if shouldTranscribe {
-                            self.startContextCapture()
-                        }
+                    if !transcriber.handlesRecording {
                         self.audioLevelCancellable = self.activeRecorderAudioLevelPublisher(inputID: audioInputID)
                             .receive(on: DispatchQueue.main)
                             .sink { [weak self] level in
-                                self?.overlayManager.updateAudioLevel(level)
+                                guard let self,
+                                      self.isCurrentRecordingSession(recordingSessionID) else { return }
+                                self.overlayManager.updateAudioLevel(level)
                             }
-                        self.showDegradedCombinedCaptureNoticeIfNeeded(degradedSource)
                     }
                 } catch {
-                    await MainActor.run {
-                        self.cancelRecordingInitializationTimer()
-                        guard self.isRecording || self.activeRecordingTriggerMode != nil else { return }
-                        self.handleRecordingFailure(error)
+                    self.cancelRecordingInitializationTimer()
+                    let transcriberToCancel = didPublishLiveTranscriber
+                        ? self.takeLiveTranscriberIfOwned(transcriber)
+                        : transcriber
+                    guard self.isCurrentRecordingSession(recordingSessionID) else {
+                        self.rollbackStalePhysicalAudioStart(
+                            operationID: recordingSessionID,
+                            inputID: audioInputID,
+                            liveTranscriber: transcriberToCancel
+                        )
+                        return
                     }
+                    transcriberToCancel?.cancel()
+                    self.finishPhysicalAudioStart(recordingSessionID)
+                    self.handleRecordingFailure(error)
+                }
+            }
+        } else {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let t0 = CFAbsoluteTimeGetCurrent()
+                do {
+                    let degradedSource = try await self.startSelectedAudioRecorder(
+                        selection: audioSelection,
+                        sessionID: recordingSessionID
+                    )
+                    let actualRecordingStartedAt = Date()
+                    os_log(.info, log: recordingLog, "selected audio recorder start done: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
+                    guard self.isCurrentRecordingSession(recordingSessionID) else {
+                        self.rollbackStalePhysicalAudioStart(
+                            operationID: recordingSessionID,
+                            inputID: audioInputID
+                        )
+                        return
+                    }
+                    self.finishPhysicalAudioStart(recordingSessionID)
+                    self.markRecordingStarted(actualRecordingStartedAt)
+                    onStarted?()
+                    if shouldTranscribe {
+                        self.startContextCapture()
+                    }
+                    self.audioLevelCancellable = self.activeRecorderAudioLevelPublisher(inputID: audioInputID)
+                        .receive(on: DispatchQueue.main)
+                        .sink { [weak self] level in
+                            guard let self,
+                                  self.isCurrentRecordingSession(recordingSessionID) else { return }
+                            self.overlayManager.updateAudioLevel(level)
+                        }
+                    self.reconcileDegradedCombinedCaptureNotice(
+                        degradedSource,
+                        sessionID: recordingSessionID
+                    )
+                } catch {
+                    self.cancelRecordingInitializationTimer()
+                    guard self.isCurrentRecordingSession(recordingSessionID) else {
+                        self.rollbackStalePhysicalAudioStart(
+                            operationID: recordingSessionID,
+                            inputID: audioInputID
+                        )
+                        return
+                    }
+                    self.finishPhysicalAudioStart(recordingSessionID)
+                    self.handleRecordingFailure(error)
                 }
             }
         }
@@ -9479,6 +10046,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @MainActor
     private func stopAndTranscribe() {
         guard activeRecordingStorageFailureID == nil else { return }
+        overlayManager.endDegradedCombinedCaptureNoticeSession()
         cancelPendingShortcutStart()
         cancelRecordingInitializationTimer()
         shortcutSessionController.reset()

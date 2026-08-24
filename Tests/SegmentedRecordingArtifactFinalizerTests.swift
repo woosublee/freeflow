@@ -7,8 +7,10 @@ struct SegmentedRecordingArtifactFinalizerTests {
         do {
             try completeSegmentsPromoteOneOrderedWAV()
             try damagedSourcesProduceDeterministicPartialRecovery()
-            try emptyCompanionSourceProducesPartialRecovery()
-            try emptyPreparationSegmentDoesNotMakeRecoveryPartial()
+            try unavailableCompanionSourceProducesCompleteArtifact()
+            try runtimeUnavailableSourceProducesPartialArtifact()
+            try expectedZeroByteSourceProducesPartialArtifact()
+            try emptySwitchedSourceProducesPartialArtifact()
             try noUsableAudioPreservesInflightRecording()
             try promotedPartialResultReusesStoredMetadataWithoutSources()
             try interruptionReasonSurvivesCompleteAndPartialPromotion()
@@ -167,9 +169,10 @@ struct SegmentedRecordingArtifactFinalizerTests {
         }
     }
 
-    private static func emptyCompanionSourceProducesPartialRecovery() throws {
+    private static func unavailableCompanionSourceProducesCompleteArtifact() throws {
         try withFixture { fixture in
             let controller = try fixture.makeController()
+            controller.activeSegment.microphoneSink?.enqueue(pcmData([1, 2]))
             let microphoneSourceID = UUID()
             let systemSourceID = UUID()
             let combined = try controller.switchSegment(
@@ -186,13 +189,128 @@ struct SegmentedRecordingArtifactFinalizerTests {
                 ]
             )
             combined.systemAudioSink?.enqueue(pcmData([7, 8]))
+            try controller.markActiveSourceUnavailableAtStart(.microphone)
+            let admittedManifest = try fixture.store.loadManifest(
+                recordingID: fixture.recordingID
+            )
+            try expectEqual(
+                admittedManifest.sources.first(where: {
+                    $0.id == microphoneSourceID
+                })?.unavailableAtStart,
+                true,
+                "degraded companion is marked unavailable"
+            )
+            try expectEqual(
+                admittedManifest.sources.first(where: {
+                    $0.id == systemSourceID
+                })?.unavailableAtStart,
+                nil,
+                "surviving source remains expected"
+            )
+            guard let survivingSource = admittedManifest.sources.first(where: {
+                $0.id == systemSourceID
+            }), survivingSource.committedDataByteCount > 0 else {
+                throw TestFailure(
+                    "degraded-start availability and surviving audio must commit atomically"
+                )
+            }
             try controller.stopAndClose()
 
             let result = try fixture.finalizer.finalizeAndPromote(
                 recordingID: fixture.recordingID
             )
 
-            try expectEqual(result.mode, .partial, "empty companion mode")
+            try expectEqual(result.mode, .complete, "empty companion mode")
+            try expectEqual(
+                result.promotion.resolvedRecoveryIssues,
+                [],
+                "an unavailable companion source is a healthy degraded segment"
+            )
+            try expectEqual(
+                try readSamples(from: result.destinationURL),
+                [1, 2, 7, 8],
+                "empty companion survivor"
+            )
+        }
+    }
+
+    private static func runtimeUnavailableSourceProducesPartialArtifact() throws {
+        try withFixture { fixture in
+            let controller = try fixture.makeController()
+            controller.activeSegment.microphoneSink?.enqueue(pcmData([1, 2]))
+            let microphoneSourceID = UUID()
+            let systemSourceID = UUID()
+            let combined = try controller.switchSegment(
+                segmentID: UUID(),
+                sources: [
+                    RecordingJournalSegmentSourceRequest(
+                        id: microphoneSourceID,
+                        kind: .microphone
+                    ),
+                    RecordingJournalSegmentSourceRequest(
+                        id: systemSourceID,
+                        kind: .systemAudio
+                    )
+                ]
+            )
+            combined.microphoneSink?.enqueue(pcmData([3, 4]))
+            combined.systemAudioSink?.enqueue(pcmData([5, 6]))
+            try controller.markActiveSourceUnavailableDuringRecording(.systemAudio)
+
+            let degradedManifest = try fixture.store.loadManifest(
+                recordingID: fixture.recordingID
+            )
+            try expectEqual(
+                degradedManifest.sources.first(where: {
+                    $0.id == systemSourceID
+                })?.unavailableDuringRecording,
+                true,
+                "runtime source loss is persisted"
+            )
+            try controller.stopAndClose()
+
+            let result = try fixture.finalizer.finalizeAndPromote(
+                recordingID: fixture.recordingID
+            )
+
+            try expectEqual(result.mode, .partial, "runtime degraded mode")
+            try expectEqual(
+                result.promotion.resolvedRecoveryIssues,
+                [RecordingRecoveryIssue(
+                    segmentSequence: 1,
+                    sourceKind: .systemAudio,
+                    reason: .sourceUnavailableDuringRecording
+                )],
+                "runtime source loss remains visible in recovery metadata"
+            )
+        }
+    }
+
+    private static func expectedZeroByteSourceProducesPartialArtifact() throws {
+        try withFixture { fixture in
+            let controller = try fixture.makeController()
+            controller.activeSegment.microphoneSink?.enqueue(pcmData([3, 4]))
+            let combined = try controller.switchSegment(
+                segmentID: UUID(),
+                sources: [
+                    RecordingJournalSegmentSourceRequest(
+                        id: UUID(),
+                        kind: .microphone
+                    ),
+                    RecordingJournalSegmentSourceRequest(
+                        id: UUID(),
+                        kind: .systemAudio
+                    )
+                ]
+            )
+            combined.systemAudioSink?.enqueue(pcmData([9, 10]))
+            try controller.stopAndClose()
+
+            let result = try fixture.finalizer.finalizeAndPromote(
+                recordingID: fixture.recordingID
+            )
+
+            try expectEqual(result.mode, .partial, "expected zero-byte mode")
             try expectEqual(
                 result.promotion.resolvedRecoveryIssues,
                 [RecordingRecoveryIssue(
@@ -200,17 +318,17 @@ struct SegmentedRecordingArtifactFinalizerTests {
                     sourceKind: .microphone,
                     reason: .noCommittedAudio
                 )],
-                "empty companion issue"
+                "expected zero-byte source issue"
             )
             try expectEqual(
                 try readSamples(from: result.destinationURL),
-                [7, 8],
-                "empty companion survivor"
+                [3, 4, 9, 10],
+                "expected zero-byte survivor"
             )
         }
     }
 
-    private static func emptyPreparationSegmentDoesNotMakeRecoveryPartial() throws {
+    private static func emptySwitchedSourceProducesPartialArtifact() throws {
         try withFixture { fixture in
             let controller = try fixture.makeController()
             controller.activeSegment.microphoneSink?.enqueue(pcmData([1, 2, 3]))
@@ -227,12 +345,20 @@ struct SegmentedRecordingArtifactFinalizerTests {
                 recordingID: fixture.recordingID
             )
 
-            try expectEqual(result.mode, .complete, "empty preparation mode")
-            try expectEqual(result.promotion.resolvedRecoveryIssues, [], "empty preparation issues")
+            try expectEqual(result.mode, .partial, "empty switched-source mode")
+            try expectEqual(
+                result.promotion.resolvedRecoveryIssues,
+                [RecordingRecoveryIssue(
+                    segmentSequence: 1,
+                    sourceKind: .systemAudio,
+                    reason: .noCommittedAudio
+                )],
+                "empty switched-source issue"
+            )
             try expectEqual(
                 try readSamples(from: result.destinationURL),
                 [1, 2, 3],
-                "empty preparation samples"
+                "empty switched-source samples"
             )
         }
     }

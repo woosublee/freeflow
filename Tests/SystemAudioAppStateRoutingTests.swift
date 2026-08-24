@@ -29,6 +29,8 @@ struct SystemAudioAppStateRoutingTests {
         precondition(physicalStartBody.contains("systemAudioRecorder.startRecording"))
         precondition(physicalStartBody.contains("audioRecorder.startRecording"))
         precondition(physicalStartBody.contains("applySystemDefaultMicrophoneFallback"))
+        precondition(physicalStartBody.contains("degradedSource = result.missingSource"))
+        precondition(!physicalStartBody.contains("systemDefaultAndSystemAudioRecorder.currentMissingSource"))
 
         let inputAccessBody = try functionBody(named: "ensureRecordingInputAccess", in: source)
         precondition(inputAccessBody.contains("switch AudioRecordingSource(inputID: selection.inputID)"))
@@ -39,14 +41,16 @@ struct SystemAudioAppStateRoutingTests {
         let beginRecordingBody = try functionBody(named: "beginRecording", in: source)
         precondition(beginRecordingBody.contains(".supportsLiveTranscription"))
         precondition(beginRecordingBody.contains("startRealtimeStreamingIfEnabled()"))
-        precondition(beginRecordingBody.contains("startSelectedAudioRecorder(selection: audioSelection)"))
+        precondition(beginRecordingBody.contains("startSelectedAudioRecorder("))
+        precondition(beginRecordingBody.contains("sessionID: recordingSessionID"))
 
         let accessibleSelectionBody = try functionBody(
             named: "accessibleCurrentRecordingAudioSelection",
             in: source
         )
         precondition(accessibleSelectionBody.contains("let selection = currentRecordingAudioSelection()"))
-        precondition(accessibleSelectionBody.contains("ensureRecordingInputAccess(for: selection)"))
+        precondition(accessibleSelectionBody.contains("ensureRecordingInputAccess("))
+        precondition(accessibleSelectionBody.contains("startRequestID: startRequestID"))
         precondition(accessibleSelectionBody.contains("selection == currentRecordingAudioSelection()"))
 
         precondition(noteBrowserSource.contains("ForEach(transcriptionChoiceDisplays(in: \"Cloud\"))"))
@@ -56,14 +60,22 @@ struct SystemAudioAppStateRoutingTests {
         precondition(source.contains("private struct PendingRecordingPermissionContext"))
         precondition(source.contains("pendingMicrophonePermissionContext"))
         precondition(source.contains("pendingSpeechPermissionContext"))
-        precondition(source.contains("Task { @MainActor [weak strongSelf] in"))
+        precondition(source.contains(
+            "let resumeTask = Task { @MainActor [weak strongSelf] in"
+        ))
+        precondition(source.contains(
+            "let resumeTask = Task { @MainActor [weak self] in"
+        ))
         precondition(!source.contains("pendingMicrophonePermissionAudioSelection"))
         precondition(!source.contains("pendingSpeechPermissionAudioSelection"))
 
         let systemDefaultAndSystemAudioAccessBody = try functionBody(named: "ensureSystemDefaultAndSystemAudioAccess", in: source)
         let microphoneUndeterminedBranch = """
         if microphoneStatus == .notDetermined {
-            _ = ensureMicrophoneAccess()
+            _ = ensureMicrophoneAccess(
+                startRequestID: startRequestID,
+                onStarted: onStarted
+            )
             return false
         }
 """

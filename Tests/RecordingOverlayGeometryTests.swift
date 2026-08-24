@@ -8,6 +8,10 @@ struct RecordingOverlayGeometryTests {
         testTranscribingWidthFallsBackToCenteredWidthAfterNotchSideRecording()
         testTranscribingWidthKeepsExistingLockOnRepeatedTranscribingUpdate()
         testNotchSideLayoutPhaseEligibility()
+        testTransientNoticeStacksBelowPersistentDegradedNotice()
+        testNoticeAnchorUsesTargetFrameWhileOverlayAnimates()
+        testLocalizedNoticeWidthUsesMeasuredText()
+        testDegradedNoticeKeepsWiderAnchorWidth()
         testNSScreenNumberBridgesThroughNSNumber()
         testRecordingOverlayUsesSharedScreenGeometry()
         try testNotchSideOverlayAvoidsContainerAudioLevelAnimation()
@@ -79,6 +83,93 @@ struct RecordingOverlayGeometryTests {
             phase: .recording,
             hasNotchGeometry: false
         ))
+    }
+
+    private static func testTransientNoticeStacksBelowPersistentDegradedNotice() {
+        let overlay = NSRect(x: 700, y: 900, width: 150, height: 38)
+        let degraded = RecordingNoticeStackGeometry.anchoredFrame(
+            below: overlay,
+            width: 260,
+            height: 34,
+            gap: 6
+        )
+        let transientAnchor = RecordingNoticeStackGeometry.lowestVisibleFrame([
+            overlay,
+            degraded
+        ])
+        let transient = RecordingNoticeStackGeometry.anchoredFrame(
+            below: transientAnchor!,
+            width: 300,
+            height: 30,
+            gap: 6
+        )
+
+        assert(transient.maxY <= degraded.minY - 6)
+        assert(transient.midX == degraded.midX)
+    }
+
+    private static func testNoticeAnchorUsesTargetFrameWhileOverlayAnimates() {
+        let hiddenPresentationFrame = NSRect(
+            x: 700,
+            y: 982,
+            width: 150,
+            height: 38
+        )
+        let targetRecordingFrame = NSRect(
+            x: 700,
+            y: 906,
+            width: 150,
+            height: 76
+        )
+
+        assert(
+            RecordingNoticeStackGeometry.overlayAnchorFrame(
+                visibleFrame: hiddenPresentationFrame,
+                targetFrame: targetRecordingFrame
+            ) == targetRecordingFrame
+        )
+        assert(
+            RecordingNoticeStackGeometry.overlayAnchorFrame(
+                visibleFrame: hiddenPresentationFrame,
+                targetFrame: .zero
+            ) == hiddenPresentationFrame
+        )
+        assert(
+            RecordingNoticeStackGeometry.overlayAnchorFrame(
+                visibleFrame: nil,
+                targetFrame: targetRecordingFrame
+            ) == nil
+        )
+    }
+
+    private static func testLocalizedNoticeWidthUsesMeasuredText() {
+        let message = "시스템 오디오 없음 — 마이크만으로 녹음 중"
+        let width = RecordingNoticeStackGeometry.fittedNoticeWidth(
+            message: message,
+            horizontalChromeWidth: 66,
+            minimumWidth: 200,
+            maximumWidth: 1_000
+        )
+        let characterCountEstimate = CGFloat(message.count) * 6.8 + 66
+        let measuredTextWidth = (message as NSString).size(
+            withAttributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .medium)
+            ]
+        ).width
+
+        assert(width == ceil(measuredTextWidth + 66))
+        assert(width > characterCountEstimate)
+    }
+
+    private static func testDegradedNoticeKeepsWiderAnchorWidth() {
+        let anchorWidth: CGFloat = 335
+        let width = RecordingNoticeStackGeometry.degradedCaptureNoticeWidth(
+            message: "마이크 없음 — 시스템 오디오만으로 녹음 중",
+            anchorWidth: anchorWidth,
+            maximumWidth: 1_000
+        )
+
+        assert(width == anchorWidth)
     }
 
     private static func testNSScreenNumberBridgesThroughNSNumber() {
