@@ -1,6 +1,6 @@
 ## Summary
 
-<!-- What changed? Keep this concrete and user-visible where possible. -->
+<!-- What changed in Quill? Keep this concrete and user-visible where possible. -->
 
 ## Why
 

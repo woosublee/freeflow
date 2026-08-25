@@ -100,13 +100,6 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Install build tools
-        run: |
-          if brew tap | grep -qx 'aws/tap'; then
-            brew untap aws/tap
-          fi
-          brew install create-dmg fileicon
-
       # Required GitHub secrets:
       #   DEVELOPER_ID_CERTIFICATE_BASE64 — base64-encoded .p12 Developer ID certificate
       #   DEVELOPER_ID_CERTIFICATE_PASSWORD — password for the .p12
@@ -196,7 +189,12 @@ jobs:
         run: scripts/generate-sparkle-appcast.sh
 
       - name: Create tag
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
+          AUTHORIZATION="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64)"
+          git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic $AUTHORIZATION"
+          trap 'git config --local --unset-all http.https://github.com/.extraheader || true' EXIT
           git tag "${{ steps.version.outputs.tag }}" "$GITHUB_SHA"
           git push origin "refs/tags/${{ steps.version.outputs.tag }}"
 

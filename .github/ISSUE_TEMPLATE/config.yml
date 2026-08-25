@@ -1,5 +1,1 @@
-blank_issues_enabled: false
-contact_links:
-  - name: Questions and support
-    url: https://github.com/zachlatta/freeflow/discussions
-    about: Ask usage questions or get help from the community.
+blank_issues_enabled: true

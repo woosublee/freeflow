@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -57,7 +57,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -76,12 +76,32 @@ jobs:
       - name: Validate app localization bundle
         run: make localization-bundle-test CODESIGN_IDENTITY=-
 
+  repository-validation:
+    name: Repository validation
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate repository files
+        run: make validate
+
+      - name: Check changed files for whitespace errors
+        if: github.event_name == 'pull_request'
+        run: git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+
   tests:
     name: Tests
     if: ${{ always() }}
     needs:
       - test-shards
       - localization
+      - repository-validation
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -90,6 +110,8 @@ jobs:
         env:
           TEST_SHARDS_RESULT: ${{ needs.test-shards.result }}
           LOCALIZATION_RESULT: ${{ needs.localization.result }}
+          VALIDATION_RESULT: ${{ needs.repository-validation.result }}
         run: |
           test "$TEST_SHARDS_RESULT" = "success"
           test "$LOCALIZATION_RESULT" = "success"
+          test "$VALIDATION_RESULT" = "success"
