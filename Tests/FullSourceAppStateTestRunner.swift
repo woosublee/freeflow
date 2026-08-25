@@ -22,6 +22,7 @@ struct FullSourceAppStateTestRunner {
             try await NativeWhisperModelWorkflowTests.main()
             try await LocalAIModelWorkflowTests.main()
             try await AppStateStorageSafetyTests.main()
+            try await CombinedCaptureDegradationTests.main()
             try AppStateHistoryProtectionSourceTests.main()
             try await AppStateTranscriptionConfigurationTests.main()
             try await AppStateAIProcessingBackendTests.main()

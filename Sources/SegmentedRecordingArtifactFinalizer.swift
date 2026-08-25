@@ -82,8 +82,24 @@ struct SegmentedRecordingArtifactFinalizer {
                 case .usable(let finalized):
                     usableByKind[source.kind] = finalized
                     hasCommittedOrDamagedAudio = true
+                    if source.unavailableDuringRecording == true {
+                        segmentIssues.append(RecordingRecoveryIssue(
+                            segmentSequence: segment.sequence,
+                            sourceKind: source.kind,
+                            reason: .sourceUnavailableDuringRecording
+                        ))
+                    }
                 case .noCommittedAudio:
-                    break
+                    if source.unavailableAtStart != true {
+                        hasCommittedOrDamagedAudio = true
+                        segmentIssues.append(RecordingRecoveryIssue(
+                            segmentSequence: segment.sequence,
+                            sourceKind: source.kind,
+                            reason: source.unavailableDuringRecording == true
+                                ? .sourceUnavailableDuringRecording
+                                : .noCommittedAudio
+                        ))
+                    }
                 case .unavailable(let reason):
                     hasCommittedOrDamagedAudio = true
                     segmentIssues.append(RecordingRecoveryIssue(
@@ -99,15 +115,6 @@ struct SegmentedRecordingArtifactFinalizer {
                     issues.append(contentsOf: segmentIssues)
                 }
                 continue
-            }
-            for source in sources
-                where source.committedDataByteCount == 0
-                    && usableByKind[source.kind] == nil {
-                segmentIssues.append(RecordingRecoveryIssue(
-                    segmentSequence: segment.sequence,
-                    sourceKind: source.kind,
-                    reason: .noCommittedAudio
-                ))
             }
             issues.append(contentsOf: segmentIssues)
             renderedSegments.append(AudioMixdownSegment(

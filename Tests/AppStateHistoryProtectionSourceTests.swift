@@ -94,14 +94,17 @@ struct AppStateHistoryProtectionSourceTests {
         // callback) is disproportionate to this suite; the occurrence count is
         // the cheapest faithful proxy for "the recheck was not deleted."
         let recordingStartRange = try source.range(
-            from: "private func startRecording(triggerMode: RecordingTriggerMode",
+            from: "private func startRecording(",
             to: "/// Whether the configured recording flow will actually exercise Accessibility."
         )
         let recordingStart = String(source[recordingStartRange])
         try expect(
             source.contains("private var pendingRecordingStartCount = 0")
                 && recordingStart.contains("pendingRecordingStartCount += 1")
-                && recordingStart.contains("defer { self.pendingRecordingStartCount -= 1 }"),
+                && recordingStart.contains("defer {")
+                && recordingStart.contains(
+                    "self.completePendingRecordingStartTask(startRequestID)"
+                ),
             "an awaited recording start tracks itself as pending via defer, so an early throw or return still decrements the count"
         )
         try expect(
@@ -109,14 +112,15 @@ struct AppStateHistoryProtectionSourceTests {
             "an awaited recording start rechecks archive protection before creating writers"
         )
         let microphonePermissionRange = try source.range(
-            from: "private func ensureMicrophoneAccess() -> Bool",
+            from: "private func ensureMicrophoneAccess(",
             to: "private func applyAudioInterruptionIfNeeded()"
         )
         let microphonePermission = String(source[microphonePermissionRange])
         try expect(
             microphonePermission.contains("pendingRecordingStartCount += 1")
+                && microphonePermission.contains("defer {")
                 && microphonePermission.contains(
-                    "defer { strongSelf.pendingRecordingStartCount -= 1 }"
+                    "strongSelf.completePendingRecordingStartTask("
                 ),
             "microphone permission resumption tracks itself as pending via defer, so an early throw or return still decrements the count"
         )

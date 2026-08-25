@@ -38,6 +38,43 @@ enum SystemAudioRecorderError: LocalizedError {
     }
 }
 
+struct SystemAudioRecorderGenerationLifecycle {
+    private(set) var currentID: UUID?
+    private var streamID: ObjectIdentifier?
+
+    mutating func begin(_ id: UUID) {
+        currentID = id
+        streamID = nil
+    }
+
+    func owns(_ id: UUID) -> Bool {
+        currentID == id
+    }
+
+    mutating func bind(_ stream: AnyObject, to id: UUID) -> Bool {
+        guard owns(id) else { return false }
+        streamID = ObjectIdentifier(stream)
+        return true
+    }
+
+    func generation(for stream: AnyObject) -> UUID? {
+        guard streamID == ObjectIdentifier(stream) else { return nil }
+        return currentID
+    }
+
+    mutating func invalidate(_ id: UUID) -> Bool {
+        guard owns(id) else { return false }
+        currentID = nil
+        streamID = nil
+        return true
+    }
+
+    mutating func invalidateCurrent() {
+        currentID = nil
+        streamID = nil
+    }
+}
+
 final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private static let sessionQueueKey = DispatchSpecificKey<UInt8>()
     private static let watchdogTimeout: TimeInterval = 2.0
@@ -52,6 +89,9 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
     private let recordingConverterLock = OSAllocatedUnfairLock<AVAudioConverter?>(initialState: nil)
     private let pcm16ConverterLock = OSAllocatedUnfairLock<AVAudioConverter?>(initialState: nil)
     private let callbacksLock = OSAllocatedUnfairLock(initialState: CallbackState())
+    private let generationLock = OSAllocatedUnfairLock(
+        initialState: SystemAudioRecorderGenerationLifecycle()
+    )
     private let normalizedPCM16SinkLock =
         OSAllocatedUnfairLock<(any NormalizedPCM16Sink)?>(initialState: nil)
 
@@ -111,6 +151,7 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
     deinit {
         let cleanup = {
             self.cancelWatchdog()
+            self.generationLock.withLock { $0.invalidateCurrent() }
             self._recording.withLock { $0 = false }
             self.stream = nil
             if let url = self.resetSampleBufferState(outputURL: nil) {
@@ -126,6 +167,10 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
     }
 
     func startRecording() async throws {
+        let generationID = UUID()
+        generationLock.withLock { generation in
+            generation.begin(generationID)
+        }
         let t0 = CFAbsoluteTimeGetCurrent()
         _bufferCount.withLock { $0 = 0 }
         failureReported = false
@@ -133,6 +178,11 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
 
         let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".wav")
         let content = try await Self.loadShareableContent()
+        guard generationLock.withLock({ generation in
+            generation.owns(generationID)
+        }) else {
+            throw CancellationError()
+        }
         guard let display = content.displays.first else {
             throw SystemAudioRecorderError.noDisplayAvailable
         }
@@ -155,24 +205,58 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
             throw SystemAudioRecorderError.failedToAddAudioOutput(error.localizedDescription)
         }
 
-        await withCheckedContinuation { continuation in
+        guard generationLock.withLock({ generation in
+            generation.bind(stream, to: generationID)
+        }) else {
+            throw CancellationError()
+        }
+        let installed = await withCheckedContinuation { continuation in
             sessionQueue.async {
+                guard self.generationLock.withLock({ generation in
+                    generation.generation(for: stream) == generationID
+                }) else {
+                    continuation.resume(returning: false)
+                    return
+                }
                 self.stream = stream
                 let staleOutputURL = self.resetSampleBufferState(outputURL: outputURL, recordingStartTime: t0)
                 if let staleOutputURL {
                     try? FileManager.default.removeItem(at: staleOutputURL)
                 }
                 self._recording.withLock { $0 = true }
-                self.startBufferWatchdog()
-                continuation.resume()
+                self.startBufferWatchdog(
+                    expectedStream: stream,
+                    generationID: generationID
+                )
+                continuation.resume(returning: true)
             }
+        }
+        guard installed else {
+            throw CancellationError()
         }
 
         do {
             try await stream.startCapture()
         } catch {
-            await discardFailedStart(outputURL: outputURL)
+            guard currentStreamSnapshot() === stream,
+                  generationLock.withLock({ generation in
+                      generation.generation(for: stream) == generationID
+                  }) else {
+                try? await stream.stopCapture()
+                throw CancellationError()
+            }
+            await discardFailedStart(
+                expectedStream: stream,
+                outputURL: outputURL
+            )
             throw SystemAudioRecorderError.failedToStartCapture(error.localizedDescription)
+        }
+        guard currentStreamSnapshot() === stream,
+              generationLock.withLock({ generation in
+                  generation.generation(for: stream) == generationID
+              }) else {
+            try? await stream.stopCapture()
+            throw CancellationError()
         }
 
         await MainActor.run {
@@ -183,6 +267,7 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
     }
 
     func stopRecording(completion: @escaping (URL?) -> Void) {
+        invalidateCurrentGeneration()
         let currentStream = currentStreamSnapshot()
         Task {
             var shouldDiscardRecording = false
@@ -194,7 +279,11 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
                     os_log(.error, log: systemAudioRecordingLog, "stopCapture failed: %{public}@", error.localizedDescription)
                 }
             }
-            finishRecording(discard: shouldDiscardRecording, completion: completion)
+            finishRecording(
+                expectedStream: currentStream,
+                discard: shouldDiscardRecording,
+                completion: completion
+            )
         }
     }
 
@@ -203,12 +292,16 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
     }
 
     func cancelRecording(completion: (() -> Void)?) {
+        invalidateCurrentGeneration()
         let currentStream = currentStreamSnapshot()
         Task {
             if let currentStream {
                 try? await currentStream.stopCapture()
             }
-            finishRecording(discard: true) { _ in
+            finishRecording(
+                expectedStream: currentStream,
+                discard: true
+            ) { _ in
                 completion?()
             }
         }
@@ -229,6 +322,9 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
+        guard let generationID = generationLock.withLock({ generation in
+            generation.generation(for: stream)
+        }) else { return }
         guard _recording.withLock({ $0 }) else { return }
         guard CMSampleBufferIsValid(sampleBuffer) else { return }
 
@@ -236,7 +332,7 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
             try appendSampleBufferToFile(sampleBuffer)
         } catch {
             fileWriteErrorLock.withLock { _ in fileWriteError = error }
-            reportRecordingFailure(error)
+            reportRecordingFailure(error, expectedStream: stream)
             return
         }
 
@@ -245,7 +341,11 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
             value += 1
             return value
         }
-        let rms = updateAudioLevel(from: sampleBuffer)
+        let rms = updateAudioLevel(
+            from: sampleBuffer,
+            stream: stream,
+            generationID: generationID
+        )
         if count <= Self.sampleRateLogLimit {
             let elapsed = (CFAbsoluteTimeGetCurrent() - recordingStartTime) * 1000
             os_log(.info, log: systemAudioRecordingLog, "buffer #%d at %.3fms, rms=%.6f", count, elapsed, rms)
@@ -253,12 +353,17 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
         if !readyFired {
             readyFired = true
             let onRecordingReady = self.onRecordingReady
-            DispatchQueue.main.async { onRecordingReady?() }
+            DispatchQueue.main.async {
+                guard self.generationLock.withLock({ generation in
+                    generation.generation(for: stream) == generationID
+                }) else { return }
+                onRecordingReady?()
+            }
         }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        reportRecordingFailure(error)
+        reportRecordingFailure(error, expectedStream: stream)
     }
 
     private static func loadShareableContent() async throws -> SCShareableContent {
@@ -274,10 +379,18 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
         }
     }
 
-    private func discardFailedStart(outputURL: URL) async {
+    private func discardFailedStart(
+        expectedStream: SCStream,
+        outputURL: URL
+    ) async {
         await withCheckedContinuation { continuation in
             sessionQueue.async {
+                guard self.stream === expectedStream else {
+                    continuation.resume()
+                    return
+                }
                 self.cancelWatchdog()
+                self.generationLock.withLock { $0.invalidateCurrent() }
                 self.stream = nil
                 let fileURLToDelete = self.resetSampleBufferState(outputURL: nil) ?? outputURL
                 self._recording.withLock { $0 = false }
@@ -289,6 +402,12 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
                     continuation.resume()
                 }
             }
+        }
+    }
+
+    private func invalidateCurrentGeneration() {
+        generationLock.withLock { generation in
+            generation.invalidateCurrent()
         }
     }
 
@@ -319,8 +438,16 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
         return staleOutputURL
     }
 
-    private func finishRecording(discard: Bool, completion: ((URL?) -> Void)?) {
+    private func finishRecording(
+        expectedStream: SCStream?,
+        discard: Bool,
+        completion: ((URL?) -> Void)?
+    ) {
         sessionQueue.async {
+            guard self.stream === expectedStream else {
+                DispatchQueue.main.async { completion?(nil) }
+                return
+            }
             self.cancelWatchdog()
             let finishedRecording = self.finishAudioFileLocked(discard: discard)
             self.stream = nil
@@ -337,11 +464,22 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
         }
     }
 
-    private func reportRecordingFailure(_ error: Error) {
+    private func reportRecordingFailure(
+        _ error: Error,
+        expectedStream: SCStream? = nil
+    ) {
+        let onRecordingFailure = self.onRecordingFailure
         sessionQueue.async {
+            if let expectedStream {
+                guard self.stream === expectedStream,
+                      self.generationLock.withLock({ generation in
+                          generation.generation(for: expectedStream) != nil
+                      }) else { return }
+            }
             guard !self.failureReported else { return }
             self.failureReported = true
             self.cancelWatchdog()
+            self.generationLock.withLock { $0.invalidateCurrent() }
             self._recording.withLock { $0 = false }
 
             let finishedRecording = self.finishAudioFileLocked(discard: true)
@@ -351,7 +489,6 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
                 try? FileManager.default.removeItem(at: fileURLToDelete)
             }
 
-            let onRecordingFailure = self.onRecordingFailure
             DispatchQueue.main.async {
                 self.isRecording = false
                 self.audioLevel = 0.0
@@ -360,7 +497,10 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
         }
     }
 
-    private func startBufferWatchdog() {
+    private func startBufferWatchdog(
+        expectedStream: SCStream,
+        generationID: UUID
+    ) {
         let baselineCount = _bufferCount.withLock { $0 }
         cancelWatchdog()
 
@@ -368,12 +508,18 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
         timer.schedule(deadline: .now() + Self.watchdogTimeout)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
+            guard self.generationLock.withLock({ generation in
+                generation.generation(for: expectedStream) == generationID
+            }) else { return }
             guard self._recording.withLock({ $0 }) else { return }
 
             let count = self._bufferCount.withLock { $0 }
             if count == baselineCount {
                 os_log(.error, log: systemAudioRecordingLog, "watchdog: no new buffers after %.1fs — giving up", Self.watchdogTimeout)
-                self.reportRecordingFailure(SystemAudioRecorderError.noAudioBuffersReceived)
+                self.reportRecordingFailure(
+                    SystemAudioRecorderError.noAudioBuffersReceived,
+                    expectedStream: expectedStream
+                )
             } else {
                 os_log(.info, log: systemAudioRecordingLog, "watchdog: %d new buffers after %.1fs — healthy", count - baselineCount, Self.watchdogTimeout)
             }
@@ -658,7 +804,11 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
         return ConversionResult(buffer: outputBuffer, status: String(describing: status))
     }
 
-    private func updateAudioLevel(from sampleBuffer: CMSampleBuffer) -> Float {
+    private func updateAudioLevel(
+        from sampleBuffer: CMSampleBuffer,
+        stream: SCStream,
+        generationID: UUID
+    ) -> Float {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return 0 }
         guard let sourceFormat = try? validatedPCMBufferFormat(
             AVAudioFormat(cmAudioFormatDescription: formatDescription),
@@ -679,6 +829,9 @@ final class SystemAudioRecorder: NSObject, ObservableObject, SCStreamOutput, SCS
         }
 
         DispatchQueue.main.async {
+            guard self.generationLock.withLock({ generation in
+                generation.generation(for: stream) == generationID
+            }) else { return }
             self.audioLevel = normalizedDisplayLevel
         }
         return rms

@@ -73,6 +73,36 @@ struct AudioRecorderStartResult: Equatable {
     let usedSystemDefaultFallback: Bool
 }
 
+struct AudioRecorderGenerationLifecycle {
+    private(set) var currentID: UUID?
+    private var outputID: ObjectIdentifier?
+
+    mutating func begin(_ id: UUID) {
+        currentID = id
+        outputID = nil
+    }
+
+    mutating func bind(_ output: AnyObject, to id: UUID) -> Bool {
+        guard owns(id) else { return false }
+        outputID = ObjectIdentifier(output)
+        return true
+    }
+
+    func owns(_ id: UUID) -> Bool {
+        currentID == id
+    }
+
+    func generation(for output: AnyObject) -> UUID? {
+        guard outputID == ObjectIdentifier(output) else { return nil }
+        return currentID
+    }
+
+    mutating func invalidateCurrent() {
+        currentID = nil
+        outputID = nil
+    }
+}
+
 enum AudioRecorderError: LocalizedError {
     case invalidInputFormat(String)
     case missingInputDevice
@@ -123,9 +153,19 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     private let _recording = OSAllocatedUnfairLock(initialState: false)
     @Published var audioLevel: Float = 0.0
     private let liveLevelNormalizerLock = OSAllocatedUnfairLock(initialState: LiveAudioLevelNormalizer())
+    private let generationLock = OSAllocatedUnfairLock(
+        initialState: AudioRecorderGenerationLifecycle()
+    )
+    private let callbacksLock = OSAllocatedUnfairLock(initialState: CallbackState())
 
-    var onRecordingReady: (() -> Void)?
-    var onRecordingFailure: ((Error) -> Void)?
+    var onRecordingReady: (() -> Void)? {
+        get { callbacksLock.withLock { $0.onRecordingReady } }
+        set { callbacksLock.withLock { $0.onRecordingReady = newValue } }
+    }
+    var onRecordingFailure: ((Error) -> Void)? {
+        get { callbacksLock.withLock { $0.onRecordingFailure } }
+        set { callbacksLock.withLock { $0.onRecordingFailure = newValue } }
+    }
     private let normalizedPCM16SinkLock =
         OSAllocatedUnfairLock<(any NormalizedPCM16Sink)?>(initialState: nil)
     var normalizedPCM16Sink: (any NormalizedPCM16Sink)? {
@@ -137,7 +177,10 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     /// input rate). Set before ``startRecording`` to stream audio out-of-band
     /// to a realtime transcription socket. The recorder writes a normalized
     /// 16 kHz mono PCM16 WAV file independently for upload-based transcription.
-    var onPCM16Samples: ((Data) -> Void)?
+    var onPCM16Samples: ((Data) -> Void)? {
+        get { callbacksLock.withLock { $0.onPCM16Samples } }
+        set { callbacksLock.withLock { $0.onPCM16Samples = newValue } }
+    }
     private let recordingConverterLock = OSAllocatedUnfairLock<AVAudioConverter?>(initialState: nil)
     private let pcm16ConverterLock = OSAllocatedUnfairLock<AVAudioConverter?>(initialState: nil)
     private var pcm16InputFormat: AVAudioFormat?
@@ -163,6 +206,12 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     private var failureReported = false
     private static let watchdogTimeout: TimeInterval = 2.0
     private static let sampleRateLogLimit = 40
+
+    private struct CallbackState {
+        var onRecordingReady: (() -> Void)?
+        var onRecordingFailure: ((Error) -> Void)?
+        var onPCM16Samples: ((Data) -> Void)?
+    }
 
     override init() {
         super.init()
@@ -225,7 +274,10 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         return (fallbackDevice, true)
     }
 
-    private func installSessionObservers(for session: AVCaptureSession) {
+    private func installSessionObservers(
+        for session: AVCaptureSession,
+        generationID: UUID
+    ) {
         removeSessionObservers()
 
         let runtimeObserver = NotificationCenter.default.addObserver(
@@ -236,7 +288,10 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             let error = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError
             let wrapped = error.map { AudioRecorderError.failedToStartCaptureSession($0.localizedDescription) }
                 ?? AudioRecorderError.failedToStartCaptureSession("Unknown runtime error")
-            self?.reportRecordingFailure(wrapped)
+            self?.reportRecordingFailure(
+                wrapped,
+                expectedGenerationID: generationID
+            )
         }
         sessionObservers.append(runtimeObserver)
 
@@ -245,7 +300,10 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             object: session,
             queue: nil
         ) { [weak self] notification in
-            self?.handleSessionInterrupted(notification)
+            self?.handleSessionInterrupted(
+                notification,
+                expectedGenerationID: generationID
+            )
         }
         sessionObservers.append(interruptionObserver)
 
@@ -254,7 +312,10 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             object: session,
             queue: nil
         ) { [weak self] notification in
-            self?.handleSessionInterruptionEnded(notification)
+            self?.handleSessionInterruptionEnded(
+                notification,
+                expectedGenerationID: generationID
+            )
         }
         sessionObservers.append(interruptionEndedObserver)
     }
@@ -280,8 +341,16 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         audioDataOutput = nil
     }
 
-    private func reportRecordingFailure(_ error: Error, completion: ((URL?) -> Void)? = nil) {
+    private func reportRecordingFailure(
+        _ error: Error,
+        expectedGenerationID: UUID,
+        completion: ((URL?) -> Void)? = nil
+    ) {
+        let onRecordingFailure = self.onRecordingFailure
         sessionQueue.async {
+            guard self.generationLock.withLock({ generation in
+                generation.owns(expectedGenerationID)
+            }) else { return }
             guard !self.failureReported else { return }
             self.failureReported = true
             self.cancelWatchdog()
@@ -296,15 +365,18 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             }
 
             DispatchQueue.main.async {
+                guard self.generationLock.withLock({ generation in
+                    generation.owns(expectedGenerationID)
+                }) else { return }
                 self.isRecording = false
                 self.audioLevel = 0.0
-                self.onRecordingFailure?(error)
+                onRecordingFailure?(error)
                 completion?(nil)
             }
         }
     }
 
-    private func startBufferWatchdog() {
+    private func startBufferWatchdog(generationID: UUID) {
         let baselineCount = _bufferCount.withLock { $0 }
         cancelWatchdog()
 
@@ -312,6 +384,9 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         timer.schedule(deadline: .now() + Self.watchdogTimeout)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
+            guard self.generationLock.withLock({ generation in
+                generation.owns(generationID)
+            }) else { return }
             guard self._recording.withLock({ $0 }) else { return }
             guard !self.isSessionInterrupted else {
                 os_log(.info, log: recordingLog, "watchdog suspended while capture session is interrupted")
@@ -321,7 +396,10 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             let count = self._bufferCount.withLock { $0 }
             if count == baselineCount {
                 os_log(.error, log: recordingLog, "watchdog: no new buffers after %.1fs — giving up", Self.watchdogTimeout)
-                self.reportRecordingFailure(AudioRecorderError.noAudioBuffersReceived)
+                self.reportRecordingFailure(
+                    AudioRecorderError.noAudioBuffersReceived,
+                    expectedGenerationID: generationID
+                )
             } else {
                 os_log(.info, log: recordingLog, "watchdog: %d new buffers after %.1fs — healthy", count - baselineCount, Self.watchdogTimeout)
             }
@@ -362,9 +440,15 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         return shouldKeepFile ? finalizedURL : nil
     }
 
-    private func handleSessionInterrupted(_ notification: Notification) {
+    private func handleSessionInterrupted(
+        _ notification: Notification,
+        expectedGenerationID: UUID
+    ) {
         _ = notification
         sessionQueue.async {
+            guard self.generationLock.withLock({ generation in
+                generation.owns(expectedGenerationID)
+            }) else { return }
             guard self._recording.withLock({ $0 }) else { return }
             self.isSessionInterrupted = true
             self.cancelWatchdog()
@@ -372,13 +456,19 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         }
     }
 
-    private func handleSessionInterruptionEnded(_ notification: Notification) {
+    private func handleSessionInterruptionEnded(
+        _ notification: Notification,
+        expectedGenerationID: UUID
+    ) {
         _ = notification
         sessionQueue.async {
+            guard self.generationLock.withLock({ generation in
+                generation.owns(expectedGenerationID)
+            }) else { return }
             guard self._recording.withLock({ $0 }) else { return }
             self.isSessionInterrupted = false
             os_log(.info, log: recordingLog, "capture session interruption ended — restarting watchdog")
-            self.startBufferWatchdog()
+            self.startBufferWatchdog(generationID: expectedGenerationID)
         }
     }
 
@@ -630,7 +720,8 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
     private func makeSession(
         deviceUID: String?,
-        outputURL: URL
+        outputURL: URL,
+        generationID: UUID
     ) throws -> AudioRecorderStartResult {
         teardownSessionLocked()
 
@@ -642,6 +733,11 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
         let session = AVCaptureSession()
         let dataOutput = AVCaptureAudioDataOutput()
+        guard generationLock.withLock({ generation in
+            generation.bind(dataOutput, to: generationID)
+        }) else {
+            throw CancellationError()
+        }
         dataOutput.audioSettings = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: recordingTargetFormat.sampleRate,
@@ -696,7 +792,10 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         fileWriteErrorLock.withLock { _ in
             fileWriteError = nil
         }
-        installSessionObservers(for: session)
+        installSessionObservers(
+            for: session,
+            generationID: generationID
+        )
 
         os_log(.info, log: recordingLog, "configured capture session with device %{public}@ [uid=%{public}@]", device.localizedName, device.uniqueID)
 
@@ -716,6 +815,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
     @discardableResult
     func startRecording(deviceUID: String? = nil) throws -> AudioRecorderStartResult {
+        let generationID = UUID()
         let t0 = CFAbsoluteTimeGetCurrent()
         recordingStartTime = t0
         _bufferCount.withLock { $0 = 0 }
@@ -731,12 +831,16 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         let startResult: AudioRecorderStartResult
         do {
             startResult = try sessionQueue.sync {
+                self.generationLock.withLock { generation in
+                    generation.begin(generationID)
+                }
                 let result = try self.makeSession(
                     deviceUID: deviceUID,
-                    outputURL: outputURL
+                    outputURL: outputURL,
+                    generationID: generationID
                 )
                 self._recording.withLock { $0 = true }
-                self.startBufferWatchdog()
+                self.startBufferWatchdog(generationID: generationID)
                 return result
             }
         } catch {
@@ -751,6 +855,9 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         }
 
         DispatchQueue.main.async {
+            guard self.generationLock.withLock({ generation in
+                generation.owns(generationID)
+            }) else { return }
             self.isRecording = true
             self.audioLevel = 0.0
         }
@@ -759,6 +866,9 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     }
 
     func stopRecording(completion: @escaping (URL?) -> Void) {
+        generationLock.withLock { generation in
+            generation.invalidateCurrent()
+        }
         let count = _bufferCount.withLock { $0 }
         let elapsed = (CFAbsoluteTimeGetCurrent() - recordingStartTime) * 1000
         os_log(.info, log: recordingLog, "stopRecording() called: %.3fms after start, %d buffers received", elapsed, count)
@@ -782,6 +892,9 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     }
 
     func cancelRecording(completion: (() -> Void)?) {
+        generationLock.withLock { generation in
+            generation.invalidateCurrent()
+        }
         sessionQueue.async {
             self.cancelWatchdog()
             self.teardownSessionLocked()
@@ -814,7 +927,10 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         }
     }
 
-    private func updateAudioLevel(from sampleBuffer: CMSampleBuffer) -> Float {
+    private func updateAudioLevel(
+        from sampleBuffer: CMSampleBuffer,
+        generationID: UUID
+    ) -> Float {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return 0 }
         guard let sourceFormat = try? validatedPCMBufferFormat(
             AVAudioFormat(cmAudioFormatDescription: formatDescription),
@@ -835,6 +951,9 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         }
 
         DispatchQueue.main.async {
+            guard self.generationLock.withLock({ generation in
+                generation.owns(generationID)
+            }) else { return }
             self.audioLevel = normalizedDisplayLevel
         }
         return rms
@@ -977,6 +1096,9 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        guard let generationID = generationLock.withLock({ generation in
+            generation.generation(for: output)
+        }) else { return }
         guard _recording.withLock({ $0 }) else { return }
 
         do {
@@ -986,7 +1108,10 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
                 fileWriteError = error
             }
             os_log(.error, log: recordingLog, "audio file write failed: %{public}@", error.localizedDescription)
-            reportRecordingFailure(error)
+            reportRecordingFailure(
+                error,
+                expectedGenerationID: generationID
+            )
             return
         }
 
@@ -997,18 +1122,25 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             return value
         }
 
-        let rms = updateAudioLevel(from: sampleBuffer)
+        let rms = updateAudioLevel(
+            from: sampleBuffer,
+            generationID: generationID
+        )
         if count <= Self.sampleRateLogLimit {
             let elapsed = (CFAbsoluteTimeGetCurrent() - recordingStartTime) * 1000
             os_log(.info, log: recordingLog, "buffer #%d at %.3fms, rms=%.6f", count, elapsed, rms)
         }
 
-        if !readyFired && rms > 0 {
+        if !readyFired {
             readyFired = true
             let elapsed = (CFAbsoluteTimeGetCurrent() - recordingStartTime) * 1000
-            os_log(.info, log: recordingLog, "FIRST non-silent buffer at %.3fms — recording ready", elapsed)
+            os_log(.info, log: recordingLog, "FIRST valid buffer at %.3fms — recording ready", elapsed)
+            let onRecordingReady = self.onRecordingReady
             DispatchQueue.main.async {
-                self.onRecordingReady?()
+                guard self.generationLock.withLock({ generation in
+                    generation.owns(generationID)
+                }) else { return }
+                onRecordingReady?()
             }
         }
     }

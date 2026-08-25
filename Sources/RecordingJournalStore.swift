@@ -158,6 +158,19 @@ final class RecordingJournalStore {
     private let fileManager: FileManager
     private let manifestWriter: RecordingJournalManifestWriter
 
+    private enum SourceAvailabilityMarker {
+        case unavailableAtStart(UUID)
+        case unavailableDuringRecording(UUID)
+
+        var sourceID: UUID {
+            switch self {
+            case .unavailableAtStart(let sourceID),
+                 .unavailableDuringRecording(let sourceID):
+                return sourceID
+            }
+        }
+    }
+
     init(
         audioDirectory: URL,
         now: @escaping () -> Date = Date.init,
@@ -218,8 +231,7 @@ final class RecordingJournalStore {
                 committedDataByteCount: 0,
                 committedFrameCount: 0,
                 firstCommittedFrameOffset: nil,
-                segmentID: request.segmentID
-            )
+                segmentID: request.segmentID            )
             let manifest = RecordingJournalManifest(
                 schemaVersion: 1,
                 generation: 1,
@@ -324,8 +336,7 @@ final class RecordingJournalStore {
                     committedDataByteCount: 0,
                     committedFrameCount: 0,
                     firstCommittedFrameOffset: nil,
-                    segmentID: request.segmentID
-                )
+                    segmentID: request.segmentID                )
                 let systemAudioSource = RecordingJournalSource(
                     id: request.systemAudioSourceID,
                     kind: .systemAudio,
@@ -334,8 +345,7 @@ final class RecordingJournalStore {
                     committedDataByteCount: 0,
                     committedFrameCount: 0,
                     firstCommittedFrameOffset: nil,
-                    segmentID: request.segmentID
-                )
+                    segmentID: request.segmentID                )
                 let manifest = RecordingJournalManifest(
                     schemaVersion: 1,
                     generation: 1,
@@ -448,8 +458,7 @@ final class RecordingJournalStore {
                             committedDataByteCount: 0,
                             committedFrameCount: 0,
                             firstCommittedFrameOffset: nil,
-                            segmentID: request.segmentID
-                        )
+                            segmentID: request.segmentID                        )
                     },
                     segments: [RecordingJournalSegment(
                         id: request.segmentID,
@@ -573,8 +582,7 @@ final class RecordingJournalStore {
                         committedDataByteCount: 0,
                         committedFrameCount: 0,
                         firstCommittedFrameOffset: nil,
-                        segmentID: segmentID
-                    )
+                        segmentID: segmentID                    )
                 }
                 let (nextGeneration, overflow) =
                     manifest.generation.addingReportingOverflow(1)
@@ -614,6 +622,28 @@ final class RecordingJournalStore {
         }
     }
 
+    func markSourceUnavailableAtStart(
+        recordingID: UUID,
+        sourceID: UUID
+    ) throws -> RecordingJournalManifest {
+        try recordCheckpoints(
+            recordingID: recordingID,
+            commitsBySourceID: [:],
+            availabilityMarker: .unavailableAtStart(sourceID)
+        )
+    }
+
+    func markSourceUnavailableDuringRecording(
+        recordingID: UUID,
+        sourceID: UUID
+    ) throws -> RecordingJournalManifest {
+        try recordCheckpoints(
+            recordingID: recordingID,
+            commitsBySourceID: [:],
+            availabilityMarker: .unavailableDuringRecording(sourceID)
+        )
+    }
+
     func recordCheckpoint(
         recordingID: UUID,
         sourceID: UUID,
@@ -629,11 +659,48 @@ final class RecordingJournalStore {
         recordingID: UUID,
         commitsBySourceID: [UUID: RecordingJournalSourceCommit]
     ) throws -> RecordingJournalManifest {
+        try recordCheckpoints(
+            recordingID: recordingID,
+            commitsBySourceID: commitsBySourceID,
+            availabilityMarker: nil
+        )
+    }
+
+    func recordCheckpointsMarkingSourceUnavailableAtStart(
+        recordingID: UUID,
+        commitsBySourceID: [UUID: RecordingJournalSourceCommit],
+        sourceID: UUID
+    ) throws -> RecordingJournalManifest {
+        try recordCheckpoints(
+            recordingID: recordingID,
+            commitsBySourceID: commitsBySourceID,
+            availabilityMarker: .unavailableAtStart(sourceID)
+        )
+    }
+
+    func recordCheckpointsMarkingSourceUnavailableDuringRecording(
+        recordingID: UUID,
+        commitsBySourceID: [UUID: RecordingJournalSourceCommit],
+        sourceID: UUID
+    ) throws -> RecordingJournalManifest {
+        try recordCheckpoints(
+            recordingID: recordingID,
+            commitsBySourceID: commitsBySourceID,
+            availabilityMarker: .unavailableDuringRecording(sourceID)
+        )
+    }
+
+    private func recordCheckpoints(
+        recordingID: UUID,
+        commitsBySourceID: [UUID: RecordingJournalSourceCommit],
+        availabilityMarker: SourceAvailabilityMarker?
+    ) throws -> RecordingJournalManifest {
         try lock.withLock {
             var manifest = try loadManifestUnlocked(recordingID: recordingID)
             guard manifest.state == .recording
-                    || manifest.state == .stopping
-                    || manifest.state == .recoverable else {
+                    || availabilityMarker == nil
+                        && (manifest.state == .stopping
+                            || manifest.state == .recoverable) else {
                 throw RecordingJournalStoreError.invalidCheckpointState(
                     manifest.state
                 )
@@ -643,7 +710,32 @@ final class RecordingJournalStore {
                 commitsBySourceID,
                 in: manifest
             )
-            guard !changedUpdates.isEmpty else { return manifest }
+            let markerIndex: Int?
+            let shouldMarkAvailability: Bool
+            if let availabilityMarker {
+                guard let index = manifest.sources.firstIndex(where: {
+                    $0.id == availabilityMarker.sourceID
+                }) else {
+                    throw RecordingJournalStoreError.sourceNotFound(
+                        availabilityMarker.sourceID
+                    )
+                }
+                markerIndex = index
+                switch availabilityMarker {
+                case .unavailableAtStart:
+                    shouldMarkAvailability =
+                        manifest.sources[index].unavailableAtStart != true
+                case .unavailableDuringRecording:
+                    shouldMarkAvailability =
+                        manifest.sources[index].unavailableDuringRecording != true
+                }
+            } else {
+                markerIndex = nil
+                shouldMarkAvailability = false
+            }
+            guard !changedUpdates.isEmpty || shouldMarkAvailability else {
+                return manifest
+            }
 
             let (nextGeneration, generationOverflow) =
                 manifest.generation.addingReportingOverflow(1)
@@ -660,6 +752,16 @@ final class RecordingJournalStore {
                     commit.frameCount
                 manifest.sources[index].firstCommittedFrameOffset =
                     commit.firstCommittedFrameOffset
+            }
+            if shouldMarkAvailability,
+               let markerIndex,
+               let availabilityMarker {
+                switch availabilityMarker {
+                case .unavailableAtStart:
+                    manifest.sources[markerIndex].unavailableAtStart = true
+                case .unavailableDuringRecording:
+                    manifest.sources[markerIndex].unavailableDuringRecording = true
+                }
             }
             manifest.generation = nextGeneration
             manifest.updatedAt = now()

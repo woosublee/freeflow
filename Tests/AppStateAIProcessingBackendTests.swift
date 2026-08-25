@@ -207,7 +207,7 @@ struct AppStateAIProcessingBackendTests {
 
         let recordingStart = sourceBlock(
             in: try appStateSource(),
-            from: "private func startRecording(triggerMode: RecordingTriggerMode",
+            from: "private func startRecording(",
             to: "/// Whether the configured recording flow will actually exercise Accessibility."
         )
         let flush = requiredRange(

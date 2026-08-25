@@ -6,6 +6,7 @@ struct RecordingJournalManifestTests {
         do {
             try canonicalFormatMatchesRecorderContract()
             try manifestRoundTripPreservesStableMetadata()
+            try legacySourceWithoutUnavailableMarkerRemainsExpected()
             try manifestDecodesLegacyPreserveExactWordingKey()
             try legacyPromotionWithoutRecoveryModeDefaultsToComplete()
             try promotionRoundTripPreservesRecoveryMode()
@@ -53,6 +54,34 @@ struct RecordingJournalManifestTests {
 
         try expectEqual(decoded, manifest, "manifest round trip")
         try decoded.validate()
+    }
+
+    private static func legacySourceWithoutUnavailableMarkerRemainsExpected() throws {
+        let manifest = try makeManifest()
+        let data = try RecordingJournalCoding.makeEncoder().encode(manifest)
+        let json = String(decoding: data, as: UTF8.self)
+        guard !json.contains("unavailableAtStart"),
+              !json.contains("unavailableDuringRecording") else {
+            throw TestFailure(
+                "legacy source availability must remain absent from schema-v1 JSON"
+            )
+        }
+
+        let decoded = try RecordingJournalCoding.makeDecoder().decode(
+            RecordingJournalManifest.self,
+            from: data
+        )
+
+        try expectEqual(
+            decoded.sources[0].unavailableAtStart,
+            nil,
+            "legacy source remains expected to provide audio"
+        )
+        try expectEqual(
+            decoded.sources[0].unavailableDuringRecording,
+            nil,
+            "legacy source has no runtime-loss marker"
+        )
     }
 
     private static func manifestDecodesLegacyPreserveExactWordingKey() throws {

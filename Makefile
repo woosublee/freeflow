@@ -78,6 +78,7 @@ FULL_SOURCE_APP_STATE_TESTS = \
 	Tests/NativeWhisperModelWorkflowTests.swift \
 	Tests/LocalAIModelWorkflowTests.swift \
 	Tests/AppStateStorageSafetyTests.swift \
+	Tests/CombinedCaptureDegradationTests.swift \
 	Tests/AppStateHistoryProtectionSourceTests.swift \
 	Tests/AppStateTranscriptionConfigurationTests.swift \
 	Tests/AppStateAIProcessingBackendTests.swift \
@@ -643,6 +644,8 @@ _test-recording: | $(TEST_BUILD_DIR)
 	@$(TEST_BUILD_DIR)/SystemAudioRecorderSourceTests
 	@swiftc -parse-as-library Tests/SystemDefaultAndSystemAudioRecorderSourceTests.swift -o $(TEST_BUILD_DIR)/SystemDefaultAndSystemAudioRecorderSourceTests
 	@$(TEST_BUILD_DIR)/SystemDefaultAndSystemAudioRecorderSourceTests
+	@swiftc -parse-as-library Tests/RecordingOverlayNoticeSourceTests.swift -o $(TEST_BUILD_DIR)/RecordingOverlayNoticeSourceTests
+	@$(TEST_BUILD_DIR)/RecordingOverlayNoticeSourceTests
 	@swiftc -parse-as-library "$(CURDIR)/Sources/CanonicalPCM16WAV.swift" "$(CURDIR)/Sources/AudioMixdownService.swift" "$(CURDIR)/Tests/AudioMixdownServiceTests.swift" -o $(TEST_BUILD_DIR)/AudioMixdownServiceTests
 	@$(TEST_BUILD_DIR)/AudioMixdownServiceTests
 	@swiftc -parse-as-library "$(CURDIR)/Sources/AudioImportConversionService.swift" "$(CURDIR)/Tests/AudioImportConversionServiceTests.swift" -o $(TEST_BUILD_DIR)/AudioImportConversionServiceTests
