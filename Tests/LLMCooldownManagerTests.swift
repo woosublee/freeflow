@@ -5,6 +5,10 @@ struct LLMCooldownManagerTests {
     static func main() async {
         testIdentityNormalizesProviderAndModel()
         testRateLimitHeaderParsing()
+        testNonExhaustedDailyHeaderUsesRetryAfter()
+        testRetryAndTokenDurationUnits()
+        testMalformedDurationsUseSafeFallback()
+        testStorageKeyIsStableAndProviderScoped()
         await testProviderIsolationAndExpiration()
         await testDailyCooldownPersists()
         await testEffectivePrimaryUsesAvailableFallback()
@@ -51,6 +55,66 @@ struct LLMCooldownManagerTests {
         assert(dailyCooldown.seconds == 3723.5)
         assert(dailyCooldown.isDaily)
         assert(LLMCooldownManager.rateLimitCooldown(from: malformed).seconds == 60)
+    }
+
+    private static func testNonExhaustedDailyHeaderUsesRetryAfter() {
+        let response = HTTPURLResponse(
+            url: URL(string: "https://api.example.com")!,
+            statusCode: 429,
+            httpVersion: nil,
+            headerFields: [
+                "x-ratelimit-remaining-requests": "1",
+                "x-ratelimit-reset-requests": "1h",
+                "Retry-After": "7.66",
+            ]
+        )!
+
+        let cooldown = LLMCooldownManager.rateLimitCooldown(from: response)
+        assert(abs(cooldown.seconds - 7.66) < 0.0001)
+        assert(!cooldown.isDaily)
+    }
+
+    private static func testRetryAndTokenDurationUnits() {
+        let url = URL(string: "https://api.example.com")!
+        let milliseconds = HTTPURLResponse(
+            url: url,
+            statusCode: 429,
+            httpVersion: nil,
+            headerFields: ["Retry-After": "120ms"]
+        )!
+        let tokenReset = HTTPURLResponse(
+            url: url,
+            statusCode: 429,
+            httpVersion: nil,
+            headerFields: ["x-ratelimit-reset-tokens": "8.25s"]
+        )!
+
+        assert(abs(LLMCooldownManager.rateLimitCooldown(from: milliseconds).seconds - 0.12) < 0.0001)
+        assert(abs(LLMCooldownManager.rateLimitCooldown(from: tokenReset).seconds - 8.25) < 0.0001)
+    }
+
+    private static func testMalformedDurationsUseSafeFallback() {
+        let url = URL(string: "https://api.example.com")!
+        for invalid in ["-3", "nan", "inf", "1d", "1h30", ""] {
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 429,
+                httpVersion: nil,
+                headerFields: ["Retry-After": invalid]
+            )!
+            let cooldown = LLMCooldownManager.rateLimitCooldown(from: response)
+            assert(cooldown.seconds == 60)
+            assert(!cooldown.isDaily)
+        }
+    }
+
+    private static func testStorageKeyIsStableAndProviderScoped() {
+        let first = LLMCooldownIdentity(baseURL: " HTTPS://API.EXAMPLE.COM/v1/ ", model: " Model-A ")
+        let equivalent = LLMCooldownIdentity(baseURL: "https://api.example.com/v1", model: "model-a")
+        let otherProvider = LLMCooldownIdentity(baseURL: "https://other.example.com/v1", model: "model-a")
+
+        assert(first.storageKey == equivalent.storageKey)
+        assert(first.storageKey != otherProvider.storageKey)
     }
 
     private static func testProviderIsolationAndExpiration() async {

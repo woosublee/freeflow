@@ -73,6 +73,23 @@ struct UpstreamMergeBehaviorTests {
         checkContains(transcriptionService, "transcribeLargeCanonicalWAV(fileURL: fileURL)", "Oversized canonical WAV should use the cloud chunking core")
         checkNotContains(transcriptionService, "body=%{public}@", "Cloud failures should not log raw provider response bodies")
 
+        let transcriptTextCore = try read("Sources/TranscriptTextCore.swift")
+        checkNotContains(
+            transcriptTextCore,
+            "Skipping hallucination filter for '%{public}@'",
+            "Hallucination diagnostics should not log normalized user speech"
+        )
+        checkContains(
+            transcriptTextCore,
+            "Skipping hallucination filter: provider response has no segments/no_speech metadata",
+            "Missing hallucination metadata should retain a static diagnostic"
+        )
+        checkContains(
+            transcriptTextCore,
+            "Skipping hallucination filter: provider response omitted no_speech_prob",
+            "Missing no-speech probability should retain a static diagnostic"
+        )
+
         checkContains(appState, "fileService.transcribe(fileURL: fileURL)", "Realtime file fallback should continue through TranscriptionService")
 
         let appContextService = try read("Sources/AppContextService.swift")

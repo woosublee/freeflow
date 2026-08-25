@@ -14,6 +14,10 @@ struct BuildMetadataTests {
         try testMakefileBuildsAppBundleForLocalizationValidation()
         try testTranscriptionShardBuildsLocalizationResources()
         try testTestsWorkflowRunsRequiredChecksInParallel()
+        try testMakefileExposesRepositoryValidationTargets()
+        try testTestsWorkflowRequiresRepositoryValidation()
+        try testReleaseWorkflowsPinActionsAndScopeGitCredentials()
+        try testRepositoryMaintenanceFilesAreQuillSpecific()
         try testMakefileStripsExtendedAttributesDuringCodesignStaging()
         try testMakefileStripsExtendedAttributesDuringDmgStaging()
         try testMakefileCreatesDmgWithoutFinderMetadata()
@@ -160,6 +164,103 @@ struct BuildMetadataTests {
         assertContains(workflow, "if: ${{ always() }}")
         assertContains(workflow, "TEST_SHARDS_RESULT: ${{ needs.test-shards.result }}")
         assertContains(workflow, "LOCALIZATION_RESULT: ${{ needs.localization.result }}")
+        assertContains(workflow, "VALIDATION_RESULT: ${{ needs.repository-validation.result }}")
+    }
+
+    private static func testMakefileExposesRepositoryValidationTargets() throws {
+        let makefile = try String(contentsOfFile: "Makefile", encoding: .utf8)
+
+        assertContains(makefile, "\nvalidate:")
+        assertContains(makefile, "\ncheck: validate test")
+    }
+
+    private static func testTestsWorkflowRequiresRepositoryValidation() throws {
+        let workflow = try String(contentsOfFile: ".github/workflows/tests.yml", encoding: .utf8)
+
+        assertContains(workflow, "repository-validation:")
+        assertContains(workflow, "run: make validate")
+        assertContains(workflow, "git diff --check")
+        assertContains(workflow, "      - repository-validation")
+        assertContains(workflow, "VALIDATION_RESULT: ${{ needs.repository-validation.result }}")
+        assertContains(workflow, "test \"$VALIDATION_RESULT\" = \"success\"")
+        assertDoesNotContain(workflow, "make check")
+    }
+
+    private static func testReleaseWorkflowsPinActionsAndScopeGitCredentials() throws {
+        let releaseWorkflowPaths = [
+            ".github/workflows/dev-release.yml",
+            ".github/workflows/manual-release.yml",
+            ".github/workflows/release.yml",
+            ".github/workflows/self-signed-release.yml",
+        ]
+        let workflowPaths = releaseWorkflowPaths + [".github/workflows/tests.yml"]
+
+        for path in workflowPaths {
+            let workflow = try String(contentsOfFile: path, encoding: .utf8)
+            let checkoutCount = workflow.components(separatedBy: "actions/checkout@").count - 1
+            let credentialOptOutCount = workflow.components(
+                separatedBy: "persist-credentials: false"
+            ).count - 1
+
+            precondition(checkoutCount > 0, "Expected checkout action in \(path)")
+            precondition(
+                checkoutCount == credentialOptOutCount,
+                "Every checkout in \(path) must disable persisted credentials"
+            )
+
+            for line in workflow.split(separator: "\n") {
+                guard let usesRange = line.range(of: "uses: ") else { continue }
+                let action = line[usesRange.upperBound...].split(separator: " ", maxSplits: 1)[0]
+                guard let atIndex = action.lastIndex(of: "@") else {
+                    preconditionFailure("Expected pinned action reference in \(path): \(action)")
+                }
+                let revision = String(action[action.index(after: atIndex)...])
+                assertMatches(revision, "^[0-9a-f]{40}$")
+            }
+        }
+
+        for path in releaseWorkflowPaths {
+            let workflow = try String(contentsOfFile: path, encoding: .utf8)
+            assertContains(workflow, "softprops/action-gh-release@")
+            assertDoesNotContain(workflow, "Install build tools")
+            assertDoesNotContain(workflow, "brew install create-dmg fileicon")
+            assertDoesNotContain(workflow, "aws/tap")
+        }
+
+        for path in [
+            ".github/workflows/dev-release.yml",
+            ".github/workflows/release.yml",
+            ".github/workflows/self-signed-release.yml",
+        ] {
+            let workflow = try String(contentsOfFile: path, encoding: .utf8)
+            assertContains(workflow, "GITHUB_TOKEN: ${{ github.token }}")
+            assertContains(workflow, "AUTHORIZATION: basic $AUTHORIZATION")
+            assertContains(workflow, "http.https://github.com/.extraheader")
+            assertContains(workflow, "--unset-all http.https://github.com/.extraheader")
+        }
+    }
+
+    private static func testRepositoryMaintenanceFilesAreQuillSpecific() throws {
+        let agents = try String(contentsOfFile: "AGENTS.md", encoding: .utf8)
+        let bug = try String(contentsOfFile: ".github/ISSUE_TEMPLATE/bug.yml", encoding: .utf8)
+        let feature = try String(contentsOfFile: ".github/ISSUE_TEMPLATE/feature.yml", encoding: .utf8)
+        let config = try String(contentsOfFile: ".github/ISSUE_TEMPLATE/config.yml", encoding: .utf8)
+        let dependabot = try String(contentsOfFile: ".github/dependabot.yml", encoding: .utf8)
+        let pullRequest = try String(contentsOfFile: ".github/pull_request_template.md", encoding: .utf8)
+
+        for content in [agents, bug, feature, pullRequest] {
+            assertContains(content, "Quill")
+            assertDoesNotContain(content, "FreeFlow")
+            assertDoesNotContain(content, "zachlatta/freeflow")
+        }
+        assertContains(agents, "self-signed-release.yml")
+        assertContains(agents, "Google Calendar OAuth")
+        assertContains(agents, "appcast.xml")
+        assertContains(config, "blank_issues_enabled: true")
+        assertDoesNotContain(config, "discussions")
+        assertContains(dependabot, "timezone: Asia/Seoul")
+        assertContains(pullRequest, "`make check`")
+        precondition(!FileManager.default.fileExists(atPath: ".github/workflows/check.yml"))
     }
 
     private static func testMakefileStripsExtendedAttributesDuringCodesignStaging() throws {

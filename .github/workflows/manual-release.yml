@@ -30,9 +30,10 @@ jobs:
   build-and-release:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Resolve release metadata
         id: metadata
@@ -99,9 +100,6 @@ jobs:
           plutil -replace CFBundleVersion -string "${{ steps.metadata.outputs.build_number }}" Info.plist
           plutil -replace QuillBuildTag -string "${{ steps.metadata.outputs.tag }}" Info.plist
 
-      - name: Install build tools
-        run: brew install create-dmg fileicon
-
       - name: Build universal DMG
         run: make dmg ARCH=universal APP_NAME=Quill BUNDLE_ID=com.woosublee.quill CODESIGN_IDENTITY=- APP_VERSION="${{ steps.metadata.outputs.version }}" BUILD_NUMBER="${{ steps.metadata.outputs.build_number }}" BUILD_TAG="${{ steps.metadata.outputs.tag }}"
 
@@ -140,7 +138,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create release
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ steps.metadata.outputs.tag }}
           target_commitish: ${{ github.sha }}

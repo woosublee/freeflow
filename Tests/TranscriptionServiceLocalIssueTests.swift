@@ -9,6 +9,7 @@ struct TranscriptionServiceLocalIssueTests {
         try await testMissingLegacyRuntimeUsesStableSafeIssue()
         try await testMissingFFmpegUsesDependencyIssue()
         try await testLegacyProcessFailureKeepsOutputPrivate()
+        try await testLegacySuccessWithoutTranscriptTextFails()
         try await testNativeWhisperPreflightStopsBeforeAudioPreparation()
         try await testNativeWhisperAudioPreparationPreservesCancellation()
         try await testNativeWhisperUsesOneSnapshotForPreflightAndTranscription()
@@ -77,6 +78,38 @@ struct TranscriptionServiceLocalIssueTests {
             let payload = try decodedPayloadString(issue.record.encodedStatus())
             try expect(!payload.contains(marker), "persisted record excludes process output")
             try expect(issue.privateDiagnostic.contains(marker), "process output remains private diagnostic")
+        }
+    }
+
+    private static func testLegacySuccessWithoutTranscriptTextFails() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = try writeExecutable(
+            in: root,
+            body: """
+            #!/bin/sh
+            output_dir=""
+            while [ "$#" -gt 0 ]; do
+              if [ "$1" = "--output-dir" ]; then
+                output_dir="$2"
+                break
+              fi
+              shift
+            done
+            printf '%s\n' '{"error":"model load failed"}' > "$output_dir/recording.json"
+            exit 0
+            """
+        )
+        let service = try makeLegacyService(runtimeURL: runtime)
+
+        do {
+            _ = try await service.transcribe(fileURL: try writeAudio(in: root))
+            throw TestFailure("Legacy response without transcript text must fail")
+        } catch let issue as QuillUserIssueError {
+            try expect(
+                issue.record.code == .localTranscriptionFailed,
+                "legacy response without text uses transcription failure issue"
+            )
         }
     }
 

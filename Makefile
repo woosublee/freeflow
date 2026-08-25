@@ -43,6 +43,8 @@ APP_EXECUTABLE = $(MACOS_DIR)/$(APP_NAME)
 APP_EXECUTABLE_TARGET := $(subst $(space),\ ,$(APP_EXECUTABLE))
 
 SOURCES = $(shell find Sources -name '*.swift' -type f | LC_ALL=C sort)
+SHELL_SCRIPTS = $(shell git ls-files '*.sh' | LC_ALL=C sort)
+YAML_FILES = $(shell git ls-files '*.yml' '*.yaml' | LC_ALL=C sort)
 PIPELINE_HISTORY_LANGUAGE_SOURCES = Sources/TranscriptionLanguage.swift Sources/SpokenLanguageResolution.swift Sources/MeetingSummaryModels.swift
 RESOURCES = $(CONTENTS)/Resources
 LOCALIZATION_CATALOG = Resources/Localization/Localizable.xcstrings
@@ -104,7 +106,7 @@ ICON_ICNS = Resources/AppIcon.icns
 endif
 
 # Usage: make install CODESIGN_IDENTITY="Apple Development: you@example.com (TEAMID)"
-.PHONY: all clean run icon dmg codesign-dmg notarize install reset-permissions install-and-run check-test-wiring test test-core test-recording test-transcription test-local-ai-integration _test-core _test-recording _test-transcription localization-bundle-test native-whisper-helper-test llama-server-helper-test print-app-version print-build-number print-build-tag print-version-metadata FORCE
+.PHONY: all check clean run icon dmg codesign-dmg notarize install reset-permissions install-and-run check-test-wiring test test-core test-recording test-transcription test-local-ai-integration _test-core _test-recording _test-transcription localization-bundle-test native-whisper-helper-test llama-server-helper-test print-app-version print-build-number print-build-tag print-version-metadata validate FORCE
 
 all: $(APP_EXECUTABLE_TARGET)
 
@@ -509,6 +511,13 @@ test-local-ai-integration: $(TEST_BUILD_DIR)/LocalAIIntegrationTests
 		export QUILL_LOCAL_AI_INTEGRATION_BASE_URL="http://127.0.0.1:$$port/v1"; \
 		$(TEST_BUILD_DIR)/LocalAIIntegrationTests
 
+check: validate test
+
+validate:
+	plutil -lint Info.plist Quill.entitlements
+	@set -e; for script in $(SHELL_SCRIPTS); do bash -n "$$script"; done
+	@ruby -e 'require "yaml"; ARGV.each { |file| YAML.load_file(file) }' $(YAML_FILES)
+
 test: check-test-wiring
 	@$(call RUN_TIMED_TARGET,_test-core,core)
 	@$(call RUN_TIMED_TARGET,_test-recording,recording)
@@ -529,6 +538,10 @@ _test-core: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(TEST_BUILD_DIR)/Localizatio
 	@$(TEST_BUILD_DIR)/ShortcutMatcherTests
 	@$(TEST_BUILD_DIR)/ShortcutCaptureKeyHandlingTests
 	@$(TEST_BUILD_DIR)/ShortcutValidationMessagesTests
+	@swiftc -parse-as-library Sources/AIModelCapabilities.swift Sources/ModelConfiguration.swift Tests/ModelConfigurationTests.swift -o $(TEST_BUILD_DIR)/ModelConfigurationTests
+	@$(TEST_BUILD_DIR)/ModelConfigurationTests
+	@swiftc -parse-as-library Sources/AppName.swift Sources/ShortcutCore/DictationShortcutSessionController.swift Sources/ShortcutCore/ShortcutMatcher.swift Sources/ShortcutCore/ShortcutModels.swift Tests/ShortcutCoreTests.swift -o $(TEST_BUILD_DIR)/ShortcutCoreTests
+	@$(TEST_BUILD_DIR)/ShortcutCoreTests
 	@$(TEST_BUILD_DIR)/CalendarEventMatcherTests
 	@swiftc -parse-as-library Sources/RecordingJournalFailure.swift Sources/RecoveredRecordingContext.swift Sources/RecoveredRecordingMode.swift Sources/RecordingJournalModels.swift Sources/LocalizedStringLookup.swift Sources/CalendarIntegrationModels.swift Sources/QuillUserIssue.swift $(PIPELINE_HISTORY_LANGUAGE_SOURCES) Sources/PipelineHistoryItem.swift Sources/NoteTitleResolver.swift Tests/NoteTitleResolutionTests.swift -o $(TEST_BUILD_DIR)/NoteTitleResolutionTests
 	@$(TEST_BUILD_DIR)/NoteTitleResolutionTests
@@ -655,6 +668,8 @@ _test-recording: | $(TEST_BUILD_DIR)
 	@swiftc -parse-as-library Sources/AudioInputDevice.swift Tests/SystemAudioAppStateRoutingTests.swift -o $(TEST_BUILD_DIR)/SystemAudioAppStateRoutingTests
 	@$(TEST_BUILD_DIR)/SystemAudioAppStateRoutingTests
 _test-transcription: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(FULL_SOURCE_TRANSCRIPTION_RUNNER) $(FULL_SOURCE_APP_STATE_RUNNER) $(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests $(TEST_BUILD_DIR)/PipelineHistoryStoreRecoveryTests $(TEST_BUILD_DIR)/HistoryArchiveTransitionTests $(TEST_BUILD_DIR)/HistoryRecoveryServiceTests | $(TEST_BUILD_DIR)
+	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/TranscriptionLanguage.swift Sources/SpokenLanguageResolution.swift Sources/TranscriptTextCore.swift Tests/TranscriptTextCoreTests.swift -o $(TEST_BUILD_DIR)/TranscriptTextCoreTests
+	@$(TEST_BUILD_DIR)/TranscriptTextCoreTests
 	@$(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests
 	@$(TEST_BUILD_DIR)/PipelineHistoryStoreRecoveryTests
 	@$(TEST_BUILD_DIR)/HistoryArchiveTransitionTests
