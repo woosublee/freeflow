@@ -668,6 +668,8 @@ _test-recording: | $(TEST_BUILD_DIR)
 	@swiftc -parse-as-library Sources/AudioInputDevice.swift Tests/SystemAudioAppStateRoutingTests.swift -o $(TEST_BUILD_DIR)/SystemAudioAppStateRoutingTests
 	@$(TEST_BUILD_DIR)/SystemAudioAppStateRoutingTests
 _test-transcription: $(SPARKLE_STAMP) $(LOCALIZATION_STAMP) $(FULL_SOURCE_TRANSCRIPTION_RUNNER) $(FULL_SOURCE_APP_STATE_RUNNER) $(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests $(TEST_BUILD_DIR)/PipelineHistoryStoreRecoveryTests $(TEST_BUILD_DIR)/HistoryArchiveTransitionTests $(TEST_BUILD_DIR)/HistoryRecoveryServiceTests | $(TEST_BUILD_DIR)
+	@swiftc -parse-as-library Sources/LocalizedStringLookup.swift Sources/TranscriptionLanguage.swift Sources/SpokenLanguageResolution.swift Sources/TranscriptTextCore.swift Tests/TranscriptTextCoreTests.swift -o $(TEST_BUILD_DIR)/TranscriptTextCoreTests
+	@$(TEST_BUILD_DIR)/TranscriptTextCoreTests
 	@$(TEST_BUILD_DIR)/PipelineHistoryMeetingSummaryTests
 	@$(TEST_BUILD_DIR)/PipelineHistoryStoreRecoveryTests
 	@$(TEST_BUILD_DIR)/HistoryArchiveTransitionTests

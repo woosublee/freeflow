@@ -1,0 +1,203 @@
+import Foundation
+
+@main
+struct TranscriptTextCoreTests {
+    static func main() {
+        testJSONTranscriptAndLanguageParsing()
+        testPlainTextProviderResponseIsPreserved()
+        testJSONWithoutTextIsRejected()
+        testMalformedJSONLikeResponsesAreRejected()
+        testOrdinaryTextContainingBracesIsPreserved()
+        testInvalidTranscriptResponses()
+        testHighConfidenceHallucinationsAreSuppressed()
+        testPossibleRealSpeechIsPreserved()
+        testPostProcessedTranscriptSanitization()
+        testModeSpecificSanitization()
+        print("TranscriptTextCoreTests passed")
+    }
+
+    private static func testJSONTranscriptAndLanguageParsing() {
+        let data = jsonData(["text": " Synthetic transcript. ", "language": "ko"])
+        expectEqual(
+            try? TranscriptionResponseParser.parse(data),
+            Optional(
+                ParsedTranscriptionResponse(
+                    text: " Synthetic transcript. ",
+                    engineLanguageCode: "ko"
+                )
+            )
+        )
+
+        var bomData = Data([0xEF, 0xBB, 0xBF])
+        bomData.append(data)
+        expectEqual(
+            try? TranscriptionResponseParser.parse(bomData),
+            Optional(
+                ParsedTranscriptionResponse(
+                    text: " Synthetic transcript. ",
+                    engineLanguageCode: "ko"
+                )
+            )
+        )
+
+        let emptyData = jsonData(["text": ""])
+        expectEqual(
+            try? TranscriptionResponseParser.parse(emptyData),
+            Optional(ParsedTranscriptionResponse(text: "", engineLanguageCode: nil))
+        )
+    }
+
+    private static func testPlainTextProviderResponseIsPreserved() {
+        let parsed = try? TranscriptionResponseParser.parse(
+            Data("  first line\nsecond line  ".utf8)
+        )
+        expectEqual(parsed?.engineLanguageCode, nil as String?)
+        expectEqual(
+            parsed.map { TranscriptTextNormalizer.normalized($0.text) },
+            Optional("first line second line")
+        )
+    }
+
+    private static func testJSONWithoutTextIsRejected() {
+        expectInvalidResponse(Data("{\"error\":\"upstream unavailable\"}".utf8))
+        expectInvalidResponse(Data("[\"unexpected\"]".utf8))
+        expectInvalidResponse(Data("{}".utf8))
+        expectInvalidResponse(Data("[]".utf8))
+    }
+
+    private static func testMalformedJSONLikeResponsesAreRejected() {
+        expectInvalidResponse(Data("{malformed synthetic JSON".utf8))
+        expectInvalidResponse(Data("[malformed synthetic JSON".utf8))
+        expectInvalidResponse(Data("\u{FEFF}  {malformed synthetic JSON".utf8))
+    }
+
+    private static func testOrdinaryTextContainingBracesIsPreserved() {
+        let parsed = try? TranscriptionResponseParser.parse(
+            Data("Say {hello} literally.".utf8)
+        )
+        expectEqual(parsed?.text, "Say {hello} literally.")
+    }
+
+    private static func testInvalidTranscriptResponses() {
+        expectInvalidResponse(Data())
+        expectInvalidResponse(Data(" \n\t ".utf8))
+        expectInvalidResponse(Data("...?!".utf8))
+        expectInvalidResponse(Data([0xFF, 0xFE]))
+    }
+
+    private static func testHighConfidenceHallucinationsAreSuppressed() {
+        let atThreshold = jsonData([
+            "text": "Thank you.",
+            "segments": [["no_speech_prob": 0.1]]
+        ])
+        expectEqual(
+            (try? TranscriptionResponseParser.parse(atThreshold))?.text,
+            Optional("")
+        )
+
+        let normalizedPhrase = jsonData([
+            "text": "  THANK YOU FOR WATCHING!!!  ",
+            "segments": [["no_speech_prob": 0.9]]
+        ])
+        expectEqual(
+            (try? TranscriptionResponseParser.parse(normalizedPhrase))?.text,
+            Optional("")
+        )
+
+    }
+
+    private static func testPossibleRealSpeechIsPreserved() {
+        let lowProbability = jsonData([
+            "text": "Thank you.",
+            "segments": [["no_speech_prob": 0.099]]
+        ])
+        expectEqual(
+            (try? TranscriptionResponseParser.parse(lowProbability))?.text,
+            Optional("Thank you.")
+        )
+
+        let shortPhrase = jsonData([
+            "text": "You.",
+            "segments": [["no_speech_prob": 0.9]]
+        ])
+        expectEqual(
+            (try? TranscriptionResponseParser.parse(shortPhrase))?.text,
+            Optional("You.")
+        )
+
+        let missingMetadata = jsonData(["text": "Thank you."])
+        expectEqual(
+            (try? TranscriptionResponseParser.parse(missingMetadata))?.text,
+            Optional("Thank you.")
+        )
+
+        let missingProbability = jsonData([
+            "text": "Thank you.",
+            "segments": [["synthetic": true]]
+        ])
+        expectEqual(
+            (try? TranscriptionResponseParser.parse(missingProbability))?.text,
+            Optional("Thank you.")
+        )
+
+        let unrelatedSpeech = jsonData([
+            "text": "Synthetic project update.",
+            "segments": [["no_speech_prob": 0.95]]
+        ])
+        expectEqual(
+            (try? TranscriptionResponseParser.parse(unrelatedSpeech))?.text,
+            Optional("Synthetic project update.")
+        )
+    }
+
+    private static func testPostProcessedTranscriptSanitization() {
+        expectEqual(
+            TranscriptOutputSanitizer.postProcessedTranscript("  \"Synthetic output.\" \n"),
+            "Synthetic output."
+        )
+        expectEqual(TranscriptOutputSanitizer.postProcessedTranscript("EMPTY"), "")
+        expectEqual(TranscriptOutputSanitizer.postProcessedTranscript("\"EMPTY\""), "")
+        expectEqual(TranscriptOutputSanitizer.postProcessedTranscript("empty"), "empty")
+        expectEqual(TranscriptOutputSanitizer.postProcessedTranscript("  \n "), "")
+    }
+
+    private static func testModeSpecificSanitization() {
+        expectEqual(
+            TranscriptOutputSanitizer.verbatimTranslation("  \"EMPTY\"  "),
+            "EMPTY"
+        )
+        expectEqual(
+            TranscriptOutputSanitizer.verbatimTranslation(" \"Literal synthetic text.\" "),
+            "Literal synthetic text."
+        )
+        expectEqual(
+            TranscriptOutputSanitizer.commandModeTranscript("  \"Keep command quotes\" \n"),
+            "\"Keep command quotes\""
+        )
+    }
+
+    private static func jsonData(_ object: [String: Any]) -> Data {
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else {
+            fatalError("Synthetic JSON fixture should be serializable")
+        }
+        return data
+    }
+
+    private static func expectInvalidResponse(_ data: Data) {
+        do {
+            _ = try TranscriptionResponseParser.parse(data)
+            preconditionFailure("Expected invalid response error")
+        } catch let error as TranscriptionResponseParsingError {
+            expectEqual(error, .invalidResponse)
+        } catch {
+            preconditionFailure("Expected TranscriptionResponseParsingError, got \(error)")
+        }
+    }
+
+    private static func expectEqual<T: Equatable>(_ actual: T, _ expected: T) {
+        precondition(
+            actual == expected,
+            "Expected \(String(describing: expected)), got \(String(describing: actual))"
+        )
+    }
+}

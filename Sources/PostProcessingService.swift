@@ -1140,7 +1140,7 @@ Model: \(model)
             content = ModelConfiguration.stripThinkTags(content)
         }
 
-        let sanitizedTranscript = sanitizePostProcessedTranscript(content)
+        let sanitizedTranscript = TranscriptOutputSanitizer.postProcessedTranscript(content)
         let validator = PostProcessingOutputValidator()
         let acceptedTranscript: String
         switch validator.validate(
@@ -1386,7 +1386,7 @@ Model: \(model)
             throw PostProcessingError.emptyOutput
         }
 
-        let sanitizedTranscript = sanitizeCommandModeTranscript(content)
+        let sanitizedTranscript = TranscriptOutputSanitizer.commandModeTranscript(content)
         return PostProcessingResult(
             transcript: sanitizedTranscript,
             prompt: promptForDisplay
@@ -1440,29 +1440,6 @@ Model: \(model)
 
     static func applyOutputLanguage(_ prompt: String, language: String) -> String {
         prompt + "\n\nIMPORTANT: Translate the final cleaned text into \(language). Output ONLY in \(language), regardless of the original spoken language."
-    }
-
-    private func sanitizePostProcessedTranscript(_ value: String) -> String {
-        var result = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !result.isEmpty else { return "" }
-
-        // Strip outer quotes if the LLM wrapped the entire response
-        if result.hasPrefix("\"") && result.hasSuffix("\"") && result.count > 1 {
-            result.removeFirst()
-            result.removeLast()
-            result = result.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        // Treat the sentinel value as empty
-        if result == "EMPTY" {
-            return ""
-        }
-
-        return result
-    }
-
-    private func sanitizeCommandModeTranscript(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func appearsToHaveExecutedInstruction(

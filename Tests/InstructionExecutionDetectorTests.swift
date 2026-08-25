@@ -10,6 +10,7 @@ struct InstructionExecutionDetectorTests {
         testRawAssistantPreambleDoesNotTriggerDetection()
         testRawAssistantPreambleWithLeadingFillerDoesNotTriggerDetection()
         testTokenOverlapHeuristicStillRunsWithoutOutputLanguage()
+        testFaithfulInstructionCleanupDoesNotTriggerDetection()
         print("InstructionExecutionDetectorTests passed")
     }
 
@@ -81,5 +82,15 @@ struct InstructionExecutionDetectorTests {
         )
 
         assert(detected, "Expected token-overlap detection to keep running without an output language")
+    }
+
+    private static func testFaithfulInstructionCleanupDoesNotTriggerDetection() {
+        let detected = InstructionExecutionDetector.appearsToHaveExecutedInstruction(
+            rawTranscript: "Write an email asking Alex for the synthetic report.",
+            cleanedTranscript: "Write an email asking Alex for the synthetic report.",
+            outputLanguage: ""
+        )
+
+        assert(!detected, "Expected faithful cleanup to preserve instruction wording")
     }
 }

@@ -175,7 +175,7 @@ No credential may remain configured for later build, signing, release, or cleanu
 
 ### Build tool installation
 
-Before installing `create-dmg` and `fileicon`, remove `aws/tap` only when it is present. This preserves the upstream runner compatibility fix without changing Quill's build dependencies.
+Quill's Makefile creates DMGs with the system `hdiutil` tool and does not use `create-dmg` or `fileicon`. Release workflows must not install those unused Homebrew packages or inherit the upstream `aws/tap` workaround.
 
 ### Protected Quill release contracts
 
@@ -221,18 +221,13 @@ Required behavior:
 3. A normal non-empty UTF-8 plain-text response remains supported.
 4. Empty or invalid UTF-8 responses produce a typed invalid-response error.
 5. After trimming whitespace and an optional UTF-8 BOM, a payload whose first character is `{` or `[` but which fails JSON parsing produces a typed invalid-response error instead of being pasted as transcript text.
-6. A valid JSON value without a string `text` field retains current behavior by falling back to the normalized UTF-8 payload.
+6. A valid JSON value without a string `text` field produces a typed invalid-response error so provider error envelopes cannot become transcript text.
 
 Only a leading `{` or `[` marks a failed payload as malformed JSON. Braces elsewhere in ordinary dictated plain text remain supported.
 
 ### Hallucination filtering
 
-Add upstream's `"you"` phrase with the same metadata guard:
-
-- Suppress only when normalized text exactly matches the phrase and the first segment reports `no_speech_prob >= 0.1`.
-- Preserve it below the threshold.
-- Preserve it when segments or `no_speech_prob` are absent.
-- Preserve unrelated speech even at a high no-speech probability.
+Retain Quill's deliberate exclusion of the overly broad `"you"` phrase from the upstream allowlist. Genuine one-word `You.` dictation must remain preserved even when segment metadata reports a high no-speech probability. Other stock hallucination phrases keep the metadata guard and are suppressed only when the first segment reports `no_speech_prob >= 0.1`.
 
 ### Output sanitization
 

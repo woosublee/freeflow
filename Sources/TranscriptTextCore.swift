@@ -2,9 +2,14 @@ import Foundation
 import os.log
 
 private let transcriptTextLog = OSLog(
-    subsystem: "com.zachlatta.freeflow",
+    subsystem: "com.woosublee.quill",
     category: "Transcription"
 )
+
+struct ParsedTranscriptionResponse: Equatable, Sendable {
+    let text: String
+    let engineLanguageCode: String?
+}
 
 enum TranscriptionResponseParsingError: Error, Equatable {
     case invalidResponse
@@ -23,40 +28,106 @@ enum TranscriptionResponseParser {
         "please subscribe",
         "like and subscribe",
         "subtitles by",
-        "subtitles by the amara.org community",
-        "you"
+        "subtitles by the amara.org community"
     ]
 
     // Tuned conservatively against roughly 500 quiet, noisy, and real-speech
     // samples to minimize the chance of filtering genuine short dictations.
     private static let hallucinationNoSpeechThreshold = 0.1
 
-    static func parse(_ data: Data) throws -> String {
-        let object: Any
+    static func parse(_ data: Data) throws -> ParsedTranscriptionResponse {
+        guard let firstByte = firstSignificantByte(in: data) else {
+            throw TranscriptionResponseParsingError.invalidResponse
+        }
+
+        guard firstByte == asciiLeftBrace || firstByte == asciiLeftBracket else {
+            let plainText = try decodedPlainText(data)
+            try validatePlainTextContent(plainText)
+            return ParsedTranscriptionResponse(
+                text: plainText,
+                engineLanguageCode: nil
+            )
+        }
+
+        let object = try decodedJSONObject(data)
+        guard let response = parsedTranscript(from: object) else {
+            throw TranscriptionResponseParsingError.invalidResponse
+        }
+        return response
+    }
+
+    static func parseJSONTranscript(_ data: Data) throws -> ParsedTranscriptionResponse {
+        let object = try decodedJSONObject(data)
+        guard let response = parsedTranscript(from: object) else {
+            throw TranscriptionResponseParsingError.invalidResponse
+        }
+        return response
+    }
+
+    private static let asciiLeftBrace: UInt8 = 0x7B
+    private static let asciiLeftBracket: UInt8 = 0x5B
+    private static let utf8BOM: [UInt8] = [0xEF, 0xBB, 0xBF]
+
+    private static func firstSignificantByte(in data: Data) -> UInt8? {
+        var index = data.startIndex
+        if data.count >= utf8BOM.count,
+           Array(data.prefix(utf8BOM.count)) == utf8BOM {
+            index = data.index(index, offsetBy: utf8BOM.count)
+        }
+
+        while index < data.endIndex {
+            let byte = data[index]
+            if byte != 0x20 && byte != 0x09 && byte != 0x0A && byte != 0x0D {
+                return byte
+            }
+            data.formIndex(after: &index)
+        }
+        return nil
+    }
+
+    private static func decodedJSONObject(_ data: Data) throws -> Any {
         do {
-            object = try JSONSerialization.jsonObject(with: data)
+            return try JSONSerialization.jsonObject(with: data)
         } catch {
             throw TranscriptionResponseParsingError.invalidResponse
         }
+    }
 
-        if let json = object as? [String: Any],
-           let text = json["text"] as? String {
-            if isHallucination(text: text, json: json) {
-                return ""
-            }
-            return text
+    private static func parsedTranscript(from object: Any) -> ParsedTranscriptionResponse? {
+        guard let json = object as? [String: Any],
+              let text = json["text"] as? String else {
+            return nil
         }
+        return ParsedTranscriptionResponse(
+            text: isHallucination(text: text, json: json) ? "" : text,
+            engineLanguageCode: json["language"] as? String
+        )
+    }
 
-        let plainText = String(data: data, encoding: .utf8) ?? ""
-        let text = plainText
-            .components(separatedBy: .newlines)
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
+    private static func decodedPlainText(_ data: Data) throws -> String {
+        guard let text = String(data: data, encoding: .utf8) else {
             throw TranscriptionResponseParsingError.invalidResponse
         }
-
         return text
+    }
+
+    private static func normalizedCandidate(_ text: String) -> String {
+        var candidate = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if candidate.first == "\u{FEFF}" {
+            candidate.removeFirst()
+            candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return candidate
+    }
+
+    private static func validatePlainTextContent(_ text: String) throws {
+        let candidate = normalizedCandidate(text)
+        let contentOnly = candidate.trimmingCharacters(
+            in: CharacterSet.punctuationCharacters.union(.whitespacesAndNewlines)
+        )
+        guard !contentOnly.isEmpty else {
+            throw TranscriptionResponseParsingError.invalidResponse
+        }
     }
 
     private static func isHallucination(text: String, json: [String: Any]) -> Bool {
@@ -71,8 +142,7 @@ enum TranscriptionResponseParser {
             os_log(
                 .info,
                 log: transcriptTextLog,
-                "Skipping hallucination filter for '%{public}@': provider response has no segments/no_speech metadata",
-                normalized
+                "Skipping hallucination filter: provider response has no segments/no_speech metadata"
             )
             return false
         }
@@ -81,8 +151,7 @@ enum TranscriptionResponseParser {
             os_log(
                 .info,
                 log: transcriptTextLog,
-                "Skipping hallucination filter for '%{public}@': provider response omitted no_speech_prob",
-                normalized
+                "Skipping hallucination filter: provider response omitted no_speech_prob"
             )
             return false
         }
@@ -123,61 +192,5 @@ enum TranscriptOutputSanitizer {
 
     static func commandModeTranscript(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    static func appearsToHaveExecutedInstruction(
-        rawTranscript: String,
-        cleanedTranscript: String,
-        outputLanguage: String
-    ) -> Bool {
-        guard outputLanguage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-
-        let rawTokens = significantTokens(in: rawTranscript)
-        let cleanedTokens = significantTokens(in: cleanedTranscript)
-        guard !rawTokens.isEmpty, !cleanedTokens.isEmpty else { return false }
-
-        let instructionMarkers: Set<String> = [
-            "ask", "answer", "compose", "create", "draft", "email", "generate", "make",
-            "message", "prompt", "reply", "respond", "response", "summarize", "tell",
-            "translate", "write", "claude", "chatgpt", "ai", "llm"
-        ]
-        let rawMarkers = rawTokens.intersection(instructionMarkers)
-        guard !rawMarkers.isEmpty else { return false }
-
-        let preservedMarkers = rawMarkers.intersection(cleanedTokens)
-        let overlap = rawTokens.intersection(cleanedTokens)
-        let overlapRatio = Double(overlap.count) / Double(max(rawTokens.count, 1))
-        let assistantPreamblePattern = #"(?i)^\s*(sure|certainly|absolutely|here(?:'s| is)|i(?:'d| would) be happy to|i can)\b"#
-        let cleanedHasAssistantPreamble = cleanedTranscript.range(
-            of: assistantPreamblePattern,
-            options: .regularExpression
-        ) != nil
-        let rawHasSamePreamble = rawTranscript.range(
-            of: assistantPreamblePattern,
-            options: .regularExpression
-        ) != nil
-
-        return (cleanedHasAssistantPreamble && !rawHasSamePreamble)
-            || (preservedMarkers.isEmpty && overlapRatio < 0.35)
-    }
-
-    private static func significantTokens(in text: String) -> Set<String> {
-        let stopWords: Set<String> = [
-            "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "could",
-            "for", "from", "had", "has", "have", "he", "her", "him", "his", "i", "if",
-            "in", "into", "is", "it", "its", "just", "me", "my", "of", "on", "or", "our",
-            "please", "she", "so", "that", "the", "their", "them", "then", "there", "this",
-            "to", "um", "uh", "was", "we", "were", "what", "when", "where", "who", "with",
-            "would", "you", "your"
-        ]
-
-        let normalized = text.lowercased()
-        let parts = normalized.split { character in
-            !character.isLetter && !character.isNumber
-        }
-
-        return Set(parts.map(String.init).filter { token in
-            token.count > 1 && !stopWords.contains(token)
-        })
     }
 }
