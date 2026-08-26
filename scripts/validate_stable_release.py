@@ -206,14 +206,19 @@ def collect_prerelease_build_records(
 
         tag = release.get("tag_name")
         version = None
+        is_moving_dev_release = tag == "dev"
         if isinstance(tag, str):
             version = parse_prerelease_tag(tag) or parse_stable_tag(tag)
-        if version is None:
+        if version is None and not is_moving_dev_release:
             continue
 
         metadata = version_metadata_loader(tag)
         if metadata is None:
-            if first_appcast_version is not None and version >= first_appcast_version:
+            if is_moving_dev_release or (
+                first_appcast_version is not None
+                and version is not None
+                and version >= first_appcast_version
+            ):
                 raise ValidationError(
                     f"Prerelease {tag} is missing version.mk after Sparkle adoption"
                 )
