@@ -124,6 +124,29 @@ class StableReleaseValidationTests(unittest.TestCase):
             [module.PublishedBuildRecord("v0.2.0", 40)],
         )
 
+    def test_collects_moving_dev_release_build_from_version_metadata(self):
+        releases = [release("dev", None, prerelease=True)]
+        metadata = b"APP_VERSION := 0.1.41\nBUILD_NUMBER := 44\n"
+
+        records = module.collect_prerelease_build_records(
+            releases,
+            lambda tag: metadata,
+            first_appcast_version=(0, 1, 6),
+        )
+
+        self.assertEqual(
+            records,
+            [module.PublishedBuildRecord("dev", 44)],
+        )
+
+    def test_rejects_moving_dev_release_without_version_metadata(self):
+        with self.assertRaises(module.ValidationError):
+            module.collect_prerelease_build_records(
+                [release("dev", None, prerelease=True)],
+                lambda tag: None,
+                first_appcast_version=(0, 1, 6),
+            )
+
     def test_prerelease_build_parser_uses_last_make_assignment(self):
         releases = [release("v0.2.0-beta.1", None, prerelease=True)]
         metadata = b"BUILD_NUMBER := 40\nBUILD_NUMBER := 50\n"

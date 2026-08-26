@@ -8,6 +8,21 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [0.1.41] - 2026-08-26
+
+### Improved
+
+- Continued `System Default + System Audio` recordings with the available source when one recorder fails to start after the required permissions are granted, while showing a persistent notice that identifies the missing and active inputs.
+- Opened the Note Browser and started MCP integrations immediately after first-run setup, matching the normal relaunch path without starting services twice.
+- Hardened transcript response handling so malformed JSON-like outputs and empty JSON containers are rejected while valid plain-text and one-word dictation remain accepted.
+
+### Fixed
+
+- Preserved Meeting Summary data, Calendar matches, language, processing status, titles, and other note metadata when transcripts are edited.
+- Prevented failed Context captures from entering post-processing or Meeting Summary prompts, and classified unusable provider responses accurately.
+- Prevented Realtime transcription from waiting indefinitely for a final commit by falling back to durable file transcription after a 10-second timeout.
+- Classified oversized transcript-cleanup requests accurately, removed recovery actions that no longer apply after cleanup is disabled, and hid Calendar title suggestions that would not change the note title.
+
 ## [0.1.40] - 2026-08-16
 
 ### Improved
